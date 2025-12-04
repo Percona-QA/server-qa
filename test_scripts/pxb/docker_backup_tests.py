@@ -328,7 +328,7 @@ def test_pxb_docker(test_config, log_file):
     
     # Get MySQL version
     result = run_command(
-        ["sudo", "docker", "exec", "-it", container_name, "mysql", "-uroot", "-pmysql", "-Bse", "SELECT @@version;"],
+        ["sudo", "docker", "exec", container_name, "mysql", "-uroot", "-pmysql", "-Bse", "SELECT @@version;"],
         capture_output=True
     )
     version = result.stdout.strip().replace("Using a password", "").strip()
@@ -337,17 +337,17 @@ def test_pxb_docker(test_config, log_file):
     # Add data to database
     print("Add data in the database")
     run_command(
-        ["sudo", "docker", "exec", "-it", container_name, "mysql", "-uroot", "-pmysql", "-e", "CREATE DATABASE IF NOT EXISTS test;"],
+        ["sudo", "docker", "exec", container_name, "mysql", "-uroot", "-pmysql", "-e", "CREATE DATABASE IF NOT EXISTS test;"],
         check=False,
         log_file=log_file
     )
     run_command(
-        ["sudo", "docker", "exec", "-it", container_name, "mysql", "-uroot", "-pmysql", "-e", "CREATE TABLE test.t1(i INT);"],
+        ["sudo", "docker", "exec", container_name, "mysql", "-uroot", "-pmysql", "-e", "CREATE TABLE test.t1(i INT);"],
         check=False,
         log_file=log_file
     )
     run_command(
-        ["sudo", "docker", "exec", "-it", container_name, "mysql", "-uroot", "-pmysql", "-e", "INSERT INTO test.t1 VALUES (1), (2), (3), (4), (5);"],
+        ["sudo", "docker", "exec", container_name, "mysql", "-uroot", "-pmysql", "-e", "INSERT INTO test.t1 VALUES (1), (2), (3), (4), (5);"],
         check=False,
         log_file=log_file
     )
@@ -360,7 +360,7 @@ def test_pxb_docker(test_config, log_file):
         "sudo", "docker", "run",
         "--volumes-from", container_name,
         "-v", pxb_backup_dir,
-        "-it", "--rm", "--user", "root",
+        "--rm", "--user", "root",
         pxb_docker_image,
         "/bin/bash", "-c",
         f"rm -rf {target_backup_dir}/* ; xtrabackup --backup --datadir=/var/lib/mysql/ --target-dir={target_backup_dir} --user=root --password=mysql ; xtrabackup --prepare --target-dir={target_backup_dir}"
@@ -389,7 +389,7 @@ def test_pxb_docker(test_config, log_file):
         "sudo", "docker", "run",
         "--volumes-from", container_name,
         "-v", pxb_backup_dir,
-        "-it", "--rm", "--user", "root",
+        "--rm", "--user", "root",
         pxb_docker_image,
         "/bin/bash", "-c",
         f"xtrabackup --copy-back --datadir=/var/lib/mysql/ --target-dir={target_backup_dir}"
@@ -424,7 +424,7 @@ def test_pxb_docker(test_config, log_file):
     
     # Verify data
     result = run_command(
-        ["sudo", "docker", "exec", "-it", container_name, "mysql", "-uroot", "-pmysql", "-Bse", "SELECT * FROM test.t1;"],
+        ["sudo", "docker", "exec", container_name, "mysql", "-uroot", "-pmysql", "-Bse", "SELECT * FROM test.t1;"],
         capture_output=True
     )
     

@@ -12,8 +12,9 @@ import sys
 import os
 import time
 import shutil
-import pytest
 from pathlib import Path
+
+import pytest
 
 
 def help():
@@ -244,19 +245,19 @@ def pytest_addoption(parser):
     parser.addoption(
         "--repo-name",
         action="store",
-        required=True,
+        default=None,
         help="Repo name: pxb-24, pxb-80, pxb-8x-innovation, pxb-84-lts, pxb-9x-innovation"
     )
     parser.addoption(
         "--repo-type",
         action="store",
-        required=True,
+        default=None,
         help="Repo type: release, testing, experimental"
     )
     parser.addoption(
         "--server",
         action="store",
-        required=True,
+        default=None,
         help="Server: ps, ms"
     )
     parser.addoption(
@@ -274,11 +275,19 @@ def test_config(request):
     repo_type = request.config.getoption("--repo-type")
     server = request.config.getoption("--server")
     innovation = request.config.getoption("--innovation")
-    
-    # Validate innovation requirement for pxb-8x-innovation
-    if repo_name == "pxb-8x-innovation" and not innovation:
-        pytest.fail("ERR: 'innovation' argument is required for pxb-8x-innovation. Accepted values: 8.1, 8.2")
-    
+
+    # Validate required options
+    if not repo_name:
+        pytest.fail("ERR: '--repo-name' argument is required. Accepted values: pxb-24, pxb-80, pxb-8x-innovation, pxb-84-lts, pxb-9x-innovation")
+    if not repo_type:
+        pytest.fail("ERR: '--repo-type' argument is required. Accepted values: release, testing, experimental")
+    if not server:
+        pytest.fail("ERR: '--server' argument is required. Accepted values: ps, ms")
+
+    # Validate innovation requirement for pxb-8x-innovation and pxb-9x-innovation
+    if repo_name in ("pxb-8x-innovation", "pxb-9x-innovation") and not innovation:
+        pytest.fail(f"ERR: '--innovation' argument is required for {repo_name}. Accepted values: 8.1, 8.2, 8.3, 8.4, 9.1")
+
     try:
         config = get_config(repo_name, repo_type, server, innovation)
         config["repo_type"] = repo_type  # Store repo_type in config for use in test

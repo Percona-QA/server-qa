@@ -74,7 +74,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = f"pxb_backup_data:/backup_{innovation}"
         config["target_backup_dir"] = f"/backup_{innovation}"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql", "-v", "/var/run/mysqld:/var/run/mysqld"]
+        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql:Z", "-v", "/tmp/run/mysqld:/var/run/mysqld:Z"]
     
     elif repo_name == "pxb-8x-innovation":
         if server == "ms":
@@ -95,7 +95,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = f"pxb_backup_data:/backup_{innovation}"
         config["target_backup_dir"] = f"/backup_{innovation}"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql", "-v", "/var/run/mysqld:/var/run/mysqld"]
+        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql:Z", "-v", "/tmp/run/mysqld:/var/run/mysqld:Z"]
     
     elif repo_name == "pxb-80":
         if server == "ms":
@@ -116,7 +116,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = "pxb_backup_data:/backup_80"
         config["target_backup_dir"] = "/backup_80"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql"]
+        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql:Z"]
     
     elif repo_name == "pxb-24":
         if server == "ms":
@@ -137,7 +137,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = "pxb_backup_data:/backup"
         config["target_backup_dir"] = "/backup"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql"]
+        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql:Z"]
     
     elif repo_name == "pxb-84-lts":
         if server == "ms":
@@ -158,7 +158,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = "pxb_backup_data:/backup_84"
         config["target_backup_dir"] = "/backup_84"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql", "-v", "/var/run/mysqld:/var/run/mysqld"]
+        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql:Z", "-v", "/tmp/run/mysqld:/var/run/mysqld:Z"]
     
     else:
         raise ValueError("Invalid version parameter. Exiting")
@@ -184,7 +184,7 @@ def clean_setup(config, log_file=None):
     # Remove mysql_data directory if it exists
     if os.path.exists("/tmp/mysql_data"):
         shutil.rmtree("/tmp/mysql_data")
-    
+
     if log_file:
         with open(log_file, 'a', encoding='utf-8') as f:
             f.write("Removing all images and volumes not being used by any container\n")
@@ -346,27 +346,34 @@ def test_pxb_docker(test_config, log_file):
     print(f"Run {container_name} docker container")
     print(f"Command: {' '.join(start_mysql_cmd)}")
     
-    # Create mysql_data directory
+    # Remove mysql_data directory if it exists to ensure clean start
+    if os.path.exists("/tmp/mysql_data"):
+        shutil.rmtree("/tmp/mysql_data")
+
+    # Create mysql_data directory fresh (MySQL will initialize it)
+    # The :Z flag in the volume mount will handle SELinux context automatically
     os.makedirs("/tmp/mysql_data", exist_ok=True)
     os.chmod("/tmp/mysql_data", 0o777)
     
-    # Create /var/run/mysqld if needed
+    # Create /tmp/run/mysqld if needed (mounted as /var/run/mysqld in container)
     if "/var/run/mysqld" in str(mount_dir):
-        os.makedirs("/var/run/mysqld", exist_ok=True)
-        os.chmod("/var/run/mysqld", 0o777)
-    
+        if os.path.exists("/tmp/run/mysqld"):
+            shutil.rmtree("/tmp/run/mysqld")
+        os.makedirs("/tmp/run/mysqld", exist_ok=True)
+        os.chmod("/tmp/run/mysqld", 0o777)
+
     # Start MySQL container
     try:
         run_command(start_mysql_cmd, log_file=log_file)
     except subprocess.CalledProcessError:
         pytest.fail(f"ERR: The docker command to start {container_name} failed")
-    
+
     # Wait for MySQL to start
     wait_for_mysql_start(container_name, log_file=log_file)
     
     # Sleep for server to fully come up
     time.sleep(20)
-    
+
     # Get MySQL version
     result = run_command(
         ["sudo", "docker", "exec", container_name, "mysql", "-uroot", "-pmysql", "-Bse", "SELECT @@version;"],
@@ -392,11 +399,11 @@ def test_pxb_docker(test_config, log_file):
         check=False,
         log_file=log_file
     )
-    
+
     # Run PXB backup and prepare
     print("Run pxb docker container, take backup and prepare it")
     print(f"Using {config['repo_type']} repo docker image")
-    
+
     backup_cmd = [
         "sudo", "docker", "run",
         "--volumes-from", container_name,
@@ -406,17 +413,17 @@ def test_pxb_docker(test_config, log_file):
         "/bin/bash", "-c",
         f"rm -rf {target_backup_dir}/* ; xtrabackup --backup --datadir=/var/lib/mysql/ --target-dir={target_backup_dir} --user=root --password=mysql ; xtrabackup --prepare --target-dir={target_backup_dir}"
     ]
-    
+
     try:
         run_command(backup_cmd, log_file=log_file)
         print(f"The backup and prepare was successful. Log available at: {os.path.abspath(log_file)}")
     except subprocess.CalledProcessError:
         pytest.fail("ERR: The docker command to run PXB failed")
-    
+
     # Stop the container
     print(f"Stop the {container_name} docker container")
     run_command(["sudo", "docker", "stop", container_name], log_file=log_file)
-    
+
     # Remove and recreate mysql_data directory
     if os.path.exists("/tmp/mysql_data"):
         shutil.rmtree("/tmp/mysql_data")
@@ -435,7 +442,7 @@ def test_pxb_docker(test_config, log_file):
         "/bin/bash", "-c",
         f"xtrabackup --copy-back --datadir=/var/lib/mysql/ --target-dir={target_backup_dir}"
     ]
-    
+
     try:
         run_command(restore_cmd, log_file=log_file)
         print("The restore command was successful")

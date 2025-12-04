@@ -41,7 +41,7 @@ def run_command(cmd, check=True, capture_output=False, log_file=None):
     )
     
     if log_file:
-        with open(log_file, 'a') as f:
+        with open(log_file, 'a', encoding='utf-8') as f:
             f.write(f"Command: {' '.join(cmd)}\n")
             if result.stdout:
                 f.write(f"STDOUT: {result.stdout}\n")
@@ -186,7 +186,7 @@ def clean_setup(config, log_file=None):
         shutil.rmtree("/tmp/mysql_data")
     
     if log_file:
-        with open(log_file, 'a') as f:
+        with open(log_file, 'a', encoding='utf-8') as f:
             f.write("Removing all images and volumes not being used by any container\n")
     
     run_command(["sudo", "docker", "image", "prune", "-a", "-f"], check=False, log_file=log_file)
@@ -194,26 +194,67 @@ def clean_setup(config, log_file=None):
 
 
 def wait_for_mysql_start(container_name, max_wait=180, log_file=None):
-    """Wait for MySQL container to start."""
+    """Wait for MySQL container to start and be ready."""
     print("Waiting for mysql to start...")
     for i in range(1, max_wait + 1):
+        # Check if container exists and get its status
         result = subprocess.run(
-            ["sudo", "docker", "ps", "-a"],
+            ["sudo", "docker", "ps", "-a", "--filter", f"name={container_name}", "--format", "{{.Status}}"],
             capture_output=True,
             text=True
         )
         
-        if container_name in result.stdout and "Up" in result.stdout:
-            # Check if the specific container is up
-            lines = result.stdout.split('\n')
-            for line in lines:
-                if container_name in line and "Up" in line:
+        status = result.stdout.strip()
+
+        # Check if container exited
+        if status and "Exited" in status:
+            # Container exited, check logs
+            log_result = subprocess.run(
+                ["sudo", "docker", "logs", "--tail", "50", container_name],
+                capture_output=True,
+                text=True
+            )
+            error_msg = f"Container {container_name} exited. Logs:\n{log_result.stdout}\n{log_result.stderr}"
+            if log_file:
+                with open(log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"ERROR: {error_msg}\n")
+            raise RuntimeError(f"The mysql container exited unexpectedly. {error_msg}")
+
+        # Check if container is running
+        if status and "Up" in status:
+            # Try to connect to MySQL to verify it's ready
+            try:
+                test_result = subprocess.run(
+                    ["sudo", "docker", "exec", container_name, "mysql", "-uroot", "-pmysql", "-e", "SELECT 1;"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False
+                )
+                if test_result.returncode == 0:
+                    print(f"MySQL container {container_name} is ready")
                     return True
+            except subprocess.TimeoutExpired:
+                # MySQL not ready yet, continue waiting
+                pass
+            except Exception:
+                # Other errors, continue waiting
+                pass
         
         time.sleep(1)
         
         if i == max_wait:
-            raise RuntimeError("The mysql server failed to start in docker container")
+            # Check logs before failing
+            log_result = subprocess.run(
+                ["sudo", "docker", "logs", "--tail", "50", container_name],
+                capture_output=True,
+                text=True
+            )
+            error_msg = f"Container {container_name} failed to start. Status: {status}. Logs:\n{log_result.stdout}\n{log_result.stderr}"
+            if log_file:
+                with open(log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"ERROR: {error_msg}\n")
+            raise RuntimeError(f"The mysql server failed to start in docker container. {error_msg}")
     
     return True
 

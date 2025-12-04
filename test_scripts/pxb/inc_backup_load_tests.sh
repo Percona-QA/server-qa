@@ -1,39 +1,80 @@
 #!/bin/bash
 
-########################################################################
-# Created By Manish Chawla, Percona LLC                                #
-# This script tests backup with a load tool as pquery/pstress/sysbench #
-# Assumption: PS8.0 and PXB8.0 are already installed as tarballs       #
-# Usage:                                                               #
-# 1. Compile pquery/pstress with mysql                                 #
-# 2. Set variables in this script:                                     #
-#    xtrabackup_dir, mysqldir, datadir, backup_dir, qascripts, logdir, #
-#    load_tool, tool_dir, num_tables, table_size, kmip configuration   #
-# 3. Run the script as: ./inc_backup_load_tests.sh <Test Suite>        #
-# 4. Logs are available in: logdir                                     #
-########################################################################
+#############################################################################
+# Created By Manish Chawla, Percona LLC                                     #
+# Modified By Mohit Joshi, Percona LLC
+# This script tests backup with a load tool as pquery/pstress/sysbench      #
+# Assumption: PS and PXB are already installed as tarballs                  #
+# Usage:                                                                    #
+# 1. Compile pquery/pstress with mysql                                      #
+# 2. Set variables in this script:                                          #
+#    xtrabackup_dir, mysqldir, datadir, backup_dir, qascripts, logdir,      #
+#    load_tool, tool_dir, num_tables, table_size, kmip, kms configuration   #
+# 3. For usage run the script as: ./inc_backup_load_tests.sh                #
+# 4. Logs are available in: logdir                                          #
+#############################################################################
 
 # Set script variables
-export xtrabackup_dir="$HOME/pxb_8_0_30_debug/bin"
-export mysqldir="$HOME/PS070722_8_0_29_21_debug"
+export xtrabackup_dir="$HOME/pxb-9.1/bld_9.1/install/bin"
+export mysqldir="$HOME/mysql-9.1/bld_9.1/install"
 export datadir="${mysqldir}/data"
 export backup_dir="$HOME/dbbackup_$(date +"%d_%m_%Y")"
 export PATH="$PATH:$xtrabackup_dir"
 export qascripts="$HOME/percona-qa"
 export logdir="$HOME/backuplogs"
+export mysql_start_timeout=60
+declare -A KMIP_CONFIGS=(
+    # PyKMIP Docker Configuration
+    ["pykmip"]="addr=127.0.0.1,image=mohitpercona/kmip:latest,port=5696,name=kmip_pykmip"
+
+    # Hashicorp Docker Setup Configuration
+    # ["hashicorp"]="addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp-kmip-setup.sh"
+
+    # API Configuration
+    # ["ciphertrust"]="addr=127.0.0.1,port=5696,name=kmip_ciphertrust,setup_script=setup_kmip_api.py"
+)
 
 # Set tool variables
-load_tool="pstress" # Set value as pquery/pstress/sysbench
-num_tables=10 # Used for Sysbench
-table_size=1000 # Used for Sysbench
-tool_dir="$HOME/pstress/src" # Pquery/pstress dir
+load_tool="pstress" # Set value as pstress/sysbench
+num_tables=25 # This will make 50 tables on the database tt_1, tt_1_p, .. tt_25, tt_25_p
+table_size=100
+seconds=60
+threads=5
+tool_dir="$HOME/pstress_9.1/src" # pstress dir
 
-# Set Kmip configuration
-kmip_server_address="0.0.0.0"
-kmip_server_port=5696
-kmip_client_ca="/home/manish.chawla/cert.pem"
-kmip_client_key="/home/manish.chawla/key.pem"
-kmip_server_ca="/home/manish.chawla/ca.pem"
+# PXB Lock option
+LOCK_DDL=on # lock_ddl accepted values (on, reduced)
+
+normalize_version() {
+    local major=0
+    local minor=0
+    local patch=0
+    # Everything after the first three values are ignored
+    if [[ $1 =~ ^([0-9]+)\.([0-9]+)\.?([0-9]*)([\.0-9])*$ ]]; then
+        major=${BASH_REMATCH[1]}
+        minor=${BASH_REMATCH[2]}
+        patch=${BASH_REMATCH[3]}
+    fi
+    printf %02d%02d%02d $major $minor $patch
+  }
+
+VER=$($mysqldir/bin/mysqld --version | awk -F 'Ver ' '{print $2}' | grep -oe '[0-9]\.[0-9][\.0-9]*' | head -n1)
+VERSION=$(normalize_version $VER)
+
+# Check PT Checksum tools compatibility for 8.0 or 8.4
+if ! command -v pt-table-checksum &>/dev/null; then
+    echo "ERROR: pt-table-checksum is not installed" >&2
+    exit 1
+fi
+pt_ver=$(pt-table-checksum --version 2>/dev/null | awk '{print $NF}')
+    # Version-specific requirements
+    if [ "$VERSION" -ge "080000" ] && [ "$VERSION" -lt "080400" ] && [ $(normalize_version "$pt_ver") -lt $(normalize_version "3.0.9") ]; then
+        echo "ERROR: MySQL 8.0 requires pt-table-checksum 3.0.9 or later (but found $pt_ver)"
+        exit 1
+    elif [ "$VERSION" -ge "080400" ] && [ $(normalize_version "$pt_ver") -lt $(normalize_version "3.7.0") ]; then
+        echo "ERROR: MySQL 8.4 and higher versions requires pt-table-checksum 3.7.0 or later (but found $pt_ver)"
+        exit 1
+fi
 
 # For kms tests set the values of KMS_REGION, KMS_KEYID, KMS_AUTH_KEY, KMS_SECRET_KEY in the shell and then run the tests
 kms_region="${KMS_REGION:-us-east-1}"  # Set KMS_REGION to change default value us-east-1
@@ -42,209 +83,208 @@ kms_auth_key="${KMS_AUTH_KEY:-}"
 kms_secret_key="${KMS_SECRET_KEY:-}"
 
 initialize_db() {
-    # This function initializes and starts mysql database
+  # This function initializes and starts mysql database
+  if [ ! -d "${logdir}" ]; then
+    mkdir "${logdir}"
+  fi
 
-    if [ ! -d "${logdir}" ]; then
-        mkdir "${logdir}"
-    fi
+  echo "=>Creating data directory"
+  $mysqldir/bin/mysqld --no-defaults --datadir=$datadir --initialize-insecure > $mysqldir/mysql_install_db.log 2>&1
+  echo "..Data directory created"
 
-    echo "Starting mysql database"
-    pushd "$mysqldir" >/dev/null 2>&1 || exit
-    if [ ! -f "$mysqldir"/all_no_cl ]; then
-        "$qascripts"/startup.sh
-    fi
+  start_server
+  $mysqldir/bin/mysql -uroot -S$mysqldir/socket.sock -e "DROP DATABASE IF EXISTS test"
+  $mysqldir/bin/mysql -uroot -S$mysqldir/socket.sock -e "CREATE DATABASE IF NOT EXISTS test"
+  output=$($mysqldir/bin/mysql -uroot -S$mysqldir/socket.sock -Ne "SELECT COUNT(*) FROM information_schema.engines WHERE engine='InnoDB' AND comment LIKE 'Percona%';")
+  if [ "$output" -eq 1 ]; then
+      server_type="PS"
+      echo "Test is running against: $server_type-$VER"
+      if [ $load_tool == "pstress" ]; then
+          PSTRESS_BINARY=pstress-ps
+          if [ ! -f $tool_dir/pstress-ps ]; then
+              echo "pstress-ps not found. Please compile pstress with Percona Server!"
+              exit 1
+          fi
+      fi
+  elif [ "$output" -eq 0 ]; then
+      server_type="MS"
+      echo "Test is running against: $server_type-$VER"
+      if [ $load_tool == "pstress" ]; then
+          PSTRESS_BINARY=pstress-ms
+          if [ ! -f $tool_dir/pstress-ms ]; then
+              echo "pstress-ms not found. Please compile pstress with Percona Server!"
+              exit 1
+          fi
+      fi
+  else
+      echo "Invalid server version!"
+      exit 1
+  fi
 
-    ./all_no_cl "${MYSQLD_OPTIONS}" >/dev/null 2>&1 
-    "${mysqldir}"/bin/mysqladmin ping --user=root --socket="${mysqldir}"/socket.sock >/dev/null 2>&1
-    if [ "$?" -ne 0 ]; then
-        echo "ERR: Database could not be started in location ${mysqldir}. Please check the directory"
-        popd >/dev/null 2>&1 || exit
-        exit 1
+  # Create data using sysbench
+  if [[ "${load_tool}" = "sysbench" ]]; then
+    if [[ "${MYSQLD_OPTIONS}" != *"keyring"* ]]; then
+      sysbench /usr/share/sysbench/oltp_insert.lua --tables=${num_tables} --table-size=${table_size} --mysql-db=test --mysql-user=root --threads=50 --db-driver=mysql --mysql-socket="${mysqldir}"/socket.sock prepare >"${logdir}"/sysbench.log
+    else
+      # Encryption enabled
+      for ((i=1; i<=num_tables; i++)); do
+        echo "Creating the table sbtest$i..."
+        "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "CREATE TABLE test.sbtest$i (id int(11) NOT NULL AUTO_INCREMENT, k int(11) NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k)) ENGINE=InnoDB DEFAULT CHARSET=latin1 ENCRYPTION='Y';"
+      done
     fi
-    popd >/dev/null 2>&1 || exit
-
-    "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '';"
-    # Create data using sysbench
-    if [[ "${load_tool}" = "sysbench" ]]; then
-        if [[ "${MYSQLD_OPTIONS}" != *"keyring"* ]]; then
-            sysbench /usr/share/sysbench/oltp_insert.lua --tables=${num_tables} --table-size=${table_size} --mysql-db=test --mysql-user=root --threads=100 --db-driver=mysql --mysql-socket="${mysqldir}"/socket.sock prepare >"${logdir}"/sysbench.log
-        else
-            # Encryption enabled
-            for ((i=1; i<=num_tables; i++)); do
-                echo "Creating the table sbtest$i..."
-                "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "CREATE TABLE test.sbtest$i (id int(11) NOT NULL AUTO_INCREMENT, k int(11) NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k)) ENGINE=InnoDB DEFAULT CHARSET=latin1 ENCRYPTION='Y';"
-            done
-        fi
-    fi
+  fi
 }
 
 run_load() {
-    # This function runs a load using pquery/sysbench
-
+    # This function runs a load using pstress/sysbench
     local tool_options="$1"
-
-    if [[ "${load_tool}" = "pquery" ]]; then
-        echo "Run pquery"
-        pushd "$tool_dir" >/dev/null 2>&1 || exit
-        if [[ "${MYSQLD_OPTIONS}" != *"keyring"* ]]; then
-            ./pquery2-ps --tables 10 --logdir="$HOME"/backuplogs --records 200 --threads 10 --seconds 30 --socket "${mysqldir}"/socket.sock -k --no-encryption --undo-tbs-sql 0 >"${logdir}"/pquery.log &
-        else
-            # Encryption enabled
-            ./pquery2-ps --tables 10 --logdir="$HOME"/backuplogs --records 200 --threads 10 --seconds 30 --socket "${mysqldir}"/socket.sock -k --undo-tbs-sql 0 >"${logdir}"/pquery.log &
-        fi
-        popd >/dev/null 2>&1 || exit
-        sleep 2
-    elif [[ "${load_tool}" = "pstress" ]]; then
+    if [[ "${load_tool}" = "pstress" ]]; then
         echo "Run pstress with options: ${tool_options}"
         pushd "$tool_dir" >/dev/null 2>&1 || exit
-        ./pstress-ps ${tool_options} --logdir="${logdir}" --socket "${mysqldir}"/socket.sock >"${logdir}"/pstress.log &
+        if [ $LOCK_DDL == "reduced" ]; then
+            ./$PSTRESS_BINARY ${tool_options} --rotate-master-key 0 --logdir=${logdir}/pstress --no-temp-tables --socket ${mysqldir}/socket.sock  > $logdir/pstress/pstress.log &
+            popd >/dev/null 2>&1 || exit
+        else
+           ./$PSTRESS_BINARY ${tool_options} --logdir=${logdir}/pstress --no-temp-tables --socket ${mysqldir}/socket.sock  > $logdir/pstress/pstress.log &
         popd >/dev/null 2>&1 || exit
+        fi
         sleep 2
     else
         echo "Run sysbench"
-        sysbench /usr/share/sysbench/oltp_insert.lua --tables=${num_tables} --mysql-db=test --mysql-user=root --threads=100 --db-driver=mysql --mysql-socket="${mysqldir}"/socket.sock --time=200 run >>"${logdir}"/sysbench.log &
+        sysbench /usr/share/sysbench/oltp_insert.lua --tables=${num_tables} --mysql-db=test --mysql-user=root --threads=50 --db-driver=mysql --mysql-socket=${mysqldir}/socket.sock --time=$seconds run >>${logdir}/sysbench.log &
     fi
 }
 
 take_backup() {
-    # This function takes the incremental backup
+  # This function takes the incremental backup
+  if [ -d "${backup_dir}" ]; then
+    rm -r "${backup_dir}"
+  fi
+  mkdir "${backup_dir}"
+  log_date=$(date +"%d_%m_%Y_%M")
 
-    if [ -d "${backup_dir}" ]; then
-        rm -r "${backup_dir}"
-    fi
-    mkdir "${backup_dir}"
-    log_date=$(date +"%d_%m_%Y_%M")
+  echo "=>Taking full backup"
+  rr ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/full -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} --register-redo-log-consumer 2>${logdir}/full_backup_${log_date}_log
+  if [ "$?" -ne 0 ]; then
+    echo "ERR: Full Backup failed. Please check the log at: ${logdir}/full_backup_${log_date}_log"
+    exit 1
+  else
+    echo "..Full backup was successfully created at: ${backup_dir}/full. Logs available at: ${logdir}/full_backup_${log_date}_log"
+  fi
 
-    echo "Taking full backup"
-    "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/full -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} 2>"${logdir}"/full_backup_"${log_date}"_log
-    if [ "$?" -ne 0 ]; then
-        echo "ERR: Full Backup failed. Please check the log at: ${logdir}/full_backup_${log_date}_log"
-        exit 1
+  sleep 1
+  inc_num=1
+  while [[ $(pgrep ${load_tool}) ]]; do
+    echo "=>Taking incremental backup: $inc_num"
+    if [[ "${inc_num}" -eq 1 ]]; then
+      rr "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/inc${inc_num} --incremental-basedir="${backup_dir}"/full -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} --register-redo-log-consumer 2>"${logdir}"/inc${inc_num}_backup_"${log_date}"_log
     else
-        echo "Full backup was successfully created at: ${backup_dir}/full. Logs available at: ${logdir}/full_backup_${log_date}_log"
+      rr ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/inc${inc_num} --incremental-basedir="${backup_dir}"/inc$((inc_num - 1)) -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} --register-redo-log-consumer 2>"${logdir}"/inc${inc_num}_backup_"${log_date}"_log
     fi
+    if [ "$?" -ne 0 ]; then
+      grep -e "PXB will not be able to make a consistent backup" -e "PXB will not be able to take a consistent backup" "${logdir}"/inc${inc_num}_backup_"${log_date}"_log
+      if [ "$?" -eq 0 ]; then
+        echo "Retrying incremental backup with --lock-ddl option"
+        rm -r "${backup_dir}"/inc${inc_num}
 
-    sleep 1
-    inc_num=1
-    while [[ $(pgrep ${load_tool}) ]]; do
-        echo "Taking incremental backup: $inc_num"
         if [[ "${inc_num}" -eq 1 ]]; then
-            "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/inc${inc_num} --incremental-basedir="${backup_dir}"/full -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} 2>"${logdir}"/inc${inc_num}_backup_"${log_date}"_log
+          rr "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/inc${inc_num} --incremental-basedir="${backup_dir}"/full -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} --lock-ddl=$LOCK_DDL --register-redo-log-consumer 2>"${logdir}"/inc${inc_num}_backup_"${log_date}"_log
         else
-            "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/inc${inc_num} --incremental-basedir="${backup_dir}"/inc$((inc_num - 1)) -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} 2>"${logdir}"/inc${inc_num}_backup_"${log_date}"_log
-        fi
-        if [ "$?" -ne 0 ]; then
-            grep -e "PXB will not be able to make a consistent backup" -e "PXB will not be able to take a consistent backup" "${logdir}"/inc${inc_num}_backup_"${log_date}"_log
-            if [ "$?" -eq 0 ]; then
-                echo "Retrying incremental backup with --lock-ddl option"
-                rm -r "${backup_dir}"/inc${inc_num}
-
-                if [[ "${inc_num}" -eq 1 ]]; then
-                    "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/inc${inc_num} --incremental-basedir="${backup_dir}"/full -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} --lock-ddl 2>"${logdir}"/inc${inc_num}_backup_"${log_date}"_log
-                else
-                    "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/inc${inc_num} --incremental-basedir="${backup_dir}"/inc$((inc_num - 1)) -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} --lock-ddl 2>>"${logdir}"/inc${inc_num}_backup_"${log_date}"_log
-                    if [ "$?" -ne 0 ]; then
-                        echo "ERR: Incremental Backup failed. Please check the log at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
-                        exit 1
-                    fi
-                fi
-            else
-                echo "ERR: Incremental Backup failed. Please check the log at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
-                exit 1
-            fi
-        else
-            echo "Inc backup was successfully created at: ${backup_dir}/inc${inc_num}. Logs available at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
-        fi
-        let inc_num++
-        sleep 2
-    done
-
-    echo "Preparing full backup"
-    "${xtrabackup_dir}"/xtrabackup --no-defaults --prepare --apply-log-only --target_dir="${backup_dir}"/full ${PREPARE_PARAMS} 2>"${logdir}"/prepare_full_backup_"${log_date}"_log
-    if [ "$?" -ne 0 ]; then
-        echo "ERR: Prepare of full backup failed. Please check the log at: ${logdir}/prepare_full_backup_${log_date}_log"
-        exit 1
-    else
-        echo "Prepare of full backup was successful. Logs available at: ${logdir}/prepare_full_backup_${log_date}_log"
-    fi
-
-    for ((i=1; i<inc_num; i++)); do
-
-        echo "Preparing incremental backup: $i"
-        if [[ "${i}" -eq "${inc_num}-1" ]]; then
-            "${xtrabackup_dir}"/xtrabackup --no-defaults --prepare --target_dir="${backup_dir}"/full --incremental-dir="${backup_dir}"/inc"${i}" ${PREPARE_PARAMS} 2>"${logdir}"/prepare_inc"${i}"_backup_"${log_date}"_log
-        else
-            "${xtrabackup_dir}"/xtrabackup --no-defaults --prepare --apply-log-only --target_dir="${backup_dir}"/full --incremental-dir="${backup_dir}"/inc"${i}" ${PREPARE_PARAMS} 2>"${logdir}"/prepare_inc"${i}"_backup_"${log_date}"_log
-        fi
-        if [ "$?" -ne 0 ]; then
-            echo "ERR: Prepare of incremental backup failed. Please check the log at: ${logdir}/prepare_inc${i}_backup_${log_date}_log"
+          rr "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/inc${inc_num} --incremental-basedir="${backup_dir}"/inc$((inc_num - 1)) -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} --lock-ddl=$LOCK_DDL --register-redo-log-consumer 2>>"${logdir}"/inc${inc_num}_backup_"${log_date}"_log
+          if [ "$?" -ne 0 ]; then
+            echo "ERR: Incremental Backup failed. Please check the log at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
             exit 1
-        else
-            echo "Prepare of incremental backup was successful. Logs available at: ${logdir}/prepare_inc${i}_backup_${log_date}_log"
+          fi
         fi
-    done
+      else
+        echo "ERR: Incremental Backup failed. Please check the log at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
+        exit 1
+      fi
+    else
+      echo "..Inc backup was successfully created at: ${backup_dir}/inc${inc_num}. Logs available at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
+    fi
+    let inc_num++
+    # Sleeping for 10 seconds before taking next inc backup. This is done because while backup is taken DDLs are blocked and pstress cannot proceed
+    sleep 10
+  done
 
-    echo "Collecting existing table count"
-    pushd "$mysqldir" >/dev/null 2>&1 || exit
-    pt-table-checksum S=${PWD}/socket.sock,u=root -d test --recursion-method hosts --no-check-binlog-format| awk '{print $4,$9}' >file1
+  echo "=>Preparing full backup"
+  rr "${xtrabackup_dir}"/xtrabackup --no-defaults --prepare --apply-log-only --target_dir="${backup_dir}"/full ${PREPARE_PARAMS} 2>"${logdir}"/prepare_full_backup_"${log_date}"_log
+  if [ "$?" -ne 0 ]; then
+    echo "ERR: Prepare of full backup failed. Please check the log at: ${logdir}/prepare_full_backup_${log_date}_log"
+    exit 1
+  else
+    echo "..Prepare of full backup was successful. Logs available at: ${logdir}/prepare_full_backup_${log_date}_log"
+  fi
+
+  for ((i=1; i<inc_num; i++)); do
+    echo "=>Preparing incremental backup: $i"
+    if [[ "${i}" -eq "${inc_num}-1" ]]; then
+      rr "${xtrabackup_dir}"/xtrabackup --no-defaults --prepare --target_dir="${backup_dir}"/full --incremental-dir="${backup_dir}"/inc"${i}" ${PREPARE_PARAMS} 2>"${logdir}"/prepare_inc"${i}"_backup_"${log_date}"_log
+    else
+      rr "${xtrabackup_dir}"/xtrabackup --no-defaults --prepare --apply-log-only --target_dir="${backup_dir}"/full --incremental-dir="${backup_dir}"/inc"${i}" ${PREPARE_PARAMS} 2>"${logdir}"/prepare_inc"${i}"_backup_"${log_date}"_log
+    fi
+    if [ "$?" -ne 0 ]; then
+      echo "ERR: Prepare of incremental backup failed. Please check the log at: ${logdir}/prepare_inc${i}_backup_${log_date}_log"
+      exit 1
+    else
+      echo "..Prepare of incremental backup was successful. Logs available at: ${logdir}/prepare_inc${i}_backup_${log_date}_log"
+    fi
+  done
+
+  echo "Collecting existing table count"
+  pushd "$mysqldir" >/dev/null 2>&1 || exit
+  pt-table-checksum S=${PWD}/socket.sock,u=root -d test --recursion-method hosts --no-check-binlog-format| awk '{print $4,$9}' >file1
+  popd >/dev/null 2>&1 || exit
+  sleep 2
+
+  echo "Stopping mysql server and moving data directory"
+  ${mysqldir}/bin/mysqladmin -uroot -S${mysqldir}/socket.sock shutdown
+  if [ -d "${mysqldir}"/data_orig_"$(date +"%d_%m_%Y")" ]; then
+    rm -r "${mysqldir}"/data_orig_"$(date +"%d_%m_%Y")"
+  fi
+  mv "${mysqldir}"/data "${mysqldir}"/data_orig_"$(date +"%d_%m_%Y")"
+
+  echo "=>Restoring full backup"
+  "${xtrabackup_dir}"/xtrabackup --no-defaults --copy-back --target-dir="${backup_dir}"/full --datadir="${datadir}" ${RESTORE_PARAMS} 2>"${logdir}"/res_backup_"${log_date}"_log
+  if [ "$?" -ne 0 ]; then
+    echo "ERR: Restore of full backup failed. Please check the log at: ${logdir}/res_backup_${log_date}_log"
+    exit 1
+  else
+    echo "..Restore of full backup was successful. Logs available at: ${logdir}/res_backup_${log_date}_log"
+  fi
+
+  start_server
+
+  # Binlog can't be applied if binlog is encrypted or skipped
+  if [[ "${MYSQLD_OPTIONS}" != *"binlog-encryption" ]] && [[ "${MYSQLD_OPTIONS}" != *"--encrypt-binlog"* ]] && [[ "${MYSQLD_OPTIONS}" != *"skip-log-bin"* ]]; then
+    echo "Check xtrabackup for binlog position"
+    xb_binlog_file=$(cat "${backup_dir}"/full/xtrabackup_binlog_info|awk '{print $1}'|head -1)
+    xb_binlog_pos=$(cat "${backup_dir}"/full/xtrabackup_binlog_info|awk '{print $2}'|head -1)
+    echo "Xtrabackup binlog position: $xb_binlog_file, $xb_binlog_pos"
+
+    echo "Applying binlog to restored data starting from $xb_binlog_file, $xb_binlog_pos"
+    "${mysqldir}"/bin/mysqlbinlog "${mysqldir}"/data_orig_$(date +"%d_%m_%Y")/$xb_binlog_file --start-position=$xb_binlog_pos | "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock
+    if [ "$?" -ne 0 ]; then
+      echo "ERR: The binlog could not be applied to the restored data"
+    fi
+
+    sleep 5
+
+    echo "Collecting table count after restore"
+	pushd "$mysqldir" >/dev/null 2>&1 || exit
+    pt-table-checksum S=${PWD}/socket.sock,u=root -d test --recursion-method hosts --no-check-binlog-format| awk '{print $4,$9}' >file2
     popd >/dev/null 2>&1 || exit
-    sleep 2
-
-    echo "Stopping mysql server and moving data directory"
-    "${mysqldir}"/bin/mysqladmin -uroot -S"${mysqldir}"/socket.sock shutdown
-    if [ -d "${mysqldir}"/data_orig_"$(date +"%d_%m_%Y")" ]; then
-        rm -r "${mysqldir}"/data_orig_"$(date +"%d_%m_%Y")"
-    fi
-    mv "${mysqldir}"/data "${mysqldir}"/data_orig_"$(date +"%d_%m_%Y")"
-
-    echo "Restoring full backup"
-    "${xtrabackup_dir}"/xtrabackup --no-defaults --copy-back --target-dir="${backup_dir}"/full --datadir="${datadir}" ${RESTORE_PARAMS} 2>"${logdir}"/res_backup_"${log_date}"_log
+    diff $mysqldir/file1 $mysqldir/file2
     if [ "$?" -ne 0 ]; then
-        echo "ERR: Restore of full backup failed. Please check the log at: ${logdir}/res_backup_${log_date}_log"
-        exit 1
+      echo "ERR: Difference found in table count before and after restore."
     else
-        echo "Restore of full backup was successful. Logs available at: ${logdir}/res_backup_${log_date}_log"
+      echo "Data is the same before and after restore: Pass"
+	  rm -rf $mysqldir/file1 $mysqldir/file2
     fi
-
-    echo "Starting mysql server"
-    pushd "$mysqldir" >/dev/null 2>&1 || exit
-    ./start "${MYSQLD_OPTIONS}" >/dev/null 2>&1
-    "${mysqldir}"/bin/mysqladmin ping --user=root --socket="${mysqldir}"/socket.sock >/dev/null 2>&1
-    if [ "$?" -ne 0 ]; then
-        echo "ERR: Database could not be started in location ${mysqldir}. The restore was unsuccessful. Database logs: ${mysqldir}/log"
-        popd >/dev/null 2>&1 || exit
-        exit 1
-    fi
-    echo "The mysql server was started successfully"
-
-    # Binlog can't be applied if binlog is encrypted or skipped
-    if [[ "${MYSQLD_OPTIONS}" != *"binlog-encryption" ]] && [[ "${MYSQLD_OPTIONS}" != *"--encrypt-binlog"* ]] && [[ "${MYSQLD_OPTIONS}" != *"skip-log-bin"* ]]; then
-        echo "Check xtrabackup for binlog position"
-        xb_binlog_file=$(cat "${backup_dir}"/full/xtrabackup_binlog_info|awk '{print $1}'|head -1)
-        xb_binlog_pos=$(cat "${backup_dir}"/full/xtrabackup_binlog_info|awk '{print $2}'|head -1)
-        echo "Xtrabackup binlog position: $xb_binlog_file, $xb_binlog_pos"
-
-        echo "Applying binlog to restored data starting from $xb_binlog_file, $xb_binlog_pos"
-        "${mysqldir}"/bin/mysqlbinlog "${mysqldir}"/data_orig_$(date +"%d_%m_%Y")/$xb_binlog_file --start-position=$xb_binlog_pos | "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock
-        if [ "$?" -ne 0 ]; then
-            echo "ERR: The binlog could not be applied to the restored data"
-        fi
-
-        sleep 5
-
-        echo "Collecting table count after restore"
-        pt-table-checksum S=${PWD}/socket.sock,u=root -d test --recursion-method hosts --no-check-binlog-format| awk '{print $4,$9}' >file2
-        diff file1 file2
-        if [ "$?" -ne 0 ]; then
-            echo "ERR: Difference found in table count before and after restore."
-        else
-            echo "Data is the same before and after restore: Pass"
-        fi
-        popd >/dev/null 2>&1 || exit
-    else
-        echo "Binlog applying skipped, ignore differences between actual data and restored data"
-
-    fi
+  else
+    echo "Binlog applying skipped, ignore differences between actual data and restored data"
+  fi
 }
 
 count_rows() {
@@ -258,7 +298,7 @@ count_rows() {
 
     while read table; do
         echo -n "Row count for $database.$table: "
-        "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -Bse "select count(*) from $database.$table"
+        ${mysqldir}/bin/mysql -uroot -S${mysqldir}/socket.sock -Bse "select count(*) from $database.$table"
     done < <("${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -Bse "SHOW TABLES FROM $database;")
 
     while read table; do
@@ -304,24 +344,28 @@ check_tables() {
 }
 
 start_server() {
-    # This function starts the server
+  # This function starts the server
+  echo "=>Starting MySQL server"
+  rr $mysqldir/bin/mysqld --no-defaults --basedir=$mysqldir --datadir=$datadir $MYSQLD_OPTIONS --port=21000 --socket=$mysqldir/socket.sock --plugin-dir=$mysqldir/lib/plugin --max-connections=1024 --log-error=$datadir/error.log  --general-log --log-error-verbosity=3 --core-file > /dev/null 2>&1 &
+  MPID="$!"
 
-    echo "Starting mysql server"
-    pushd "$mysqldir" >/dev/null 2>&1 || exit
-    ./start "${MYSQLD_OPTIONS}" >/dev/null 2>&1
-    "${mysqldir}"/bin/mysqladmin ping --user=root --socket="${mysqldir}"/socket.sock >/dev/null 2>&1
-    if [ "$?" -ne 0 ]; then
-        echo "ERR: Database could not be started in location ${mysqldir}. Database logs: ${mysqldir}/log"
-        popd >/dev/null 2>&1 || exit
-        exit 1
+  for X in $(seq 0 ${mysql_start_timeout}); do
+    sleep 1
+    if ${mysqldir}/bin/mysqladmin -uroot -S${mysqldir}/socket.sock ping > /dev/null 2>&1; then
+      echo "..Server started successfully"
+      break
     fi
-    echo "The mysql server was started successfully"
+    if [ $X -eq ${mysql_start_timeout} ]; then
+      echo "ERR: Database could not be started. Please check error logs: ${mysqldir}/data/error.log"
+      exit 1
+    fi
+  done
 }
 
 run_load_tests() {
     # This function runs the load backup tests with normal options
     MYSQLD_OPTIONS="--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-    BACKUP_PARAMS="--core-file --lock-ddl"
+    BACKUP_PARAMS="--core-file --lock-ddl=$LOCK_DDL"
     PREPARE_PARAMS="--core-file"
     RESTORE_PARAMS=""
 
@@ -330,7 +374,7 @@ run_load_tests() {
     # Pstress options
     if [[ "$1" = "rocksdb" ]]; then
         echo "Test: Incremental Backup and Restore for rocksdb with ${load_tool}"
-        tool_options="--tables 10 --records 200 --threads 10 --seconds 150 --no-encryption --engine=rocksdb"
+        tool_options="--tables $num_tables --records $table_size --threads $threads --seconds $seconds --no-encryption --engine=rocksdb"
     elif [[ "$1" = "memory_estimation" ]]; then
         if "${mysqldir}"/bin/mysqld --version | grep "5.7" >/dev/null 2>&1 ; then
             echo "Memory estimation is not supported in PXB 2.4 version, skipping tests"
@@ -341,18 +385,26 @@ run_load_tests() {
         load_tool="sysbench"
 
         echo "Test: Incremental Backup and Restore with ${load_tool} and using memory estimation"
-        BACKUP_PARAMS="--core-file --lock-ddl --throttle=1"
+        BACKUP_PARAMS="--core-file --lock-ddl=$LOCK_DDL"
         PREPARE_PARAMS="--core-file --use-free-memory-pct=20"
     else
         echo "Test: Incremental Backup and Restore with ${load_tool}"
-        tool_options="--tables 10 --records 200 --threads 10 --seconds 150 --no-encryption --undo-tbs-sql 0"
+        tool_options="--tables $num_tables --records $table_size --threads $threads --seconds $seconds --no-encryption --undo-tbs-sql 0"
+	    if [ "$server_type" == "MS" ]; then
+            tool_options="$tool_options --no-column-compression --no-temp-tables"
+        fi
     fi
 
+    cleanup
     initialize_db
+    if [ "$1" = "rocksdb" ]; then
+      ${mysqldir}/bin/ps-admin --enable-rocksdb -uroot -S${mysqldir}/socket.sock >/dev/null 2>&1
+      ${mysqldir}/bin/mysql -uroot -S${mysqldir}/socket.sock -e"CREATE DATABASE IF NOT EXISTS test"  >/dev/null 2>&1
+    fi
 
     if [[ "$1" = "pagetracking" ]]; then
         echo "Running test with page tracking enabled"
-        BACKUP_PARAMS="--core-file --lock-ddl --page-tracking"
+        BACKUP_PARAMS="--core-file --lock-ddl=$LOCK_DDL --page-tracking"
         "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "INSTALL COMPONENT 'file://component_mysqlbackup';"
     fi
 
@@ -364,73 +416,93 @@ run_load_tests() {
 
 run_load_keyring_plugin_tests() {
     # This function runs the load backup tests with keyring_file plugin options
-    BACKUP_PARAMS="--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --core-file --lock-ddl"
+    BACKUP_PARAMS="--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --core-file --lock-ddl=$LOCK_DDL"
     PREPARE_PARAMS="--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --core-file"
     RESTORE_PARAMS="${PREPARE_PARAMS}"
 
-    tool_options_encrypt_no_alter="--tables 10 --records 200 --threads 10 --seconds 150 --undo-tbs-sql 0 --alt-tbs-enc 0 --alter-table-encrypt 0 --no-tbs 0 --no-temp-tables 1"
-
-    if "${mysqldir}"/bin/mysqld --version | grep "8.0" >/dev/null 2>&1 ; then
-        if ${mysqldir}/bin/mysqld --version | grep "8.0" | grep "MySQL Community Server" >/dev/null 2>&1 ; then
+    if [ $VERSION -ge 080000 ]; then
+        if [ "$server_type" == "MS" ]; then
             # Server is MS 8.0
             MYSQLD_OPTIONS="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
-
-            tool_options_encrypt="--tables 10 --records 200 --threads 10 --seconds 150 --undo-tbs-sql 0" # Used for pstress
+            tool_options_encrypt="--tables $num_tables --records $table_size --threads $threads --seconds $seconds --undo-tbs-sql 0 --no-column-compression" # Used for pstress
         else
-
             # Server is PS 8.0
-            MYSQLD_OPTIONS="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --innodb_sys_tablespace_encrypt --innodb_parallel_dblwr_encrypt --table-encryption-privilege-check=ON --innodb-default-encryption-key-id=4294967295 --max-connections=5000"
-
-            tool_options_encrypt="--tables 10 --records 200 --threads 10 --seconds 150 --undo-tbs-sql 0" # Used for pstress
+            MYSQLD_OPTIONS="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
+            tool_options_encrypt="--tables $num_tables --records $table_size --threads $threads --seconds $seconds --undo-tbs-sql 0" # Used for pstress
         fi
-    else
-        # Server is MS/PS 5.7
-
-        if "${mysqldir}"/bin/mysqld --version | grep "MySQL Community Server" >/dev/null 2>&1 ; then
+    elif [ $VERSION -lt 080000 ]; then
+        if [ "$server_type" == "MS" ]; then
             # Server is MS 5.7
             MYSQLD_OPTIONS="--log-bin=binlog --early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-
             # Run pstress without ddl
-            tool_options_encrypt="--tables 10 --records 200 --threads 10 --seconds 150 --undo-tbs-sql 0 --no-ddl"
+            tool_options_encrypt="--tables $num_tables --records $table_size --threads $threads --seconds $seconds --undo-tbs-sql 0 --no-ddl --no-column-compression"
         else
-
             # Server is PS 5.7 --innodb-temp-tablespace-encrypt is not GA and is deprecated
             MYSQLD_OPTIONS="--log-bin=binlog --early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-encrypt-tables=ON --encrypt-binlog --encrypt-tmp-files --innodb-encrypt-online-alter-logs=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-
             # Run pstress without temp tables encryption - existing issue PXB-2534
-            tool_options_encrypt="--tables 10 --records 200 --threads 10 --seconds 150 --undo-tbs-sql 0 --no-temp-tables 1"
+            tool_options_encrypt="--tables $num_tables --records $table_size --threads $threads --seconds $seconds --undo-tbs-sql 0 --no-temp-tables"
         fi
     fi
 
     echo "Test: Incremental Backup and Restore for keyring_file plugin with ${load_tool}"
-
+    cleanup
     initialize_db
 
-    if [[ "$1" = "pagetracking" ]]; then
-        echo "Running test with page tracking enabled"
-        BACKUP_PARAMS="${BACKUP_PARAMS} --page-tracking"
-        "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "INSTALL COMPONENT 'file://component_mysqlbackup';"
-    fi
+  if [[ "$1" = "pagetracking" ]]; then
+    echo "Running test with page tracking enabled"
+    BACKUP_PARAMS="${BACKUP_PARAMS} --page-tracking"
+    "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "INSTALL COMPONENT 'file://component_mysqlbackup';"
+  fi
 
-    run_load "${tool_options_encrypt}"
-    take_backup
-    check_tables
+  run_load "${tool_options_encrypt}"
+  take_backup
+  check_tables
+}
+
+create_keyring_component_files() {
+  local keyring_type="$1"
+  local kmip_type="$2"
+  if [ "$keyring_type" = "keyring_kmip" ]; then
+    echo "Keyring type is KMIP. Taking KMIP-specific action..."
+
+    echo '{
+      "components": "file://component_keyring_kmip"
+    }' > "$mysqldir/bin/mysqld.my"
+
+    start_kmip_server "$kmip_type"
+    [ -f "${HOME}/${kmip_config[cert_dir]}/component_keyring_kmip.cnf" ] && cp "${HOME}/${kmip_config[cert_dir]}/component_keyring_kmip.cnf" "$mysqldir/lib/plugin/"
+
+  elif [ "$keyring_type" = "keyring_file" ]; then
+    echo "Keyring type is file. Taking file-based action..."
+
+    echo '{
+      "components": "file://component_keyring_file"
+    }' > "$mysqldir/bin/mysqld.my"
+
+    cat > "$mysqldir/lib/plugin/component_keyring_file.cnf" <<-EOFL
+    {
+       "component_keyring_file_data": "${mysqldir}/keyring",
+       "read_only": false
+    }
+EOFL
+  fi
 }
 
 run_load_keyring_component_tests() {
+
     # This function runs the load backup tests with keyring_file component options
-    BACKUP_PARAMS="--xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --core-file"
+    BACKUP_PARAMS="--xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --core-file --lock-ddl=$LOCK_DDL"
     PREPARE_PARAMS="${BACKUP_PARAMS} --component-keyring-config="${mysqldir}"/lib/plugin/component_keyring_file.cnf"
     RESTORE_PARAMS="${BACKUP_PARAMS}"
 
-    if "${mysqldir}"/bin/mysqld --version | grep "8.0" | grep "MySQL Community Server" >/dev/null 2>&1 ; then
+    if [ $VERSION -ge 080000 ]; then
+        if [ "$server_type" == "MS" ]; then
         # Server is MS 8.0
         MYSQLD_OPTIONS="--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
-
-    elif "${mysqldir}"/bin/mysqld --version | grep "8.0" >/dev/null 2>&1 ; then
-        # Server is PS 8.0
-        MYSQLD_OPTIONS="--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --innodb_sys_tablespace_encrypt --innodb_parallel_dblwr_encrypt --table-encryption-privilege-check=ON --innodb-default-encryption-key-id=4294967295 --max-connections=5000"
-
+        elif [ "$server_type" == "PS" ]; then
+            # Server is PS 8.0
+            MYSQLD_OPTIONS="--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
+        fi
     else
         # Server is MS/PS 5.7
         echo "Component is not supported in MS/PS 5.7, skipping tests"
@@ -438,34 +510,14 @@ run_load_keyring_component_tests() {
     fi
 
     echo "Test: Incremental Backup and Restore for keyring_file component with ${load_tool}"
+    cleanup
+    create_keyring_component_files "keyring_file"
 
-    keyring_file="${mysqldir}/lib/plugin/component_keyring_file"
-
-    echo "Create global manifest file"
-    cat <<-EOF >"${mysqldir}"/bin/mysqld.my
-    {     
-        "components": "file://component_keyring_file"
-    }
-EOF
-    if [[ ! -f "${mysqldir}"/bin/mysqld.my ]]; then
-        echo "ERR: The global manifest could not be created in ${mysqldir}/bin/mysqld.my"
-        exit 1
+    if [ "$server_type" == "MS" ]; then
+      tool_options_encrypt="--tables $num_tables --records $table_size --threads $threads --seconds 50 --undo-tbs-sql 0 --no-column-compression"
+    else
+      tool_options_encrypt="--tables $num_tables --records $table_size --threads $threads --seconds 50 --undo-tbs-sql 0" # Used for pstress
     fi
-
-    echo "Create global configuration file"
-    cat <<-EOF >"${mysqldir}"/lib/plugin/component_keyring_file.cnf
-    {     
-        "path": "$mysqldir/lib/plugin/component_keyring_file",
-        "read_only": false
-    }
-EOF
-    if [[ ! -f "${mysqldir}"/lib/plugin/component_keyring_file.cnf ]]; then
-        echo "ERR: The global configuration could not be created in ${mysqldir}/lib/plugin/component_keyring_file.cnf"
-        exit 1
-    fi
-
-    tool_options_encrypt="--tables 10 --records 200 --threads 10 --seconds 50 --undo-tbs-sql 0" # Used for pstress
-
     initialize_db
 
     if [[ "$1" = "pagetracking" ]]; then
@@ -477,84 +529,87 @@ EOF
     run_load "${tool_options_encrypt}"
     take_backup
     check_tables
+}
 
-    # Remove keyring component configuration so that test suites after this test suite can run without encryption
-    if [[ -f "${mysqldir}"/bin/mysqld.my ]]; then
-        rm "${mysqldir}"/bin/mysqld.my
-    fi
-
-    if [[ -f "${mysqldir}"/lib/plugin/component_keyring_file.cnf ]]; then
-        rm "${mysqldir}"/lib/plugin/component_keyring_file.cnf
-    fi
+run_kmip_component_tests () {
+  feature="$1"
+  if ! source ./kmip_helper.sh; then
+    echo "ERROR: Failed to load KMIP helper library"
+    exit 1
+  fi
+  init_kmip_configs
+  echo "Testing keyring_kmip with vault types..."
+  for vault_type in "${!KMIP_CONFIGS[@]}"; do
+    echo "Testing with $vault_type..."
+    run_load_kmip_component_tests "$vault_type" "$feature"
+  done
 }
 
 run_load_kmip_component_tests() {
-    # This function runs the load backup tests with keyring_kmip component options
-    BACKUP_PARAMS="--xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --core-file"
-    PREPARE_PARAMS="${BACKUP_PARAMS} --component-keyring-config="${mysqldir}"/lib/plugin/component_keyring_kmip.cnf"
-    RESTORE_PARAMS="${BACKUP_PARAMS}"
+  # This function runs the load backup tests with keyring_kmip component options
+  kmip_type="$1"
+  BACKUP_PARAMS="--xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --core-file"
+  PREPARE_PARAMS="${BACKUP_PARAMS} --component-keyring-config="${mysqldir}"/lib/plugin/component_keyring_kmip.cnf"
+  RESTORE_PARAMS="${BACKUP_PARAMS}"
 
-    if "${mysqldir}"/bin/mysqld --version | grep "8.0" | grep "MySQL Community Server" >/dev/null 2>&1 ; then
-        # Server is MS 8.0
-        echo "MS 8.0 does not support keyring kmip for encryption, skipping keyring kmip tests"
-        return
+  if [ $VERSION -ge 080000 ]; then
+      if [ "$server_type" == "MS" ]; then
+          # Server is MS 8.0
+          echo "MS 8.0 does not support keyring kmip for encryption, skipping keyring kmip tests"
+          return
+      else
+          # Server is PS 8.0
+          MYSQLD_OPTIONS="--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
+      fi
+  else
+      # Server is MS/PS 5.7
+      echo "Kmip Component is not supported in MS/PS 5.7, skipping tests"
+      return
+  fi
 
-    elif "${mysqldir}"/bin/mysqld --version | grep "8.0" >/dev/null 2>&1 ; then
-        # Server is PS 8.0
-        MYSQLD_OPTIONS="--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --innodb_sys_tablespace_encrypt --innodb_parallel_dblwr_encrypt --table-encryption-privilege-check=ON --innodb-default-encryption-key-id=4294967295 --max-connections=5000"
-
-    else
-        # Server is MS/PS 5.7
-        echo "Kmip Component is not supported in MS/PS 5.7, skipping tests"
-        return
-    fi
-
-    echo "Test: Incremental Backup and Restore for keyring_kmip component with ${load_tool}"
-
-    echo "Create global manifest file"
-    cat <<-EOF >"${mysqldir}"/bin/mysqld.my
-    {     
+  echo "Test: Incremental Backup and Restore for keyring_kmip component with ${load_tool}"
+  cleanup
+  start_kmip_server $kmip_type
+  echo "Create global manifest file"
+  cat <<-EOF >"${mysqldir}"/bin/mysqld.my
+    {
         "components": "file://component_keyring_kmip"
     }
 EOF
-    if [[ ! -f "${mysqldir}"/bin/mysqld.my ]]; then
-        echo "ERR: The global manifest could not be created in ${mysqldir}/bin/mysqld.my"
-        exit 1
-    fi
+  if [[ ! -f "${mysqldir}"/bin/mysqld.my ]]; then
+    echo "ERR: The global manifest could not be created in ${mysqldir}/bin/mysqld.my"
+    exit 1
+  fi
 
-    echo "Create global configuration file"
-    cat <<-EOF >"${mysqldir}"/lib/plugin/component_keyring_kmip.cnf
-    {     
-        "path": "$mysqldir/keyring_kmip", "server_addr": "$kmip_server_address", "server_port": "$kmip_server_port", "client_ca": "$kmip_client_ca", "client_key": "$kmip_client_key", "server_ca": "$kmip_server_ca"
-    }
-EOF
-    if [[ ! -f "${mysqldir}"/lib/plugin/component_keyring_kmip.cnf ]]; then
-        echo "ERR: The global configuration could not be created in ${mysqldir}/lib/plugin/component_keyring_kmip.cnf"
-        exit 1
-    fi
+  echo "Create global configuration file"
+  cp "${HOME}"/"${kmip_config[cert_dir]}"/component_keyring_kmip.cnf "${mysqldir}"/lib/plugin/
 
-    tool_options_encrypt="--tables 10 --records 200 --threads 10 --seconds 150 --undo-tbs-sql 0" # Used for pstress
+  if [[ ! -f "${mysqldir}"/lib/plugin/component_keyring_kmip.cnf ]]; then
+    echo "ERR: The global configuration could not be created in ${mysqldir}/lib/plugin/component_keyring_kmip.cnf"
+    exit 1
+  fi
 
-    initialize_db
+  tool_options_encrypt="--tables $num_tables --records $table_size --threads $threads --seconds $seconds --undo-tbs-sql 0" # Used for pstress
+  initialize_db
 
-    if [[ "$1" = "pagetracking" ]]; then
-        echo "Running test with page tracking enabled"
-        BACKUP_PARAMS="${BACKUP_PARAMS} --page-tracking"
-        "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "INSTALL COMPONENT 'file://component_mysqlbackup';"
-    fi
+  if [[ "$2" = "pagetracking" ]]; then
+    echo "Running test with page tracking enabled"
+    BACKUP_PARAMS="${BACKUP_PARAMS} --page-tracking"
+    "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "INSTALL COMPONENT 'file://component_mysqlbackup';"
+  fi
 
-    run_load "${tool_options_encrypt}"
-    take_backup
-    check_tables
+  run_load "${tool_options_encrypt}"
+  take_backup
+  check_tables
 
-    # Remove keyring component configuration so that test suites after this test suite can run without encryption
-    if [[ -f "${mysqldir}"/bin/mysqld.my ]]; then
-        rm "${mysqldir}"/bin/mysqld.my
-    fi
+  # Remove keyring component configuration so that test suites after this test suite can run without encryption
+  if [[ -f "${mysqldir}"/bin/mysqld.my ]]; then
+    rm "${mysqldir}"/bin/mysqld.my
+  fi
 
-    if [[ -f "${mysqldir}"/lib/plugin/component_keyring_kmip.cnf ]]; then
-        rm "${mysqldir}"/lib/plugin/component_keyring_kmip.cnf
-    fi
+  if [[ -f "${mysqldir}"/lib/plugin/component_keyring_kmip.cnf ]]; then
+    rm "${mysqldir}"/lib/plugin/component_keyring_kmip.cnf
+  fi
 }
 
 run_load_kms_component_tests() {
@@ -563,15 +618,15 @@ run_load_kms_component_tests() {
     PREPARE_PARAMS="${BACKUP_PARAMS} --component-keyring-config="${mysqldir}"/lib/plugin/component_keyring_kms.cnf"
     RESTORE_PARAMS="${BACKUP_PARAMS}"
 
-    if "${mysqldir}"/bin/mysqld --version | grep "8.0" | grep "MySQL Community Server" >/dev/null 2>&1 ; then
-        # Server is MS 8.0
-        echo "MS 8.0 does not support keyring kms for encryption, skipping keyring kms tests"
-        return
-
-    elif "${mysqldir}"/bin/mysqld --version | grep "8.0" >/dev/null 2>&1 ; then
-        # Server is PS 8.0
-        MYSQLD_OPTIONS="--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --innodb_sys_tablespace_encrypt --innodb_parallel_dblwr_encrypt --table-encryption-privilege-check=ON --innodb-default-encryption-key-id=4294967295 --max-connections=5000"
-
+    if [ $VERSION -ge 080000 ]; then
+        if [ "$server_type" == "MS" ]; then
+            # Server is MS 8.0
+            echo "MS 8.0 does not support keyring kms for encryption, skipping keyring kms tests"
+            return
+        else
+            # Server is PS 8.0
+            MYSQLD_OPTIONS="--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
+        fi
     else
         # Server is MS/PS 5.7
         echo "Kms Component is not supported in MS/PS 5.7, skipping tests"
@@ -613,7 +668,6 @@ EOF
     fi
 
     echo "Create global configuration file"
-
     cat <<EOF >"${mysqldir}"/lib/plugin/component_keyring_kms.cnf
 {
     "path": "$mysqldir/keyring_kms", "region": "us-east-1", "kms_key": "$KMS_KEYID", "auth_key": "$KMS_AUTH_KEY", "secret_access_key": "$KMS_SECRET_KEY", "read_only": false 
@@ -624,8 +678,8 @@ EOF
         exit 1
     fi
 
-    tool_options_encrypt="--tables 10 --records 200 --threads 10 --seconds 150 --undo-tbs-sql 0" # Used for pstress
-
+    tool_options_encrypt="--tables $num_tables --records $table_size --threads $threads --seconds $seconds --undo-tbs-sql 0" # Used for pstress
+    cleanup
     initialize_db
 
     if [[ "$1" = "pagetracking" ]]; then
@@ -647,71 +701,80 @@ EOF
         rm "${mysqldir}"/lib/plugin/component_keyring_kms.cnf
     fi
 }
+run_crash_tests_pstress_encrypted() {
+  feature="$1"
+  echo "Testing keyring_file..."
+  run_crash_tests_pstress "keyring_file" "" "$feature"
+
+  if ! source ./kmip_helper.sh; then
+    echo "ERROR: Failed to load KMIP helper library"
+    exit 1
+  fi
+  init_kmip_configs
+  echo "Testing keyring_kmip with vault types..."
+  for vault_type in "${!KMIP_CONFIGS[@]}"; do
+    echo "Testing with $vault_type..."
+    run_crash_tests_pstress "keyring_kmip" "$vault_type" "$feature"
+  done
+}
 
 run_crash_tests_pstress() {
+
     # This function crashes the server during load and then runs backup
-
     local test_type="$1"
+    local kmip_type="$2"
 
-    if [[ "${test_type}" = "encryption" ]]; then
+    if [[ "${test_type}" = "*keyring*" ]]; then
         echo "Running crash tests with ${load_tool} and mysql running with encryption"
-        if "${mysqldir}"/bin/mysqld --version | grep "8.0" >/dev/null 2>&1 ; then
-            if ${mysqldir}/bin/mysqld --version | grep "8.0" | grep "MySQL Community Server" >/dev/null 2>&1 ; then
+        if [ $VERSION -ge 080000 ]; then
+            if [ "$server_type" == "MS" ]; then
                 # Server is MS 8.0
-                MYSQLD_OPTIONS="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
-
-                load_options="--tables 10 --records 200 --threads 10 --seconds 50 --undo-tbs-sql 0" # Used for pstress
+                MYSQLD_OPTIONS="--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
+                load_options="--tables $num_tables --records $table_size --threads $threads --seconds 50 --undo-tbs-sql 0 --no-column-compression --no-temp-tables" # MS does not support column compression
             else
-
                 # Server is PS 8.0
-                MYSQLD_OPTIONS="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --innodb_sys_tablespace_encrypt --innodb_parallel_dblwr_encrypt --table-encryption-privilege-check=ON --innodb-default-encryption-key-id=4294967295 --max-connections=5000"
-
-                load_options="--tables 10 --records 200 --threads 10 --seconds 50 --undo-tbs-sql 0" # Used for pstress
+                MYSQLD_OPTIONS="--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
+                load_options="--tables $num_tables --records $table_size --threads $threads --seconds 50 --undo-tbs-sql 0" # Used for pstress
             fi
         else
-            # Server is MS/PS 5.7
-
-            if "${mysqldir}"/bin/mysqld --version | grep "MySQL Community Server" >/dev/null 2>&1 ; then
+            if [ "$server_type" == "MS" ]; then
                 # Server is MS 5.7
                 MYSQLD_OPTIONS="--log-bin=binlog --early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-
                 # Run pstress without ddl
-                load_options="--tables 10 --records 200 --threads 10 --seconds 50 --undo-tbs-sql 0 --no-ddl"
+                load_options="--tables $num_tables --records $table_size --threads $threads --seconds 50 --undo-tbs-sql 0 --no-ddl --no-column-compression"
             else
-
                 # Server is PS 5.7 --innodb-temp-tablespace-encrypt is not GA and is deprecated
                 MYSQLD_OPTIONS="--log-bin=binlog --early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-encrypt-tables=ON --encrypt-binlog --encrypt-tmp-files --innodb-encrypt-online-alter-logs=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-
-                # Run pstress without temp tables encryption - existing issue PXB-2534
-                load_options="--tables 10 --records 200 --threads 10 --seconds 50 --undo-tbs-sql 0 --no-temp-tables 1"
+                # Run pstress
+                load_options="--tables $num_tables --records $table_size --threads $threads --seconds 50 --undo-tbs-sql 0"
             fi
         fi
-
-        BACKUP_PARAMS="--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --core-file"
-        PREPARE_PARAMS="${BACKUP_PARAMS}"
+        BACKUP_PARAMS="--xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --core-file --lock-ddl=$LOCK_DDL"
+        if [ "$test_type" = "keyring_kmip" ]; then
+          keyring_filename="${mysqldir}/lib/plugin/component_keyring_kmip.cnf"
+        elif [ "$test_type" = "keyring_file" ]; then
+          keyring_filename="${mysqldir}/lib/plugin/component_keyring_file.cnf"
+        fi
+        PREPARE_PARAMS="${BACKUP_PARAMS} --component-keyring-config=$keyring_filename"
         RESTORE_PARAMS="${BACKUP_PARAMS}"
-
     elif [[ "${test_type}" = "rocksdb" ]]; then
-
         echo "Running crash tests with ${load_tool} for rocksdb"
-
         MYSQLD_OPTIONS="--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-        BACKUP_PARAMS="--core-file --lock-ddl"
+        BACKUP_PARAMS="--core-file --lock-ddl=$LOCK_DDL"
         PREPARE_PARAMS="--core-file"
         RESTORE_PARAMS=""
-
-        load_options="--tables 10 --records 1000 --threads 10 --seconds 150 --no-encryption --engine=rocksdb"
-
+        load_options="--tables $num_tables --records $table_size --threads $threads --seconds $seconds --no-encryption --engine=rocksdb"
     else
-
         echo "Running crash tests with ${load_tool}"
-
         MYSQLD_OPTIONS="--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-        BACKUP_PARAMS="--core-file --lock-ddl"
+        BACKUP_PARAMS="--core-file --lock-ddl=$LOCK_DDL"
         PREPARE_PARAMS="--core-file"
         RESTORE_PARAMS=""
-
-        load_options="--tables 10 --records 200 --threads 10 --seconds 150 --no-encryption --undo-tbs-sql 0"
+        if [ "$server_type" == "MS" ]; then
+            load_options="--tables $num_tables --records $table_size --threads $threads  --seconds $seconds --no-encryption --undo-tbs-sql 0 --no-column-compression"
+        else
+            load_options="--tables $num_tables --records $table_size --threads $threads --seconds $seconds --no-encryption --undo-tbs-sql 0"
+        fi
     fi
 
     if [ -d "${backup_dir}" ]; then
@@ -720,29 +783,33 @@ run_crash_tests_pstress() {
     mkdir "${backup_dir}"
     log_date=$(date +"%d_%m_%Y_%M")
 
-
+    cleanup
+    create_keyring_component_files $keyring_type $kmip_type
     initialize_db
 
-    if [[ "$2" = "pagetracking" ]]; then
+    if [ "$test_type" = "rocksdb" ]; then
+      $mysqldir/bin/ps-admin --enable-rocksdb -uroot -S${mysqldir}/socket.sock >/dev/null 2>&1
+    fi
+
+    if [[ "$3" = "pagetracking" ]]; then
         echo "Running test with page tracking enabled"
         BACKUP_PARAMS="${BACKUP_PARAMS} --page-tracking"
         "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "INSTALL COMPONENT 'file://component_mysqlbackup';"
     fi
 
-    echo "Run pstress prepare with options: ${load_options}"
+    echo "=>Run pstress to prepare metadata: ${load_options}"
     pushd "$tool_dir" >/dev/null 2>&1 || exit
-    ./pstress-ps ${load_options} --prepare --logdir="${logdir}" --socket "${mysqldir}"/socket.sock >"${logdir}"/pstress_prepare.log 
+    ./$PSTRESS_BINARY ${load_options} --prepare --exact-initial-records --logdir=${logdir}/pstress --socket ${mysqldir}/socket.sock >"${logdir}"/pstress/pstress_prepare.log
     popd >/dev/null 2>&1 || exit
-
+    echo "..Metadata created"
     run_load "${load_options} --step 2"
-
-    echo "Taking full backup"
-    "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/full -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} 2>"${logdir}"/full_backup_"${log_date}"_log
+    echo "=>Taking full backup"
+    rr "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/full -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} --register-redo-log-consumer 2>"${logdir}"/full_backup_"${log_date}"_log
     if [ "$?" -ne 0 ]; then
         echo "ERR: Full Backup failed. Please check the log at: ${logdir}/full_backup_${log_date}_log"
         exit 1
     else
-        echo "Full backup was successfully created at: ${backup_dir}/full. Logs available at: ${logdir}/full_backup_${log_date}_log"
+        echo "..Full backup was successfully created at: ${backup_dir}/full. Logs available at: ${logdir}/full_backup_${log_date}_log"
     fi
 
     # Save the full backup dir
@@ -750,69 +817,86 @@ run_crash_tests_pstress() {
 
     sleep 1
 
-    inc_num=1
-    for ((i=1; i<=20; i++)); do
+    if [ -d ${mysqldir}/data_crash_save1 ]; then
+            rm -r ${mysqldir}/data_crash_save1
+    fi
 
-        if [ -d "${mysqldir}"/data_crash_save ]; then
-            rm -r "${mysqldir}"/data_crash_save
-        fi
+    echo "Crash the mysql server"
+    {  kill -9 $MPID && wait $MPID; } 2>/dev/null
+    cp -pr ${mysqldir}/data ${mysqldir}/data_crash_save1
 
-        echo "Crash the mysql server"
-        "${mysqldir}"/kill
-        cp -pr "${mysqldir}"/data "${mysqldir}"/data_crash_save
+    start_server
+    run_load "${load_options} --step 3"
 
-        start_server
+    for inc_num in $(seq 1 4); do
+      echo "Taking incremental backup: $inc_num"
+      if [ ${inc_num} -eq 1 ]; then
+        rr ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/full -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} --register-redo-log-consumer 2>${logdir}/inc${inc_num}_backup_${log_date}_log
+      else
+        rr ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/inc$((inc_num - 1)) -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} --register-redo-log-consumer 2>${logdir}/inc${inc_num}_backup_${log_date}_log
+      fi
+      if [ "$?" -ne 0 ]; then
+        echo "ERR: Incremental Backup failed. Please check the log at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
+        exit 1
+      else
+        echo "Inc backup was successfully created at: ${backup_dir}/inc${inc_num} Logs available at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
+      fi
 
-        run_load "${load_options} --step $(($i + 2))"
-
-        echo "Taking incremental backup: $inc_num"
-        if [[ "${inc_num}" -eq 1 ]]; then
-            "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/inc${inc_num} --incremental-basedir="${backup_dir}"/full -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} 2>"${logdir}"/inc${inc_num}_backup_"${log_date}"_log
-        else
-            "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/inc${inc_num} --incremental-basedir="${backup_dir}"/inc$((inc_num - 1)) -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} 2>"${logdir}"/inc${inc_num}_backup_"${log_date}"_log
-        fi
-        if [ "$?" -ne 0 ]; then
-            echo "ERR: Incremental Backup failed. Please check the log at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
-            exit 1
-        else
-            echo "Inc backup was successfully created at: ${backup_dir}/inc${inc_num}. Logs available at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
-        fi
-
-        # Save the incremental backup dir
-        cp -pr ${backup_dir}/inc${inc_num} ${backup_dir}/inc${inc_num}_save
-
-        let inc_num++
-        sleep 2
+      # Save the incremental backup dir
+      cp -pr ${backup_dir}/inc${inc_num} ${backup_dir}/inc${inc_num}_save
     done
 
-	echo "Preparing full backup"
-    "${xtrabackup_dir}"/xtrabackup --no-defaults --prepare --apply-log-only --target_dir="${backup_dir}"/full ${PREPARE_PARAMS} 2>"${logdir}"/prepare_full_backup_"${log_date}"_log
+    echo "Crash the mysql server"
+    {  kill -9 $MPID && wait $MPID; } 2>/dev/null
+    cp -pr ${mysqldir}/data ${mysqldir}/data_crash_save2
+    start_server
+    run_load "${load_options} --step 4"
+
+    for ((inc_num=5;inc_num<9;inc_num++)); do
+      echo "Taking incremental backup: $inc_num"
+      if [ ${inc_num} -eq 1 ]; then
+        rr ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/full -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} --register-redo-log-consumer 2>${logdir}/inc${inc_num}_${i}_backup_${log_date}_log
+      else
+        rr ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/inc$((inc_num - 1)) -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} --register-redo-log-consumer 2>${logdir}/inc${inc_num}_backup_${log_date}_log
+      fi
+      if [ "$?" -ne 0 ]; then
+        echo "ERR: Incremental Backup failed. Please check the log at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
+        exit 1
+      else
+        echo "Inc backup was successfully created at: ${backup_dir}/inc${inc_num} Logs available at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
+      fi
+
+      # Save the incremental backup dir
+      cp -pr ${backup_dir}/inc${inc_num} ${backup_dir}/inc${inc_num}_save
+    done
+
+    echo "Preparing full backup"
+    ${xtrabackup_dir}/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=${backup_dir}/full ${PREPARE_PARAMS} 2>${logdir}/prepare_full_backup_${log_date}_log
     if [ "$?" -ne 0 ]; then
         echo "ERR: Prepare of full backup failed. Please check the log at: ${logdir}/prepare_full_backup_${log_date}_log"
         exit 1
     else
         echo "Prepare of full backup was successful. Logs available at: ${logdir}/prepare_full_backup_${log_date}_log"
     fi
-	
-    for ((i=1; i<inc_num; i++)); do
 
-        echo "Preparing incremental backup: $i"
+    for ((i=1; i<$inc_num; i++)); do
+      echo "Preparing incremental backup: $i"
         if [[ "${i}" -eq "${inc_num}-1" ]]; then
-            "${xtrabackup_dir}"/xtrabackup --no-defaults --prepare --target_dir="${backup_dir}"/full --incremental-dir="${backup_dir}"/inc"${i}" ${PREPARE_PARAMS} 2>"${logdir}"/prepare_inc"${i}"_backup_"${log_date}"_log
+          ${xtrabackup_dir}/xtrabackup --no-defaults --prepare --target_dir=${backup_dir}/full --incremental-dir=${backup_dir}/inc${i} ${PREPARE_PARAMS} 2>${logdir}/prepare_inc${i}_backup_${log_date}_log
         else
-            "${xtrabackup_dir}"/xtrabackup --no-defaults --prepare --apply-log-only --target_dir="${backup_dir}"/full --incremental-dir="${backup_dir}"/inc"${i}" ${PREPARE_PARAMS} 2>"${logdir}"/prepare_inc"${i}"_backup_"${log_date}"_log
+          ${xtrabackup_dir}/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=${backup_dir}/full --incremental-dir=${backup_dir}/inc${i} ${PREPARE_PARAMS} 2>${logdir}/prepare_inc${i}_backup_${log_date}_log
         fi
-        if [ "$?" -ne 0 ]; then
-            echo "ERR: Prepare of incremental backup failed. Please check the log at: ${logdir}/prepare_inc${i}_backup_${log_date}_log"
-            exit 1
-        else
-            echo "Prepare of incremental backup was successful. Logs available at: ${logdir}/prepare_inc${i}_backup_${log_date}_log"
-        fi
+      if [ "$?" -ne 0 ]; then
+        echo "ERR: Prepare of incremental backup failed. Please check the log at: ${logdir}/prepare_inc${i}_backup_${log_date}_log"
+        exit 1
+      else
+        echo "Prepare of incremental backup was successful. Logs available at: ${logdir}/prepare_inc${i}_backup_${log_date}_log"
+      fi
     done
 
     echo "Collecting existing table count"
     orig_data=$(count_rows)
-	
+
     echo "Stopping mysql server and moving data directory"
     "${mysqldir}"/bin/mysqladmin -uroot -S"${mysqldir}"/socket.sock shutdown
     if [ -d "${mysqldir}"/data_orig_"$(date +"%d_%m_%Y")" ]; then
@@ -846,7 +930,7 @@ run_crash_tests_pstress() {
 
         sleep 5
 
-        echo "Collecting table count after restore" 
+        echo "Collecting table count after restore"
         res_data=$(count_rows)
         if [[ "${orig_data}" != "${res_data}" ]]; then
             echo "ERR: Data changed after restore."
@@ -865,80 +949,171 @@ run_crash_tests_pstress() {
     check_tables
 }
 
+cleanup() {
+  echo "################################## CleanUp #######################################"
+  echo "Killing any previously running mysqld process"
+  MPID=( $(ps -ef | grep -e mysqld | grep error.log | grep -v grep | awk '{print $2}') )
+  {  kill -9 $MPID && wait $MPID; } 2>/dev/null
+
+  if [ -d $mysqldir/data ]; then
+    echo "=>Found previously existing data directory"
+    rm -rf $mysqldir/data
+    echo "..Deleted"
+  fi
+
+  if [ -f $mysqldir/bin/mysqld.my ]; then
+    echo "=>Found older manifest file in mysql bin directory"
+    rm -rf $mysqldir/bin/mysqld.my
+    echo "..Deleted"
+  fi
+  if [ -f $mysqldir/lib/plugin/component_keyring_file.cnf ]; then
+    echo "=>Found older keyring_component config file in lib/plugin directory"
+    rm -rf $mysqldir/lib/plugin/component_keyring_file.cnf
+    echo "..Deleted"
+  fi
+  if [ -f $mysqldir/lib/plugin/component_keyring_file ]; then
+    echo "=>Found older keyring_component keyfile in lib/plugin directory"
+    rm -rf $mysqldir/lib/plugin/component_keyring_file
+    echo "..Deleted"
+  fi
+  echo "Checking for previously started containers..."
+  if [ -z "${KMIP_CONTAINER_NAMES+x}" ] || [ ${#KMIP_CONTAINER_NAMES[@]} -eq 0 ]; then
+  get_kmip_container_names
+  fi
+  containers_found=false
+
+   for name in "${KMIP_CONTAINER_NAMES[@]}"; do
+      if docker ps -aq --filter "name=$name" | grep -q .; then
+        containers_found=true
+        break
+      fi
+   done
+
+  if [[ "$containers_found" == true ]]; then
+    echo "Killing previously started containers if any..."
+    for name in "${KMIP_CONTAINER_NAMES[@]}"; do
+        cleanup_existing_container "$name"
+    done
+  fi
+
+ # Only cleanup vault directory if it exists
+  if [[ -d "$HOME/vault" && -n "$HOME" ]]; then
+    echo "Cleaning up vault directory..."
+    sudo rm -rf "$HOME/vault"
+  fi
+}
+trap cleanup EXIT INT TERM
+
+## Main ##
+
 if [ "$#" -lt 1 ]; then
-    echo "Usage: Please run the script with the following testsuites"
-    echo "Normal_and_Encryption_tests"
-    echo "Kmip_Encryption_tests"
-    echo "Kms_Encryption_tests"
-    echo "Rocksdb_tests"
-    echo "Page_Tracking_tests"
+    echo "This script tests backup with a load tool as pquery/pstress/sysbench"
+    echo "Assumption: PS and PXB are already installed as tarballs"
+    echo "Usage: "
+    echo "1. Compile pquery/pstress with mysql"
+    echo "2. Set variables in this script:"
+    echo "   xtrabackup_dir, mysqldir, datadir, backup_dir, qascripts, logdir,"
+    echo "   load_tool, tool_dir, num_tables, table_size, kmip, kms configuration"
+    echo "3. Run the script as: $0 <Test Suites>"
+    echo "   Test Suites: "
+    echo "   Normal_and_Encryption_tests"
+    echo "   Kmip_Encryption_tests"
+    echo "   Kms_Encryption_tests"
+    echo "   Rocksdb_tests"
+    echo "   Page_Tracking_tests"
+    echo " "
+    echo "   Example:"
+    echo "   $0 Normal_and_Encryption_tests Page_Tracking_tests"
+    echo " "
+    echo "4. Logs are available at: $logdir"
     exit 1
+fi
+
+if [ ! -d $logdir ]; then
+  mkdir $logdir
+fi
+if [ ! -d $logdir/pstress ]; then
+  mkdir $logdir/pstress
+else
+  rm -rf $logdir/pstress
+  mkdir $logdir/pstress
 fi
 
 echo "################################## Running Tests ##################################"
 for tsuitelist in $*; do
-    case "${tsuitelist}" in
-		Normal_and_Encryption_tests)
-			run_load_tests
-			echo "###################################################################################"
-			run_load_keyring_plugin_tests
-			echo "###################################################################################"
-			run_load_keyring_component_tests
-			echo "###################################################################################"
-            run_load_tests "memory_estimation"
-			echo "###################################################################################"
-			run_crash_tests_pstress "normal"
-			echo "###################################################################################"
-			run_crash_tests_pstress "encryption"
-			echo "###################################################################################"
-			;;
-
-        Kmip_Encryption_tests)
-            run_load_kmip_component_tests
-            echo "###################################################################################"
-            run_load_kmip_component_tests "pagetracking"
-            echo "###################################################################################"
-            ;;
-
-        Kms_Encryption_tests)
-            run_load_kms_component_tests
-            echo "###################################################################################"
-            run_load_kms_component_tests "pagetracking"
-            echo "###################################################################################"
-            ;;
-
-        Rocksdb_tests)
-            if "${mysqldir}"/bin/mysqld --version | grep "5.7" >/dev/null 2>&1 ; then
-                echo "Rocksdb backup is not supported in MS/PS 5.7, skipping tests"
-                return
-            fi
-
-            echo "Rocksdb Tests"
-            run_load_tests "rocksdb"
-            echo "###################################################################################"
-            run_crash_tests_pstress "rocksdb"
-            echo "###################################################################################"
-            ;;
-
-        Page_Tracking_tests)
-            if "${mysqldir}"/bin/mysqld --version | grep "5.7" >/dev/null 2>&1 ; then
-                echo "Page Tracking is not supported in MS/PS 5.7, skipping tests"
-                return
-            fi
-
-            echo "Page Tracking Tests"
-            run_load_tests "pagetracking"
-            echo "###################################################################################"
-            run_load_keyring_plugin_tests "pagetracking"
-            echo "###################################################################################"
-            run_load_keyring_component_tests "pagetracking"
-            echo "###################################################################################"
-            run_crash_tests_pstress "normal" "pagetracking"
-            echo "###################################################################################"
-            run_crash_tests_pstress "encryption" "pagetracking"
-            echo "###################################################################################"
-            run_crash_tests_pstress "rocksdb" "pagetracking"
-            echo "###################################################################################"
-            ;;
-    esac
+  case "${tsuitelist}" in
+    Normal_and_Encryption_tests)
+      run_load_tests
+      echo "###################################################################################"
+      if [ $VERSION -lt 080400 ]; then
+          run_load_keyring_plugin_tests
+      fi
+      echo "###################################################################################"
+      run_load_keyring_component_tests
+      echo "###################################################################################"
+      run_load_tests "memory_estimation"
+      echo "###################################################################################"
+      if [ $load_tool == "pstress" ]; then
+          run_crash_tests_pstress "normal"
+          echo "###################################################################################"
+          run_crash_tests_pstress_encrypted
+          echo "###################################################################################"
+      fi
+      ;;
+    Kmip_Encryption_tests)
+      if ! source ./kmip_helper.sh; then
+        echo "ERROR: Failed to load KMIP helper library"
+        exit 1
+      fi
+      init_kmip_configs
+      run_kmip_component_tests "pagetracking"
+      echo "###################################################################################"
+      ;;
+    Kms_Encryption_tests)
+      run_load_kms_component_tests
+      echo "###################################################################################"
+      run_load_kms_component_tests "pagetracking"
+      echo "###################################################################################"
+      ;;
+    Rocksdb_tests)
+      if "${mysqldir}"/bin/mysqld --version | grep "5.7" >/dev/null 2>&1 ; then
+        echo "Rocksdb backup is not supported in MS/PS 5.7, skipping tests"
+        continue
+      fi
+      if ${mysqldir}/bin/mysqld --version | grep "MySQL Community Server" > /dev/null 2>&1 ; then
+        echo "RocksDB is unsupported in MS, skipping tests"
+        continue
+      fi
+      echo "Rocksdb Tests"
+      run_load_tests "rocksdb"
+      echo "###################################################################################"
+      if [ $load_tool == "pstress" ]; then
+          run_crash_tests_pstress "rocksdb"
+      fi
+      echo "###################################################################################"
+      ;;
+    Page_Tracking_tests)
+      if "${mysqldir}"/bin/mysqld --version | grep "5.7" >/dev/null 2>&1 ; then
+        echo "Page Tracking is not supported in MS/PS 5.7, skipping tests"
+        return
+      fi
+      echo "Page Tracking Tests"
+      run_load_tests "pagetracking"
+      echo "###################################################################################"
+      if [ $VERSION -lt 080400 ]; then
+          run_load_keyring_plugin_tests "pagetracking"
+      fi
+      echo "###################################################################################"
+      run_load_keyring_component_tests "pagetracking"
+      echo "###################################################################################"
+      if [ $load_tool == "pstress" ]; then
+          run_crash_tests_pstress "normal" "pagetracking"
+          echo "###################################################################################"
+          run_crash_tests_pstress_encrypted "pagetracking"
+          echo "###################################################################################"
+          run_crash_tests_pstress "rocksdb" "pagetracking"
+          echo "###################################################################################"
+      fi
+      ;;
+  esac
 done

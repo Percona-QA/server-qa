@@ -2,8 +2,8 @@
 
 ########################################################################
 # Created By Manish Chawla, Percona LLC                                #
+# Modified By Mohit Joshi, Percona LLC                                 #
 # This script tests backup for individual tables                       #
-# Assumption: PS8.0 and PXB8.0 are already installed                   #
 # Usage:                                                               #
 # 1. Set paths in this script:                                         #
 #    xtrabackup_dir, backup_dir, mysqldir, datadir, qascripts, logdir  #
@@ -11,18 +11,32 @@
 # 3. Logs are available in: logdir                                     #
 ########################################################################
 
-export xtrabackup_dir="$HOME/pxb_8_0_25_debug/bin"
-export mysqldir="$HOME/MS_8_0_25"
+export xtrabackup_dir="$HOME/pxb-8.4/bld_8.4_debug/install/bin"
+export mysqldir="$HOME/mysql-8.4/bld_8.4/install"
 export datadir="${mysqldir}/data"
 export backup_dir="$HOME/dbbackup_$(date +"%d_%m_%Y")"
 export PATH="$PATH:$xtrabackup_dir"
 export qascripts="$HOME/percona-qa"
 export logdir="$HOME/backuplogs"
 export mysql_random_data_load_tool="$HOME/mysql_random_data_load"
+declare -A KMIP_CONFIGS=(
+    # PyKMIP Docker Configuration
+    ["pykmip"]="addr=127.0.0.1,image=mohitpercona/kmip:latest,port=5696,name=kmip_pykmip"
+
+    # Hashicorp Docker Setup Configuration
+    ["hashicorp"]="addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp-kmip-setup.sh"
+
+    # API Configuration
+    # ["ciphertrust"]="addr=127.0.0.1,port=5696,name=kmip_ciphertrust,setup_script=setup_kmip_api.py"
+)
 
 # Set sysbench variables
 num_tables=10
 table_size=1000
+mysql_start_timeout=60
+# Setting default server_type to Percona Server
+server_type=PS
+server_version=$($mysqldir/bin/mysqld --version | awk -F 'Ver ' '{print $2}' | grep -oe '[0-9]\.[0-9][\.0-9]*' | head -n1)
 
 check_dependencies() {
     # This function checks if the required dependencies are installed
@@ -45,34 +59,71 @@ check_dependencies() {
     fi
 }
 
-initialize_db() {
-    # This function initializes and starts mysql database
-    local MYSQLD_OPTIONS="$1"
+start_server() {
+  # This function starts the server
+  pkill -9 mysqld
 
-    echo "Starting mysql database"
-    pushd "$mysqldir" >/dev/null 2>&1 || exit
-    if [ ! -f "$mysqldir"/all_no_cl ]; then
-        "$qascripts"/startup.sh
+  echo "=>Starting MySQL server"
+  $mysqldir/bin/mysqld --no-defaults --basedir=$mysqldir --datadir=$datadir $MYSQLD_OPTIONS --port=21000 --socket=$mysqldir/socket.sock --plugin-dir=$mysqldir/lib/plugin --max-connections=1024 --log-error=$datadir/error.log  --general-log --log-error-verbosity=3 --core-file > /dev/null 2>&1 &
+  MPID="$!"
+
+  for X in $(seq 0 ${mysql_start_timeout}); do
+      sleep 1
+      if ${mysqldir}/bin/mysqladmin -uroot -S${mysqldir}/socket.sock ping > /dev/null 2>&1; then
+          echo "..Server started successfully"
+          break
+      fi
+      if [ $X -eq ${mysql_start_timeout} ]; then
+          echo "ERR: Database could not be started. Please check error logs: ${mysqldir}/data/error.log"
+          exit 1
+      fi
+  done
+}
+
+initialize_db() {
+
+    local MYSQLD_OPTIONS=$1
+    # This function initializes and starts mysql database
+    if [ ! -d "${logdir}" ]; then
+        mkdir "${logdir}"
     fi
 
-    ./all_no_cl "${MYSQLD_OPTIONS}" >/dev/null 2>&1 
-    "${mysqldir}"/bin/mysqladmin ping --user=root --socket="${mysqldir}"/socket.sock >/dev/null 2>&1
+    if [ -d $datadir ]; then
+        rm -rf $datadir
+    fi
+
+    echo "=>Creating data directory"
+    $mysqldir/bin/mysqld --no-defaults $MYSQLD_OPTIONS --datadir=$datadir --initialize-insecure > $mysqldir/mysql_install_db.log 2>&1
+    echo "..Data directory created"
+    start_server
+
+    $mysqldir/bin/mysqladmin ping --user=root --socket=$mysqldir/socket.sock >/dev/null 2>&1
     if [ "$?" -ne 0 ]; then
         echo "ERR: Database could not be started in location ${mysqldir}. Please check the directory"
-        popd >/dev/null 2>&1 || exit
         exit 1
     fi
-    popd >/dev/null 2>&1 || exit
 
-    "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '';"
+    output=$($mysqldir/bin/mysql -uroot -S$mysqldir/socket.sock -Ne "SELECT COUNT(*) FROM information_schema.engines WHERE engine='InnoDB' AND comment LIKE 'Percona%';")
+    if [ "$output" -eq 1 ]; then
+        server_type="PS"
+        echo "Test is running against: $server_type-$server_version"
+    elif [ "$output" -eq 0 ]; then
+        server_type="MS"
+        echo "Test is running against: $server_type-$server_version"
+    else
+        echo "Invalid server version!"
+        exit 1
+    fi
+
+    $mysqldir/bin/mysql -uroot -S$mysqldir/socket.sock -e"CREATE DATABASE test;"
     echo "Create data using sysbench"
-    if [[ "${MYSQLD_OPTIONS}" != *"keyring"* ]]; then
+    if [[ "${MYSQLD_OPTIONS}" != *"encrypt"* ]]; then
         sysbench /usr/share/sysbench/oltp_insert.lua --tables=${num_tables} --table-size=${table_size} --mysql-db=test --mysql-user=root --threads=100 --db-driver=mysql --mysql-socket="${mysqldir}"/socket.sock prepare >"${logdir}"/sysbench.log
     else
         # Encryption enabled
         for ((i=1; i<=num_tables; i++)); do
             echo "Creating the table sbtest$i..."
-            "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "CREATE TABLE test.sbtest$i (id int(11) NOT NULL AUTO_INCREMENT, k int(11) NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k)) ENGINE=InnoDB DEFAULT CHARSET=latin1 ENCRYPTION='Y';"
+            ${mysqldir}/bin/mysql -uroot -S${mysqldir}/socket.sock -e "CREATE TABLE test.sbtest$i (id int(11) NOT NULL AUTO_INCREMENT, k int(11) NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k)) ENGINE=InnoDB DEFAULT CHARSET=latin1 ENCRYPTION='Y';"
         done
 
         echo "Adding data in tables..."
@@ -188,6 +239,35 @@ check_tables() {
     fi
 }
 
+create_keyring_component_files() {
+ local keyring_type="$1"
+ local kmip_type="$2"
+ if [ "$keyring_type" = "keyring_kmip" ]; then
+    echo "Keyring type is KMIP. Taking KMIP-specific action..."
+
+    echo '{
+      "components": "file://component_keyring_kmip"
+    }' > "$mysqldir/bin/mysqld.my"
+
+    start_kmip_server "$kmip_type"
+    [ -f "${HOME}/${kimp_config[cert_dir]}/component_keyring_kmip.cnf" ] && cp "${HOME}/${kimp_config[cert_dir]}/component_keyring_kmip.cnf" "$mysqldir/lib/plugin/"
+
+elif [ "$keyring_type" = "keyring_file" ]; then
+    echo "Keyring type is file. Taking file-based action..."
+
+    echo '{
+      "components": "file://component_keyring_file"
+    }' > "$mysqldir/bin/mysqld.my"
+
+    cat > "$mysqldir/lib/plugin/component_keyring_file.cnf" <<-EOFL
+    {
+       "component_keyring_file_data": "${mysqldir}/keyring",
+       "read_only": false
+    }
+EOFL
+fi
+}
+
 test_partial_table_backup() {
     # Test suite for partial table backup tests
 
@@ -244,20 +324,36 @@ test_partial_table_backup() {
 }
 
 test_partial_table_backup_encrypt() {
+  echo "Testing keyring_file..."
+  test_partial_table_backup_encrypted "keyring_file" "" "$feature"
+
+  if ! source ./kmip_helper.sh; then
+    echo "ERROR: Failed to load KMIP helper library"
+    exit 1
+  fi
+  init_kmip_configs
+  echo "Testing keyring_kmip with vault types..."
+  for vault_type in "${!KMIP_CONFIGS[@]}"; do
+    echo "Testing with $vault_type..."
+    test_partial_table_backup_encrypted "keyring_kmip" "$vault_type" "$feature"
+ done
+}
+
+test_partial_table_backup_encrypted() {
+    local keyring_type="$1"
+    local kmip_type="$2"
     # Test suite for partial table backup tests with encryption
 
     echo "Test suite for partial table backup tests with encryption"
     check_dependencies
 
     echo "Test: Full backup and partial table restore"
-    if ${mysqldir}/bin/mysqld --version | grep "8.0" | grep "MySQL Community Server" >/dev/null 2>&1 ; then
-        server_type="MS"
-        server_options="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON"
-    else
-        server_type="PS"
-        server_options="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --innodb_sys_tablespace_encrypt --innodb_parallel_dblwr_encrypt --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --innodb-default-encryption-key-id=4294967295"
+    if [ "$server_type" == "MS" ]; then
+        server_options="--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON"
+    elif [ "$server_type" == "PS" ]; then
+        server_options="--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --innodb_sys_tablespace_encrypt --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON"
     fi
-
+    create_keyring_component_files $keyring_type $kmip_type
     initialize_db "${server_options} --binlog-encryption"
 
     echo "Create a table with all data types"
@@ -269,11 +365,16 @@ test_partial_table_backup_encrypt() {
     ${mysql_random_data_load_tool} test alltypes 10 --user root --password '' --host=127.0.0.1 --port=${port_no} >"${logdir}"/data_load_log 2>&1
     "${mysqldir}"/bin/mysql -uroot -S"${mysqldir}"/socket.sock -e "UPDATE alltypes SET k = 'a', af = POINT(1,2), ag = '{\"key1\": \"value1\", \"key2\": \"value2\"}';" test
 
-    take_partial_backup "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "sbtest1 sbtest2 alltypes"
+    if [ "$keyring_type" = "keyring_kmip" ]; then
+      keyring_filename="${mysqldir}/lib/plugin/component_keyring_kmip.cnf"
+    elif [ "$keyring_type" = "keyring_file" ]; then
+      keyring_filename="${mysqldir}/lib/plugin/component_keyring_file.cnf"
+    fi
+    take_partial_backup "--component-keyring-config=$keyring_filename --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "--component-keyring-config=$keyring_filename --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "--component-keyring-config=$keyring_filename  --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "sbtest1 sbtest2 alltypes"
     echo "###################################################################################"
 
     echo "Test: Partial backup and restore of tables using a pattern and excluding some tables"
-    take_partial_backup "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --tables=sbtest[1-5] --tables-exclude=sbtest10,sbtest5,sbtest4" "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "sbtest1 sbtest2 sbtest3"
+    take_partial_backup "--component-keyring-config=$keyring_filename --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --tables=sbtest[1-5] --tables-exclude=sbtest10,sbtest5,sbtest4" "--component-keyring-config=$keyring_filename --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "--component-keyring-config=$keyring_filename --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "sbtest1 sbtest2 sbtest3"
 
     for table in sbtest10 sbtest5 sbtest4; do
         if [[ -f "${backup_dir}"/full/test/"${table}".ibd ]]; then
@@ -286,7 +387,7 @@ test_partial_table_backup_encrypt() {
     echo "Test: Partial backup and restore of tables using a text file"
     echo "test.sbtest3">"${logdir}"/tables.txt
     echo "test.sbtest5">>"${logdir}"/tables.txt
-    take_partial_backup "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --tables-file=${logdir}/tables.txt" "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "sbtest3 sbtest5"
+    take_partial_backup "--component-keyring-config=$keyring_filename --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --tables-file=${logdir}/tables.txt" "--component-keyring-config=$keyring_filename --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "--component-keyring-config=$keyring_filename --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "sbtest3 sbtest5"
     echo "###################################################################################"
 
     echo "Test: Partial backup and restore of partitioned tables"
@@ -299,8 +400,37 @@ test_partial_table_backup_encrypt() {
     echo "Add data for innodb partitioned tables"
     sysbench /usr/share/sysbench/oltp_insert.lua --tables=3 --mysql-db=test --mysql-user=root --threads=100 --db-driver=mysql --mysql-socket=${mysqldir}/socket.sock --time=5 run >/dev/null 2>&1
 
-    take_partial_backup "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --tables=sbtest1,sbtest2,sbtest3 --tables-exclude=sbtest10" "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "--keyring_file_data=${mysqldir}/keyring --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "sbtest1 sbtest2 sbtest3"
+    take_partial_backup "--component-keyring-config=$keyring_filename --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin --tables=sbtest1,sbtest2,sbtest3 --tables-exclude=sbtest10" "--component-keyring-config=$keyring_filename --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "--component-keyring-config=$keyring_filename --xtrabackup-plugin-dir=${xtrabackup_dir}/../lib/plugin" "sbtest1 sbtest2 sbtest3"
 }
+
+cleanup() {
+  echo "################################## CleanUp #######################################"
+  containers_found=false
+  if [ ${#KMIP_CONTAINER_NAMES[@]} -gt 0 ] 2>/dev/null; then
+   get_kmip_container_names
+   echo "Checking for previously started containers..."
+   for name in "${KMIP_CONTAINER_NAMES[@]}"; do
+      if docker ps -aq --filter "name=$name" | grep -q .; then
+        containers_found=true
+        break
+      fi
+   done
+  fi
+
+  if [[ "$containers_found" == true ]]; then
+    echo "Killing previously started containers if any..."
+    for name in "${KMIP_CONTAINER_NAMES[@]}"; do
+        cleanup_existing_container "$name"
+    done
+  fi
+
+ # Only cleanup vault directory if it exists
+  if [[ -d "$HOME/vault" && -n "$HOME" ]]; then
+    echo "Cleaning up vault directory..."
+    sudo rm -rf "$HOME/vault"
+  fi
+}
+trap cleanup EXIT INT TERM
 
 echo "################################## Running Tests ##################################"
 test_partial_table_backup

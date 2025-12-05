@@ -451,13 +451,8 @@ def test_pxb_docker(test_config, log_file):
     except subprocess.CalledProcessError:
         pytest.fail("ERR: The docker command to restore the data failed")
     
-    # Set permissions
-    os.chmod(MYSQL_DATA_DIR, 0o777)
-    for root, dirs, files in os.walk(MYSQL_DATA_DIR):
-        for d in dirs:
-            os.chmod(os.path.join(root, d), 0o777)
-        for f in files:
-            os.chmod(os.path.join(root, f), 0o777)
+    # Set permissions using sudo (files were created by MySQL user in container)
+    run_command(["sudo", "chmod", "-R", "777", MYSQL_DATA_DIR], check=False, log_file=log_file)
     
     # Start container with restored data
     print(f"Start the {container_name} container with the restored data")

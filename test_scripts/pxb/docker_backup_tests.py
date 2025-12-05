@@ -74,7 +74,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = f"pxb_backup_data:/backup_{innovation}"
         config["target_backup_dir"] = f"/backup_{innovation}"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql:Z", "-v", "/tmp/run/mysqld:/var/run/mysqld:Z"]
+        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
     
     elif repo_name == "pxb-8x-innovation":
         if server == "ms":
@@ -95,7 +95,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = f"pxb_backup_data:/backup_{innovation}"
         config["target_backup_dir"] = f"/backup_{innovation}"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql:Z", "-v", "/tmp/run/mysqld:/var/run/mysqld:Z"]
+        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
     
     elif repo_name == "pxb-80":
         if server == "ms":
@@ -116,7 +116,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = "pxb_backup_data:/backup_80"
         config["target_backup_dir"] = "/backup_80"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql:Z"]
+        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql"]
     
     elif repo_name == "pxb-24":
         if server == "ms":
@@ -137,7 +137,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = "pxb_backup_data:/backup"
         config["target_backup_dir"] = "/backup"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql:Z"]
+        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql"]
     
     elif repo_name == "pxb-84-lts":
         if server == "ms":
@@ -158,7 +158,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = "pxb_backup_data:/backup_84"
         config["target_backup_dir"] = "/backup_84"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql:Z", "-v", "/tmp/run/mysqld:/var/run/mysqld:Z"]
+        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
     
     else:
         raise ValueError("Invalid version parameter. Exiting")

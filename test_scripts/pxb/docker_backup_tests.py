@@ -16,6 +16,9 @@ from pathlib import Path
 
 import pytest
 
+# MySQL data directory in user's home directory
+MYSQL_DATA_DIR = os.path.join(os.path.expanduser("~"), "mysql_data")
+
 
 def help():
     """Print usage information and exit."""
@@ -74,7 +77,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = f"pxb_backup_data:/backup_{innovation}"
         config["target_backup_dir"] = f"/backup_{innovation}"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
+        config["mount_dir"] = ["-v", f"{MYSQL_DATA_DIR}:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
     
     elif repo_name == "pxb-8x-innovation":
         if server == "ms":
@@ -95,7 +98,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = f"pxb_backup_data:/backup_{innovation}"
         config["target_backup_dir"] = f"/backup_{innovation}"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
+        config["mount_dir"] = ["-v", f"{MYSQL_DATA_DIR}:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
     
     elif repo_name == "pxb-80":
         if server == "ms":
@@ -116,7 +119,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = "pxb_backup_data:/backup_80"
         config["target_backup_dir"] = "/backup_80"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql"]
+        config["mount_dir"] = ["-v", f"{MYSQL_DATA_DIR}:/var/lib/mysql"]
     
     elif repo_name == "pxb-24":
         if server == "ms":
@@ -137,7 +140,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = "pxb_backup_data:/backup"
         config["target_backup_dir"] = "/backup"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql"]
+        config["mount_dir"] = ["-v", f"{MYSQL_DATA_DIR}:/var/lib/mysql"]
     
     elif repo_name == "pxb-84-lts":
         if server == "ms":
@@ -158,7 +161,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = "pxb_backup_data:/backup_84"
         config["target_backup_dir"] = "/backup_84"
-        config["mount_dir"] = ["-v", "/tmp/mysql_data:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
+        config["mount_dir"] = ["-v", f"{MYSQL_DATA_DIR}:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
     
     else:
         raise ValueError("Invalid version parameter. Exiting")
@@ -182,8 +185,8 @@ def clean_setup(config, log_file=None):
         run_command(["sudo", "docker", "rm", container_name], check=False, log_file=log_file)
     
     # Remove mysql_data directory if it exists
-    if os.path.exists("/tmp/mysql_data"):
-        shutil.rmtree("/tmp/mysql_data")
+    if os.path.exists(MYSQL_DATA_DIR):
+        shutil.rmtree(MYSQL_DATA_DIR)
 
     if log_file:
         with open(log_file, 'a', encoding='utf-8') as f:
@@ -347,13 +350,12 @@ def test_pxb_docker(test_config, log_file):
     print(f"Command: {' '.join(start_mysql_cmd)}")
     
     # Remove mysql_data directory if it exists to ensure clean start
-    if os.path.exists("/tmp/mysql_data"):
-        shutil.rmtree("/tmp/mysql_data")
-
+    if os.path.exists(MYSQL_DATA_DIR):
+        shutil.rmtree(MYSQL_DATA_DIR)
+    
     # Create mysql_data directory fresh (MySQL will initialize it)
-    # The :Z flag in the volume mount will handle SELinux context automatically
-    os.makedirs("/tmp/mysql_data", exist_ok=True)
-    os.chmod("/tmp/mysql_data", 0o777)
+    os.makedirs(MYSQL_DATA_DIR, exist_ok=True)
+    os.chmod(MYSQL_DATA_DIR, 0o777)
     
     # Create /tmp/run/mysqld if needed (mounted as /var/run/mysqld in container)
     if "/var/run/mysqld" in str(mount_dir):
@@ -425,9 +427,9 @@ def test_pxb_docker(test_config, log_file):
     run_command(["sudo", "docker", "stop", container_name], log_file=log_file)
 
     # Remove and recreate mysql_data directory
-    if os.path.exists("/tmp/mysql_data"):
-        shutil.rmtree("/tmp/mysql_data")
-    os.makedirs("/tmp/mysql_data", exist_ok=True)
+    if os.path.exists(MYSQL_DATA_DIR):
+        shutil.rmtree(MYSQL_DATA_DIR)
+    os.makedirs(MYSQL_DATA_DIR, exist_ok=True)
     
     # Restore backup
     print("Run pxb docker container to restore the backup")
@@ -450,8 +452,8 @@ def test_pxb_docker(test_config, log_file):
         pytest.fail("ERR: The docker command to restore the data failed")
     
     # Set permissions
-    os.chmod("/tmp/mysql_data", 0o777)
-    for root, dirs, files in os.walk("/tmp/mysql_data"):
+    os.chmod(MYSQL_DATA_DIR, 0o777)
+    for root, dirs, files in os.walk(MYSQL_DATA_DIR):
         for d in dirs:
             os.chmod(os.path.join(root, d), 0o777)
         for f in files:

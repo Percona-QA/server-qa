@@ -186,7 +186,7 @@ def clean_setup(config, log_file=None):
     
     # Remove mysql_data directory if it exists
     if os.path.exists(MYSQL_DATA_DIR):
-        shutil.rmtree(MYSQL_DATA_DIR)
+        run_command(["sudo", "rm", "-rf", MYSQL_DATA_DIR], check=False, log_file=log_file)
 
     if log_file:
         with open(log_file, 'a', encoding='utf-8') as f:
@@ -351,7 +351,7 @@ def test_pxb_docker(test_config, log_file):
     
     # Remove mysql_data directory if it exists to ensure clean start
     if os.path.exists(MYSQL_DATA_DIR):
-        shutil.rmtree(MYSQL_DATA_DIR)
+        run_command(["sudo", "rm", "-rf", MYSQL_DATA_DIR], check=False, log_file=log_file)
     
     # Create mysql_data directory fresh (MySQL will initialize it)
     os.makedirs(MYSQL_DATA_DIR, exist_ok=True)
@@ -428,7 +428,7 @@ def test_pxb_docker(test_config, log_file):
 
     # Remove and recreate mysql_data directory
     if os.path.exists(MYSQL_DATA_DIR):
-        shutil.rmtree(MYSQL_DATA_DIR)
+        run_command(["sudo", "rm", "-rf", MYSQL_DATA_DIR], check=False, log_file=log_file)
     os.makedirs(MYSQL_DATA_DIR, exist_ok=True)
     
     # Restore backup

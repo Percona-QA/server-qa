@@ -108,7 +108,17 @@ class BackupTestHelper:
 
     @staticmethod
     def normalize_version(version_str: str) -> int:
-        """Normalize version string to integer for comparison."""
+        """Normalize version string to integer for comparison.
+        
+        Returns version as integer using zero-padded format:
+        - 8.4.6 -> 80406
+        - 8.0.0 -> 80000
+        - 10.0.0 -> 100000
+        - 10.5.3 -> 100503
+        
+        This matches the bash script's normalize_version function which uses
+        printf %02d%02d%02d format. The format supports versions up to 99.99.99.
+        """
         major = 0
         minor = 0
         patch = 0
@@ -119,6 +129,8 @@ class BackupTestHelper:
             minor = int(match.group(2))
             patch = int(match.group(3)) if match.group(3) else 0
 
+        # Return as integer: 8.4.6 -> 80406, 10.0.0 -> 100000
+        # Format: %02d%02d%02d means 2 digits each, so max is 99.99.99
         return int(f"{major:02d}{minor:02d}{patch:02d}")
 
     def get_mysql_version(self) -> Tuple[str, int]:
@@ -157,15 +169,15 @@ class BackupTestHelper:
                 pt_ver_norm = self.normalize_version(pt_ver)
 
                 if (
-                    self.version_normalized >= 0x080000
-                    and self.version_normalized < 0x080400
+                    self.version_normalized >= 80000
+                    and self.version_normalized < 80400
                     and pt_ver_norm < self.normalize_version("3.0.9")
                 ):
                     pytest.fail(
                         f"ERROR: MySQL 8.0 requires pt-table-checksum 3.0.9 or later (but found {pt_ver})"
                     )
                 elif (
-                    self.version_normalized >= 0x080400
+                    self.version_normalized >= 80400
                     and pt_ver_norm < self.normalize_version("3.7.0")
                 ):
                     pytest.fail(
@@ -966,14 +978,35 @@ def test_normal_backup(test_helper):
 
 def test_keyring_plugin_backup(test_helper):
     """Test backup with keyring_file plugin."""
-    if test_helper.version_normalized >= 0x080400:
-        pytest.skip("Keyring plugin not supported in 8.4+")
+    # Ensure version is detected
+    if not test_helper.version or not test_helper.version_normalized:
+        test_helper.version, test_helper.version_normalized = test_helper.get_mysql_version()
+    
+    # Check version before proceeding - keyring_file plugin is not supported in 8.4+
+    # Version normalization examples:
+    # - 8.4.6 -> 80406
+    # - 8.4.0 -> 80400
+    # - 9.0.0 -> 90000
+    # - 10.0.0 -> 100000
+    # All versions >= 8.4.0 should skip this test
+    if test_helper.version_normalized >= 80400:
+        pytest.skip(f"Keyring plugin not supported in 8.4+ (detected version: {test_helper.version}, normalized: {test_helper.version_normalized})")
+    
+    # Also check version string directly as a safety measure for edge cases
+    if test_helper.version:
+        version_parts = test_helper.version.split(".")
+        if len(version_parts) >= 2:
+            major = int(version_parts[0])
+            minor = int(version_parts[1])
+            # Skip if major version > 8, or if major == 8 and minor >= 4
+            if major > 8 or (major == 8 and minor >= 4):
+                pytest.skip(f"Keyring plugin not supported in {test_helper.version} (8.4+ or 9.0+)")
 
     test_helper.backup_params = f"--keyring_file_data={test_helper.mysqldir}/keyring --xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={test_helper.lock_ddl}"
     test_helper.prepare_params = f"--keyring_file_data={test_helper.mysqldir}/keyring --xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --core-file"
     test_helper.restore_params = test_helper.prepare_params
 
-    if test_helper.version_normalized >= 0x080000:
+    if test_helper.version_normalized >= 80000:
         if test_helper.server_type == "MS":
             test_helper.mysqld_options = f"--early-plugin-load=keyring_file.so --keyring_file_data={test_helper.mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
             tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds {test_helper.seconds} --undo-tbs-sql 0 --no-column-compression"
@@ -996,7 +1029,11 @@ def test_keyring_plugin_backup(test_helper):
 
 def test_keyring_component_backup(test_helper):
     """Test backup with keyring_file component."""
-    if test_helper.version_normalized < 0x080000:
+    # Ensure version is detected
+    if not test_helper.version or not test_helper.version_normalized:
+        test_helper.version, test_helper.version_normalized = test_helper.get_mysql_version()
+    
+    if test_helper.version_normalized < 80000:
         pytest.skip("Component not supported in 5.7")
 
     # Create keyring component files

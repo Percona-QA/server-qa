@@ -583,8 +583,7 @@ class BackupTestHelper:
                 subprocess.run(
                     [
                         "pt-table-checksum",
-                        f"S={self.mysqldir}/socket.sock",
-                        "u=root",
+                        f"S={self.mysqldir}/socket.sock,u=root",
                         "-d",
                         "test",
                         "--recursion-method",
@@ -694,8 +693,7 @@ class BackupTestHelper:
                     subprocess.run(
                         [
                             "pt-table-checksum",
-                            f"S={self.mysqldir}/socket.sock",
-                            "u=root",
+                            f"S={self.mysqldir}/socket.sock,u=root",
                             "-d",
                             "test",
                             "--recursion-method",

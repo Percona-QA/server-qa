@@ -132,8 +132,8 @@ class InnoDBBackupTestHelper:
                     )
                 self.run_command(["bash", startup_script], cwd=self.mysqldir)
 
-            # Start MySQL with all_no_cl
-            cmd = ["./all_no_cl", "--log-bin=binlog"]
+            # Start MySQL with all_no_cl (run via bash since it doesn't have shebang)
+            cmd = ["bash", "./all_no_cl", "--log-bin=binlog"]
             if mysqld_options:
                 cmd.extend(mysqld_options.split())
             self.run_command(
@@ -426,7 +426,7 @@ class InnoDBBackupTestHelper:
         original_cwd = os.getcwd()
         try:
             os.chdir(self.mysqldir)
-            cmd = ["./start", "--log-bin=binlog"]
+            cmd = ["bash", "./start", "--log-bin=binlog"]
             if mysqld_options:
                 cmd.extend(mysqld_options.split())
             self.run_command(
@@ -522,7 +522,7 @@ class InnoDBBackupTestHelper:
         original_cwd = os.getcwd()
         try:
             os.chdir(self.mysqldir)
-            cmd = ["./start", "--log-bin=binlog"]
+            cmd = ["bash", "./start", "--log-bin=binlog"]
             if mysqld_options:
                 cmd.extend(mysqld_options.split())
             self.run_command(

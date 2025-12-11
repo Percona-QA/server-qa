@@ -158,6 +158,9 @@ initialize_db() {
         sysbench /usr/share/sysbench/oltp_insert.lua --tables=${num_tables} --table-size=${table_size} --mysql-db=test --mysql-user=root --threads=100 --db-driver=mysql --mysql-socket=${mysqldir}/socket.sock --rand-type=${random_type} prepare
 
     if [ "${rocksdb}" = "enabled" ]; then
+        echo "Installing rocksdb storage engine"
+        $mysqldir/bin/mysql -uroot -S$mysqldir/socket.sock < $qascripts/MyRocks.sql
+
         echo "Creating rocksdb data in database"
         ${mysqldir}/bin/mysql -uroot -S${mysqldir}/socket.sock -e "CREATE DATABASE IF NOT EXISTS test_rocksdb;"
         sysbench /usr/share/sysbench/oltp_insert.lua --tables=${num_tables} --table-size=${table_size} --mysql-db=test_rocksdb --mysql-user=root --threads=100 --db-driver=mysql --mysql-storage-engine=ROCKSDB --mysql-socket=${mysqldir}/socket.sock --rand-type=${random_type} prepare

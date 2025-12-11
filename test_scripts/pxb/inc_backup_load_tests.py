@@ -29,7 +29,7 @@ XTRABACKUP_DIR = os.path.join(HOME, "pxb-9.1/bld_9.1/install/bin")
 MYSQLDIR = os.path.join(HOME, "mysql-9.1/bld_9.1/install")
 DATADIR = os.path.join(MYSQLDIR, "data")
 BACKUP_DIR = os.path.join(HOME, f"dbbackup_{datetime.now().strftime('%d_%m_%Y')}")
-QASCRIPTS = os.path.join(HOME, "percona-qa")
+QASCRIPTS = os.path.join(HOME, "server-qa")
 LOGDIR = os.path.join(HOME, "backuplogs")
 MYSQL_START_TIMEOUT = 60
 

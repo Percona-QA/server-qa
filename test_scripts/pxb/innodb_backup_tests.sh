@@ -16,7 +16,7 @@ export xtrabackup_dir="$HOME/pxb-3034-repo/bld_debug/install/bin"
 export mysqldir="$HOME/Percona-Server-8.2.0-1-Linux.x86_64.glibc2.31"
 export datadir="${mysqldir}/data"
 export backup_dir="$HOME/dbbackup_$(date +"%d_%m_%Y")"
-export qascripts="$HOME/percona-qa"
+export qascripts="$HOME/server-qa"
 export logdir="$HOME/backuplogs"
 
 # Set sysbench variables

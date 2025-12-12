@@ -281,7 +281,7 @@ class BackupTestHelper:
                 shutil.rmtree(item_path)
 
         # Kill any previously running vault server
-        subprocess.run(["killall", "vault"], capture_output=True, stderr=subprocess.DEVNULL)
+        subprocess.run(["killall", "vault"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
         # Start vault server
         vault_setup_script = os.path.join(self.qascripts, "vault_test_setup.sh")
@@ -307,7 +307,7 @@ class BackupTestHelper:
     def start_server(self, add_options: str = ""):
         """Start MySQL server."""
         # Kill existing mysqld processes
-        subprocess.run(["pkill", "-9", "mysqld"], capture_output=True, stderr=subprocess.DEVNULL)
+        subprocess.run(["pkill", "-9", "mysqld"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         time.sleep(1)
 
         cmd = [

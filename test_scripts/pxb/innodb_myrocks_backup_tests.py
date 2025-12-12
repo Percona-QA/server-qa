@@ -365,16 +365,28 @@ class BackupTestHelper:
                     f"ERR: Database could not be started. Please check error logs: {self.datadir}/error.log"
                 )
 
-    def mysql_execute(self, query: str, database: Optional[str] = None) -> Optional[str]:
-        """Execute MySQL query and return result."""
+    def mysql_execute(self, query: str, database: Optional[str] = None, batch_mode: bool = False) -> Optional[str]:
+        """Execute MySQL query and return result.
+        
+        Args:
+            query: SQL query to execute
+            database: Optional database name
+            batch_mode: If True, use -Bse flags to get only values (no headers)
+        """
         cmd = [
             os.path.join(self.mysqldir, "bin/mysql"),
             "-uroot",
             f"-S{self.mysqldir}/socket.sock",
         ]
-        if database:
-            cmd.append(database)
-        cmd.extend(["-e", query])
+        if batch_mode:
+            cmd.append("-Bse")
+            if database:
+                cmd.append(database)
+            cmd.append(query)
+        else:
+            if database:
+                cmd.append(database)
+            cmd.extend(["-e", query])
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -993,16 +1005,16 @@ class BackupTestHelper:
         chk_myrocks_orig = {}
 
         for i in range(1, self.num_tables + 1):
-            rc_result = self.mysql_execute(f"SELECT COUNT(*) FROM test.sbtest{i}")
+            rc_result = self.mysql_execute(f"SELECT COUNT(*) FROM test.sbtest{i}", batch_mode=True)
             rc_innodb_orig[i] = int(rc_result or "0")
-            chk_result = self.mysql_execute(f"CHECKSUM TABLE test.sbtest{i}")
-            chk_innodb_orig[i] = int(chk_result.split()[1] if chk_result else "0")
+            chk_result = self.mysql_execute(f"CHECKSUM TABLE test.sbtest{i}", batch_mode=True)
+            chk_innodb_orig[i] = int(chk_result.split()[1] if chk_result and len(chk_result.split()) > 1 else "0")
 
             if self.rocksdb == "enabled" and "keyring" not in mysqld_options:
-                rc_result_rocks = self.mysql_execute(f"SELECT COUNT(*) FROM test_rocksdb.sbtest{i}")
+                rc_result_rocks = self.mysql_execute(f"SELECT COUNT(*) FROM test_rocksdb.sbtest{i}", batch_mode=True)
                 rc_myrocks_orig[i] = int(rc_result_rocks or "0")
-                chk_result_rocks = self.mysql_execute(f"CHECKSUM TABLE test_rocksdb.sbtest{i}")
-                chk_myrocks_orig[i] = int(chk_result_rocks.split()[1] if chk_result_rocks else "0")
+                chk_result_rocks = self.mysql_execute(f"CHECKSUM TABLE test_rocksdb.sbtest{i}", batch_mode=True)
+                chk_myrocks_orig[i] = int(chk_result_rocks.split()[1] if chk_result_rocks and len(chk_result_rocks.split()) > 1 else "0")
 
         # Stop server and move data directory
         print("Stopping mysql server and moving data directory")
@@ -1169,7 +1181,7 @@ class BackupTestHelper:
 
             for i in range(1, self.num_tables + 1):
                 rc_innodb_res = int(
-                    self.mysql_execute(f"SELECT COUNT(*) FROM test.sbtest{i}") or "0"
+                    self.mysql_execute(f"SELECT COUNT(*) FROM test.sbtest{i}", batch_mode=True) or "0"
                 )
                 if rc_innodb_orig[i] != rc_innodb_res:
                     print(
@@ -1181,7 +1193,7 @@ class BackupTestHelper:
 
                 if self.rocksdb == "enabled" and "keyring" not in mysqld_options:
                     rc_myrocks_res = int(
-                        self.mysql_execute(f"SELECT COUNT(*) FROM test_rocksdb.sbtest{i}") or "0"
+                        self.mysql_execute(f"SELECT COUNT(*) FROM test_rocksdb.sbtest{i}", batch_mode=True) or "0"
                     )
                     if rc_myrocks_orig[i] != rc_myrocks_res:
                         print(
@@ -1198,8 +1210,8 @@ class BackupTestHelper:
 
             print(f"Check the checksum of each table in databases: {' '.join(database_list)}")
             for i in range(1, self.num_tables + 1):
-                chk_result = self.mysql_execute(f"CHECKSUM TABLE test.sbtest{i}")
-                chk_innodb_res = int(chk_result.split()[1] if chk_result else "0")
+                chk_result = self.mysql_execute(f"CHECKSUM TABLE test.sbtest{i}", batch_mode=True)
+                chk_innodb_res = int(chk_result.split()[1] if chk_result and len(chk_result.split()) > 1 else "0")
                 if chk_innodb_orig[i] != chk_innodb_res:
                     print(
                         f"ERR: The checksum of test.sbtest{i} changed after restore. "
@@ -1209,8 +1221,8 @@ class BackupTestHelper:
                     checksum_err = 1
 
                 if self.rocksdb == "enabled" and "keyring" not in mysqld_options:
-                    chk_result_rocks = self.mysql_execute(f"CHECKSUM TABLE test_rocksdb.sbtest{i}")
-                    chk_myrocks_res = int(chk_result_rocks.split()[1] if chk_result_rocks else "0")
+                    chk_result_rocks = self.mysql_execute(f"CHECKSUM TABLE test_rocksdb.sbtest{i}", batch_mode=True)
+                    chk_myrocks_res = int(chk_result_rocks.split()[1] if chk_result_rocks and len(chk_result_rocks.split()) > 1 else "0")
                     if chk_myrocks_orig[i] != chk_myrocks_res:
                         print(
                             f"ERR: The checksum of test_rocksdb.sbtest{i} changed after restore. "

@@ -1242,10 +1242,11 @@ class BackupTestHelper:
         for database in database_list:
             for i in range(1, self.num_tables + 1):
                 ids_result = self.mysql_execute(
-                    f"SELECT id FROM {database}.sbtest{i} ORDER BY id ASC"
+                    f"SELECT id FROM {database}.sbtest{i} ORDER BY id ASC",
+                    batch_mode=True
                 )
                 if ids_result:
-                    ids = [int(line.strip()) for line in ids_result.split("\n") if line.strip()]
+                    ids = [int(line.strip()) for line in ids_result.split("\n") if line.strip() and line.strip().isdigit()]
                     for j, id_val in enumerate(ids, start=1):
                         if id_val != j:
                             print(

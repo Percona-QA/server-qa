@@ -25,12 +25,13 @@ except ImportError:
 
 # Set script variables
 HOME = os.path.expanduser("~")
+TEST_BASE_DIR = os.path.join(HOME, "inc_backup_load_tests")
 XTRABACKUP_DIR = os.path.join(HOME, "pxb-9.1/bld_9.1/install/bin")
 MYSQLDIR = os.path.join(HOME, "mysql-9.1/bld_9.1/install")
-DATADIR = os.path.join(MYSQLDIR, "data")
-BACKUP_DIR = os.path.join(HOME, f"dbbackup_{datetime.now().strftime('%d_%m_%Y')}")
+DATADIR = os.path.join(TEST_BASE_DIR, f"data_{datetime.now().strftime('%d_%m_%Y')}")
+BACKUP_DIR = os.path.join(TEST_BASE_DIR, f"dbbackup_{datetime.now().strftime('%d_%m_%Y')}")
 QASCRIPTS = os.path.join(HOME, "server-qa")
-LOGDIR = os.path.join(HOME, "backuplogs")
+LOGDIR = os.path.join(TEST_BASE_DIR, f"backuplogs_{datetime.now().strftime('%d_%m_%Y')}")
 MYSQL_START_TIMEOUT = 60
 
 # KMIP Configurations
@@ -587,7 +588,7 @@ class BackupTestHelper:
                         "-d",
                         "test",
                         "--recursion-method",
-                        "hosts",
+                        "none",
                         "--no-check-binlog-format",
                     ],
                     stdout=f,
@@ -697,7 +698,7 @@ class BackupTestHelper:
                             "-d",
                             "test",
                             "--recursion-method",
-                            "hosts",
+                            "none",
                             "--no-check-binlog-format",
                         ],
                         stdout=f,

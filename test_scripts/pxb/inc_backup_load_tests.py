@@ -107,6 +107,9 @@ class BackupTestHelper:
         # Initialize paths
         os.environ["PATH"] = f"{os.environ.get('PATH', '')}:{self.xtrabackup_dir}"
 
+        # Socket path in TEST_BASE_DIR
+        self.socket_path = os.path.join(TEST_BASE_DIR, "socket.sock")
+
     @staticmethod
     def normalize_version(version_str: str) -> int:
         """Normalize version string to integer for comparison.
@@ -230,7 +233,7 @@ class BackupTestHelper:
             f"--datadir={self.datadir}",
         ] + self.mysqld_options.split() + [
             "--port=21000",
-            f"--socket={self.mysqldir}/socket.sock",
+            f"--socket={self.socket_path}",
             f"--plugin-dir={self.mysqldir}/lib/plugin",
             "--max-connections=1024",
             f"--log-error={self.datadir}/error.log",
@@ -250,7 +253,7 @@ class BackupTestHelper:
                     [
                         os.path.join(self.mysqldir, "bin/mysqladmin"),
                         "-uroot",
-                        f"-S{self.mysqldir}/socket.sock",
+                        f"-S{self.socket_path}",
                         "ping",
                     ],
                     capture_output=True,
@@ -295,7 +298,7 @@ class BackupTestHelper:
             [
                 os.path.join(self.mysqldir, "bin/mysql"),
                 "-uroot",
-                f"-S{self.mysqldir}/socket.sock",
+                f"-S{self.socket_path}",
                 "-e",
                 "DROP DATABASE IF EXISTS test",
             ],
@@ -305,7 +308,7 @@ class BackupTestHelper:
             [
                 os.path.join(self.mysqldir, "bin/mysql"),
                 "-uroot",
-                f"-S{self.mysqldir}/socket.sock",
+                f"-S{self.socket_path}",
                 "-e",
                 "CREATE DATABASE IF NOT EXISTS test",
             ],
@@ -317,7 +320,7 @@ class BackupTestHelper:
             [
                 os.path.join(self.mysqldir, "bin/mysql"),
                 "-uroot",
-                f"-S{self.mysqldir}/socket.sock",
+                f"-S{self.socket_path}",
                 "-Ne",
                 "SELECT COUNT(*) FROM information_schema.engines WHERE engine='InnoDB' AND comment LIKE 'Percona%';",
             ],
@@ -359,7 +362,7 @@ class BackupTestHelper:
                         "--mysql-user=root",
                         "--threads=50",
                         "--db-driver=mysql",
-                        f"--mysql-socket={self.mysqldir}/socket.sock",
+                        f"--mysql-socket={self.socket_path}",
                         "prepare",
                     ],
                     stdout=open(os.path.join(self.logdir, "sysbench.log"), "w"),
@@ -373,7 +376,7 @@ class BackupTestHelper:
                         [
                             os.path.join(self.mysqldir, "bin/mysql"),
                             "-uroot",
-                            f"-S{self.mysqldir}/socket.sock",
+                            f"-S{self.socket_path}",
                             "-e",
                             f"CREATE TABLE test.sbtest{i} (id int(11) NOT NULL AUTO_INCREMENT, k int(11) NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k)) ENGINE=InnoDB DEFAULT CHARSET=latin1 ENCRYPTION='Y';",
                         ],
@@ -391,7 +394,7 @@ class BackupTestHelper:
                 [
                     f"--logdir={self.logdir}/pstress",
                     "--no-temp-tables",
-                    f"--socket={self.mysqldir}/socket.sock",
+                    f"--socket={self.socket_path}",
                 ]
             )
             log_file = os.path.join(self.logdir, "pstress/pstress.log")
@@ -407,7 +410,7 @@ class BackupTestHelper:
                 "--mysql-user=root",
                 "--threads=50",
                 "--db-driver=mysql",
-                f"--mysql-socket={self.mysqldir}/socket.sock",
+                f"--mysql-socket={self.socket_path}",
                 f"--time={self.seconds}",
                 "run",
             ]
@@ -441,7 +444,7 @@ class BackupTestHelper:
             "--password=",
             "--backup",
             f"--target-dir={self.backup_dir}/full",
-            f"-S{self.mysqldir}/socket.sock",
+                    f"-S{self.socket_path}",
             f"--datadir={self.datadir}",
         ] + self.backup_params.split() + ["--register-redo-log-consumer"]
 
@@ -467,7 +470,7 @@ class BackupTestHelper:
                     "--backup",
                     f"--target-dir={self.backup_dir}/inc{inc_num}",
                     f"--incremental-basedir={self.backup_dir}/full",
-                    f"-S{self.mysqldir}/socket.sock",
+                    f"-S{self.socket_path}",
                     f"--datadir={self.datadir}",
                 ] + self.backup_params.split() + ["--register-redo-log-consumer"]
             else:
@@ -479,7 +482,7 @@ class BackupTestHelper:
                     "--backup",
                     f"--target-dir={self.backup_dir}/inc{inc_num}",
                     f"--incremental-basedir={self.backup_dir}/inc{inc_num - 1}",
-                    f"-S{self.mysqldir}/socket.sock",
+                    f"-S{self.socket_path}",
                     f"--datadir={self.datadir}",
                 ] + self.backup_params.split() + ["--register-redo-log-consumer"]
 
@@ -504,7 +507,7 @@ class BackupTestHelper:
                                 "--backup",
                                 f"--target-dir={self.backup_dir}/inc{inc_num}",
                                 f"--incremental-basedir={self.backup_dir}/full",
-                                f"-S{self.mysqldir}/socket.sock",
+                                f"-S{self.socket_path}",
                                 f"--datadir={self.datadir}",
                             ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
                         else:
@@ -516,7 +519,7 @@ class BackupTestHelper:
                                 "--backup",
                                 f"--target-dir={self.backup_dir}/inc{inc_num}",
                                 f"--incremental-basedir={self.backup_dir}/inc{inc_num - 1}",
-                                f"-S{self.mysqldir}/socket.sock",
+                                f"-S{self.socket_path}",
                                 f"--datadir={self.datadir}",
                             ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
 
@@ -584,7 +587,7 @@ class BackupTestHelper:
                 subprocess.run(
                     [
                         "pt-table-checksum",
-                        f"S={self.mysqldir}/socket.sock,u=root",
+                        f"S={self.socket_path},u=root",
                         "-d",
                         "test",
                         "--recursion-method",
@@ -613,13 +616,13 @@ class BackupTestHelper:
             [
                 os.path.join(self.mysqldir, "bin/mysqladmin"),
                 "-uroot",
-                f"-S{self.mysqldir}/socket.sock",
+                f"-S{self.socket_path}",
                 "shutdown",
             ],
             check=True,
         )
 
-        data_orig = os.path.join(self.mysqldir, f"data_orig_{datetime.now().strftime('%d_%m_%Y')}")
+        data_orig = os.path.join(TEST_BASE_DIR, f"data_orig_{datetime.now().strftime('%d_%m_%Y')}")
         if os.path.exists(data_orig):
             shutil.rmtree(data_orig)
         shutil.move(self.datadir, data_orig)
@@ -674,7 +677,7 @@ class BackupTestHelper:
                     [
                         os.path.join(self.mysqldir, "bin/mysql"),
                         "-uroot",
-                        f"-S{self.mysqldir}/socket.sock",
+                        f"-S{self.socket_path}",
                     ],
                     stdin=mysqlbinlog.stdout,
                 )
@@ -694,7 +697,7 @@ class BackupTestHelper:
                     subprocess.run(
                         [
                             "pt-table-checksum",
-                            f"S={self.mysqldir}/socket.sock,u=root",
+                            f"S={self.socket_path},u=root",
                             "-d",
                             "test",
                             "--recursion-method",
@@ -732,7 +735,7 @@ class BackupTestHelper:
             [
                 os.path.join(self.mysqldir, "bin/mysql"),
                 "-uroot",
-                f"-S{self.mysqldir}/socket.sock",
+                f"-S{self.socket_path}",
                 "-Bse",
                 f"SHOW TABLES FROM {database};",
             ],
@@ -750,7 +753,7 @@ class BackupTestHelper:
                     [
                         os.path.join(self.mysqldir, "bin/mysql"),
                         "-uroot",
-                        f"-S{self.mysqldir}/socket.sock",
+                        f"-S{self.socket_path}",
                         "-Bse",
                         f"select count(*) from {database}.{table}",
                     ],
@@ -765,7 +768,7 @@ class BackupTestHelper:
                     [
                         os.path.join(self.mysqldir, "bin/mysql"),
                         "-uroot",
-                        f"-S{self.mysqldir}/socket.sock",
+                        f"-S{self.socket_path}",
                         "-Bse",
                         f"checksum table {database}.{table}",
                     ],
@@ -788,7 +791,7 @@ class BackupTestHelper:
             [
                 os.path.join(self.mysqldir, "bin/mysql"),
                 "-uroot",
-                f"-S{self.mysqldir}/socket.sock",
+                f"-S{self.socket_path}",
                 "-Bse",
                 "SHOW TABLES FROM test;",
             ],
@@ -806,7 +809,7 @@ class BackupTestHelper:
                 [
                     os.path.join(self.mysqldir, "bin/mysql"),
                     "-uroot",
-                    f"-S{self.mysqldir}/socket.sock",
+                    f"-S{self.socket_path}",
                     "-Bse",
                     f"CHECK TABLE test.{table}",
                 ],
@@ -823,7 +826,7 @@ class BackupTestHelper:
                         os.path.join(self.mysqldir, "bin/mysqladmin"),
                         "ping",
                         "--user=root",
-                        f"--socket={self.mysqldir}/socket.sock",
+                        f"--socket={self.socket_path}",
                     ],
                     capture_output=True,
                     check=False,
@@ -842,7 +845,7 @@ class BackupTestHelper:
                 os.path.join(self.mysqldir, "bin/mysqladmin"),
                 "ping",
                 "--user=root",
-                f"--socket={self.mysqldir}/socket.sock",
+                f"--socket={self.socket_path}",
             ],
             capture_output=True,
             check=False,
@@ -1083,12 +1086,12 @@ def test_rocksdb_backup(test_helper):
 
     test_helper.initialize_db()
     subprocess.run(
-        [os.path.join(test_helper.mysqldir, "bin/ps-admin"), "--enable-rocksdb", "-uroot", f"-S{test_helper.mysqldir}/socket.sock"],
+        [os.path.join(test_helper.mysqldir, "bin/ps-admin"), "--enable-rocksdb", "-uroot", f"-S{test_helper.socket_path}"],
         capture_output=True,
         check=False,
     )
     subprocess.run(
-        [os.path.join(test_helper.mysqldir, "bin/mysql"), "-uroot", f"-S{test_helper.mysqldir}/socket.sock", "-e", "CREATE DATABASE IF NOT EXISTS test"],
+        [os.path.join(test_helper.mysqldir, "bin/mysql"), "-uroot", f"-S{test_helper.socket_path}", "-e", "CREATE DATABASE IF NOT EXISTS test"],
         check=False,
     )
     test_helper.run_load(tool_options)
@@ -1118,7 +1121,7 @@ def test_page_tracking_backup(test_helper):
 
     test_helper.initialize_db()
     subprocess.run(
-        [os.path.join(test_helper.mysqldir, "bin/mysql"), "-uroot", f"-S{test_helper.mysqldir}/socket.sock", "-e", "INSTALL COMPONENT 'file://component_mysqlbackup';"],
+        [os.path.join(test_helper.mysqldir, "bin/mysql"), "-uroot", f"-S{test_helper.socket_path}", "-e", "INSTALL COMPONENT 'file://component_mysqlbackup';"],
         check=True,
     )
     test_helper.run_load(tool_options)

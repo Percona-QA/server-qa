@@ -28,10 +28,10 @@ HOME = os.path.expanduser("~")
 TEST_BASE_DIR = os.path.join(HOME, "inc_backup_load_tests")
 XTRABACKUP_DIR = os.path.join(HOME, "pxb-9.1/bld_9.1/install/bin")
 MYSQLDIR = os.path.join(HOME, "mysql-9.1/bld_9.1/install")
-DATADIR = os.path.join(TEST_BASE_DIR, f"data_{datetime.now().strftime('%d_%m_%Y')}")
-BACKUP_DIR = os.path.join(TEST_BASE_DIR, f"dbbackup_{datetime.now().strftime('%d_%m_%Y')}")
+DATADIR = os.path.join(TEST_BASE_DIR, f"data_{datetime.now().strftime('%Y%m%d')}")
+BACKUP_DIR = os.path.join(TEST_BASE_DIR, f"dbbackup_{datetime.now().strftime('%Y%m%d')}")
 QASCRIPTS = os.path.join(HOME, "server-qa")
-LOGDIR = os.path.join(TEST_BASE_DIR, f"backuplogs_{datetime.now().strftime('%d_%m_%Y')}")
+LOGDIR = os.path.join(TEST_BASE_DIR, f"backuplogs_{datetime.now().strftime('%Y%m%d')}")
 MYSQL_START_TIMEOUT = 60
 
 # KMIP Configurations
@@ -433,7 +433,7 @@ class BackupTestHelper:
             shutil.rmtree(self.backup_dir)
         os.makedirs(self.backup_dir)
 
-        log_date = datetime.now().strftime("%d_%m_%Y_%M")
+        log_date = datetime.now().strftime("%Y%m%d_%M")
 
         # Full backup
         print("=>Taking full backup")
@@ -622,7 +622,7 @@ class BackupTestHelper:
             check=True,
         )
 
-        data_orig = os.path.join(TEST_BASE_DIR, f"data_orig_{datetime.now().strftime('%d_%m_%Y')}")
+        data_orig = os.path.join(TEST_BASE_DIR, f"data_orig_{datetime.now().strftime('%Y%m%d')}")
         if os.path.exists(data_orig):
             shutil.rmtree(data_orig)
         shutil.move(self.datadir, data_orig)

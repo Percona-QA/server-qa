@@ -276,7 +276,7 @@ class BackupTestHelper:
             os.makedirs(self.logdir)
 
         print("=>Creating data directory")
-        log_file = os.path.join(TEST_BASE_DIR, "mysql_install_db.log")
+        log_file = os.path.join(self.datadir, "mysql_install_db.log")
         with open(log_file, "w") as f:
             subprocess.run(
                 [

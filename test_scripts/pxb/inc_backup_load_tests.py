@@ -267,7 +267,7 @@ class BackupTestHelper:
 
             if x == self.mysql_start_timeout:
                 pytest.fail(
-                    f"ERR: Database could not be started. Please check error logs: {self.mysqldir}/data/error.log"
+                    f"ERR: Database could not be started. Please check error logs: {self.datadir}/error.log"
                 )
 
     def initialize_db(self):
@@ -276,7 +276,7 @@ class BackupTestHelper:
             os.makedirs(self.logdir)
 
         print("=>Creating data directory")
-        log_file = os.path.join(self.mysqldir, "mysql_install_db.log")
+        log_file = os.path.join(TEST_BASE_DIR, "mysql_install_db.log")
         with open(log_file, "w") as f:
             subprocess.run(
                 [
@@ -581,7 +581,7 @@ class BackupTestHelper:
         # Collect table count before restore
         print("Collecting existing table count")
         old_cwd = os.getcwd()
-        os.chdir(self.mysqldir)
+        os.chdir(TEST_BASE_DIR)
         try:
             with open("file1", "w") as f:
                 subprocess.run(
@@ -691,7 +691,7 @@ class BackupTestHelper:
             # Collect table count after restore
             print("Collecting table count after restore")
             old_cwd = os.getcwd()
-            os.chdir(self.mysqldir)
+            os.chdir(TEST_BASE_DIR)
             try:
                 with open("file2", "w") as f:
                     subprocess.run(

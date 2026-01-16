@@ -151,6 +151,7 @@ initialize_db() {
         exit 1
     fi
 
+    $mysqldir/bin/mysql -uroot -S$mysqldir/socket.sock < $qascripts/MyRocks.sql
     $mysqldir/bin/mysql -uroot -S$mysqldir/socket.sock -e"CREATE DATABASE test"
 
     if [[ "${MYSQLD_OPTIONS}" != *"keyring"* ]]; then

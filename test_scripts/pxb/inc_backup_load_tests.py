@@ -890,9 +890,9 @@ class BackupTestHelper:
             os.remove(os.path.join(self.mysqldir, "bin/mysqld.my"))
             print("..Deleted")
 
-        if os.path.exists(os.path.join(self.logdir, "component_keyring_file.cnf")):
+        if os.path.exists(os.path.join(self.mysqldir, "lib/plugin/component_keyring_file.cnf")):
             print("=>Found older keyring_component config file in lib/plugin directory")
-            os.remove(os.path.join(self.logdir, "component_keyring_file.cnf"))
+            os.remove(os.path.join(self.mysqldir, "lib/plugin/component_keyring_file.cnf"))
             print("..Deleted")
 
         if os.path.exists(os.path.join(self.logdir, "component_keyring_file")):
@@ -1039,11 +1039,11 @@ def test_keyring_component_backup(test_helper):
         pytest.skip("Component not supported in 5.7")
 
     # Create keyring component files
-    manifest_file = os.path.join(test_helper.logdir, "mysqld.my")
+    manifest_file = os.path.join(test_helper.mysqldir, "bin/mysqld.my")
     with open(manifest_file, "w") as f:
-        f.write('{\n  "components": "file://lib/plugin/component_keyring_file"\n}\n')
+        f.write('{\n  "components": "file://component_keyring_file"\n}\n')
 
-    config_file = os.path.join(test_helper.logdir, "component_keyring_file.cnf")
+    config_file = os.path.join(test_helper.mysqldir, "lib/plugin/component_keyring_file.cnf")
     with open(config_file, "w") as f:
         f.write(f'{{\n  "component_keyring_file_data": "{test_helper.logdir}/keyring",\n  "read_only": false\n}}\n')
 

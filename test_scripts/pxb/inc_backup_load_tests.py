@@ -11,9 +11,8 @@ import time
 import shutil
 import re
 import signal
-from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, List, Tuple
 import psutil
 import pytest
 

@@ -25,12 +25,12 @@ except ImportError:
 
 # Set script variables
 HOME = os.path.expanduser("~")
-TEST_BASE_DIR = os.path.join(HOME, "inc_backup_load_tests")
-XTRABACKUP_DIR = os.path.join(HOME, "pxb-9.1/bld_9.1/install/bin")
-MYSQLDIR = os.path.join(HOME, "mysql-9.1/bld_9.1/install")
+TEST_BASE_DIR = os.environ.get("TEST_BASE_DIR", os.path.join(HOME, "inc_backup_load_tests"))
+XTRABACKUP_DIR = os.environ.get("XTRABACKUP_DIR", os.path.join(HOME, "pxb-9.1/bld_9.1/install/bin"))
+MYSQLDIR = os.environ.get("MYSQLDIR", os.path.join(HOME, "mysql-9.1/bld_9.1/install"))
 DATADIR = os.path.join(TEST_BASE_DIR, f"data_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 BACKUP_DIR = os.path.join(TEST_BASE_DIR, f"dbbackup_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-QASCRIPTS = os.path.join(HOME, "server-qa")
+QASCRIPTS = os.environ.get("QASCRIPTS", os.path.join(HOME, "server-qa"))
 LOGDIR = os.path.join(TEST_BASE_DIR, f"backuplogs_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 MYSQL_START_TIMEOUT = 60
 
@@ -42,12 +42,12 @@ KMIP_CONFIGS = {
 }
 
 # Set tool variables
-LOAD_TOOL = "pstress"  # Set value as pstress/sysbench
+LOAD_TOOL = os.environ.get("LOAD_TOOL", "pstress")  # Set value as pstress/sysbench
+LOAD_TOOL_DIR = os.environ.get("LOAD_TOOL_DIR", os.path.join(HOME, "pstress_9.1/src"))  # pstress dir
 NUM_TABLES = 25  # This will make 50 tables on the database tt_1, tt_1_p, .. tt_25, tt_25_p
 TABLE_SIZE = 100
 SECONDS = 60
 THREADS = 5
-TOOL_DIR = os.path.join(HOME, "pstress_9.1/src")  # pstress dir
 
 # PXB Lock option
 LOCK_DDL = "on"  # lock_ddl accepted values (on, reduced)
@@ -64,7 +64,7 @@ class BackupTestHelper:
         backup_dir: str = BACKUP_DIR,
         logdir: str = LOGDIR,
         load_tool: str = LOAD_TOOL,
-        tool_dir: str = TOOL_DIR,
+        load_tool_dir: str = LOAD_TOOL_DIR,
         num_tables: int = NUM_TABLES,
         table_size: int = TABLE_SIZE,
         seconds: int = SECONDS,
@@ -78,7 +78,7 @@ class BackupTestHelper:
         self.backup_dir = backup_dir
         self.logdir = logdir
         self.load_tool = load_tool
-        self.tool_dir = tool_dir
+        self.load_tool_dir = LOAD_TOOL_DIR
         self.num_tables = num_tables
         self.table_size = table_size
         self.seconds = seconds
@@ -337,14 +337,14 @@ class BackupTestHelper:
             print(f"Test is running against: {self.server_type}-{self.version}")
             if self.load_tool == "pstress":
                 self.pstress_binary = "pstress-ps"
-                if not os.path.exists(os.path.join(self.tool_dir, "pstress-ps")):
+                if not os.path.exists(os.path.join(self.load_tool_dir, "pstress-ps")):
                     pytest.fail("pstress-ps not found. Please compile pstress with Percona Server!")
         elif output == "0":
             self.server_type = "MS"
             print(f"Test is running against: {self.server_type}-{self.version}")
             if self.load_tool == "pstress":
                 self.pstress_binary = "pstress-ms"
-                if not os.path.exists(os.path.join(self.tool_dir, "pstress-ms")):
+                if not os.path.exists(os.path.join(self.load_tool_dir, "pstress-ms")):
                     pytest.fail("pstress-ms not found. Please compile pstress with Percona Server!")
         else:
             pytest.fail("Invalid server version!")
@@ -387,7 +387,7 @@ class BackupTestHelper:
         """Run a load using pstress/sysbench."""
         if self.load_tool == "pstress":
             print(f"Run pstress with options: {tool_options}")
-            cmd = [os.path.join(self.tool_dir, self.pstress_binary)] + tool_options.split()
+            cmd = [os.path.join(self.load_tool_dir, self.pstress_binary)] + tool_options.split()
             if self.lock_ddl == "reduced":
                 cmd.extend(["--rotate-master-key", "0"])
             cmd.extend(
@@ -1151,7 +1151,7 @@ if __name__ == "__main__":
         print("1. Compile pquery/pstress with mysql")
         print("2. Set variables in this script:")
         print("   xtrabackup_dir, mysqldir, datadir, backup_dir, qascripts, logdir,")
-        print("   load_tool, tool_dir, num_tables, table_size, kmip, kms configuration")
+        print("   load_tool, load_tool_dir, num_tables, table_size, kmip, kms configuration")
         print("3. Run the script as: pytest inc_backup_load_tests.py -k <test_name>")
         print("   Or: python inc_backup_load_tests.py <Test Suites>")
         print("   Test Suites: ")

@@ -895,9 +895,9 @@ class BackupTestHelper:
             os.remove(os.path.join(self.mysqldir, "lib/plugin/component_keyring_file.cnf"))
             print("..Deleted")
 
-        if os.path.exists(os.path.join(self.logdir, "component_keyring_file")):
+        if os.path.exists(os.path.join(self.logdir, "keyfile")):
             print("=>Found older keyring_component keyfile in lib/plugin directory")
-            os.remove(os.path.join(self.logdir, "component_keyring_file"))
+            os.remove(os.path.join(self.logdir, "keyfile"))
             print("..Deleted")
 
         # Cleanup KMIP containers
@@ -1045,7 +1045,7 @@ def test_keyring_component_backup(test_helper):
 
     config_file = os.path.join(test_helper.mysqldir, "lib/plugin/component_keyring_file.cnf")
     with open(config_file, "w") as f:
-        f.write(f'{{\n  "component_keyring_file_data": "{test_helper.logdir}/keyring",\n  "read_only": false\n}}\n')
+        f.write(f'{{\n  "path": "{test_helper.logdir}/keyring",\n  "read_only": false\n}}\n')
 
     test_helper.backup_params = f"--xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={test_helper.lock_ddl}"
     test_helper.prepare_params = f"{test_helper.backup_params} --component-keyring-config={config_file}"

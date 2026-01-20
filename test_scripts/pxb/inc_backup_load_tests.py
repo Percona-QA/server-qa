@@ -240,7 +240,7 @@ class BackupTestHelper:
             "--log-error-verbosity=3",
             "--core-file",
         ]
-        print("=>Command for starting server: ", cmd)
+        print(f"=>Command for starting server: {' '.join(cmd)}")
 
         process = self.run_command(cmd, check=False, background=True)
         self.mysql_pid = process.pid

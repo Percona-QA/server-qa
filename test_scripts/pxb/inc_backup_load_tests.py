@@ -77,7 +77,7 @@ class BackupTestHelper:
         self.backup_dir = backup_dir
         self.logdir = logdir
         self.load_tool = load_tool
-        self.load_tool_dir = LOAD_TOOL_DIR
+        self.load_tool_dir = load_tool_dir
         self.num_tables = num_tables
         self.table_size = table_size
         self.seconds = seconds
@@ -1148,9 +1148,14 @@ if __name__ == "__main__":
         print("Assumption: PS and PXB are already installed as tarballs")
         print("Usage: ")
         print("1. Compile pquery/pstress with mysql")
-        print("2. Set variables in this script:")
-        print("   xtrabackup_dir, mysqldir, datadir, backup_dir, qascripts, logdir,")
-        print("   load_tool, load_tool_dir, num_tables, table_size, kmip, kms configuration")
+        print("2. Set environment variables (or use defaults):")
+        print("   export TEST_BASE_DIR=$HOME/inc_backup_load_tests")
+        print("   export XTRABACKUP_DIR=$HOME/percona-xtrabackup-8.0.35-34-Linux-x86_64.glibc2.35/bin")
+        print("   export MYSQLDIR=$HOME/Percona-Server-8.0.44-35-Linux.x86_64.glibc2.35")
+        print("   export QASCRIPTS=$HOME/server-qa")
+        print("   export LOAD_TOOL=pstress")
+        print("   export LOAD_TOOL_DIR=$HOME/lab/pstress/src")
+        print("   (If not set, defaults will be used from the script)")
         print("3. Run the script as: pytest inc_backup_load_tests.py -k <test_name>")
         print("   Or: python inc_backup_load_tests.py <Test Suites>")
         print("   Test Suites: ")

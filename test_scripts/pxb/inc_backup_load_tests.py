@@ -240,6 +240,7 @@ class BackupTestHelper:
             "--log-error-verbosity=3",
             "--core-file",
         ]
+        print("=>Command for starting server: ", cmd)
 
         process = self.run_command(cmd, check=False, background=True)
         self.mysql_pid = process.pid
@@ -1156,7 +1157,7 @@ if __name__ == "__main__":
         print("   export LOAD_TOOL=pstress")
         print("   export LOAD_TOOL_DIR=$HOME/lab/pstress/src")
         print("   (If not set, defaults will be used from the script)")
-        print("3. Run the script as: pytest inc_backup_load_tests.py -k <test_name>")
+        print("3. Run the script as: pytest inc_backup_load_tests.py -k <test_name> -s -v")
         print("   Or: python inc_backup_load_tests.py <Test Suites>")
         print("   Test Suites: ")
         print("   Normal_and_Encryption_tests")

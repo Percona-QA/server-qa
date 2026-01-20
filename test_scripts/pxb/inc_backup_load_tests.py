@@ -1003,23 +1003,23 @@ def test_keyring_plugin_backup(test_helper):
             if major > 8 or (major == 8 and minor >= 4):
                 pytest.skip(f"Keyring plugin not supported in {test_helper.version} (8.4+ or 9.0+)")
 
-    test_helper.backup_params = f"--keyring_file_data={test_helper.mysqldir}/keyring --xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = f"--keyring_file_data={test_helper.mysqldir}/keyring --xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --core-file"
+    test_helper.backup_params = f"--keyring_file_data={test_helper.datadir}/keyring --xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"--keyring_file_data={test_helper.datadir}/keyring --xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --core-file"
     test_helper.restore_params = test_helper.prepare_params
 
     if test_helper.version_normalized >= 80000:
         if test_helper.server_type == "MS":
-            test_helper.mysqld_options = f"--early-plugin-load=keyring_file.so --keyring_file_data={test_helper.mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
+            test_helper.mysqld_options = f"--early-plugin-load=keyring_file.so --keyring_file_data={test_helper.datadir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
             tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds {test_helper.seconds} --undo-tbs-sql 0 --no-column-compression"
         else:
-            test_helper.mysqld_options = f"--early-plugin-load=keyring_file.so --keyring_file_data={test_helper.mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
+            test_helper.mysqld_options = f"--early-plugin-load=keyring_file.so --keyring_file_data={test_helper.datadir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
             tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds {test_helper.seconds} --undo-tbs-sql 0"
     else:
         if test_helper.server_type == "MS":
-            test_helper.mysqld_options = f"--log-bin=binlog --early-plugin-load=keyring_file.so --keyring_file_data={test_helper.mysqldir}/keyring --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
+            test_helper.mysqld_options = f"--log-bin=binlog --early-plugin-load=keyring_file.so --keyring_file_data={test_helper.datadir}/keyring --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
             tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds {test_helper.seconds} --undo-tbs-sql 0 --no-ddl --no-column-compression"
         else:
-            test_helper.mysqld_options = f"--log-bin=binlog --early-plugin-load=keyring_file.so --keyring_file_data={test_helper.mysqldir}/keyring --innodb-encrypt-tables=ON --encrypt-binlog --encrypt-tmp-files --innodb-encrypt-online-alter-logs=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
+            test_helper.mysqld_options = f"--log-bin=binlog --early-plugin-load=keyring_file.so --keyring_file_data={test_helper.datadir}/keyring --innodb-encrypt-tables=ON --encrypt-binlog --encrypt-tmp-files --innodb-encrypt-online-alter-logs=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
             tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds {test_helper.seconds} --undo-tbs-sql 0 --no-temp-tables"
 
     test_helper.initialize_db()
@@ -1044,7 +1044,7 @@ def test_keyring_component_backup(test_helper):
 
     config_file = os.path.join(test_helper.mysqldir, "lib/plugin/component_keyring_file.cnf")
     with open(config_file, "w") as f:
-        f.write(f'{{\n  "component_keyring_file_data": "{test_helper.mysqldir}/keyring",\n  "read_only": false\n}}\n')
+        f.write(f'{{\n  "component_keyring_file_data": "{test_helper.datadir}/keyring",\n  "read_only": false\n}}\n')
 
     test_helper.backup_params = f"--xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={test_helper.lock_ddl}"
     test_helper.prepare_params = f"{test_helper.backup_params} --component-keyring-config={test_helper.mysqldir}/lib/plugin/component_keyring_file.cnf"

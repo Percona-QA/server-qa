@@ -235,7 +235,7 @@ class BackupTestHelper:
             f"--socket={self.socket_path}",
             f"--plugin-dir={self.mysqldir}/lib/plugin",
             "--max-connections=1024",
-            f"--log-error={self.datadir}/error.log",
+            f"--log-error={self.logdir}/error.log",
             "--general-log",
             "--log-error-verbosity=3",
             "--core-file",
@@ -266,7 +266,7 @@ class BackupTestHelper:
 
             if x == self.mysql_start_timeout:
                 pytest.fail(
-                    f"ERR: Database could not be started. Please check error logs: {self.datadir}/error.log"
+                    f"ERR: Database could not be started. Please check error logs: {self.logdir}/error.log"
                 )
 
     def initialize_db(self):
@@ -1040,7 +1040,7 @@ def test_keyring_component_backup(test_helper):
     # Create keyring component files
     manifest_file = os.path.join(test_helper.logdir, "mysqld.my")
     with open(manifest_file, "w") as f:
-        f.write('{\n  "components": "file://component_keyring_file"\n}\n')
+        f.write('{\n  "components": "file://lib/plugin/component_keyring_file"\n}\n')
 
     config_file = os.path.join(test_helper.logdir, "component_keyring_file.cnf")
     with open(config_file, "w") as f:
@@ -1186,4 +1186,3 @@ if __name__ == "__main__":
                 pytest_args.extend(["-k", test_name])
 
     pytest.main(pytest_args)
-

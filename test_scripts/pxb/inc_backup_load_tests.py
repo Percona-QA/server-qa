@@ -24,14 +24,12 @@ except ImportError:
 
 # Set script variables
 HOME = os.path.expanduser("~")
+MYSQL_START_TIMEOUT = 60
 TEST_BASE_DIR = os.environ.get("TEST_BASE_DIR", os.path.join(HOME, "inc_backup_load_tests"))
 XTRABACKUP_DIR = os.environ.get("XTRABACKUP_DIR", os.path.join(HOME, "pxb-9.1/bld_9.1/install/bin"))
 MYSQLDIR = os.environ.get("MYSQLDIR", os.path.join(HOME, "mysql-9.1/bld_9.1/install"))
-DATADIR = os.path.join(TEST_BASE_DIR, f"data_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-BACKUP_DIR = os.path.join(TEST_BASE_DIR, f"dbbackup_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 QASCRIPTS = os.environ.get("QASCRIPTS", os.path.join(HOME, "server-qa"))
-LOGDIR = os.path.join(TEST_BASE_DIR, f"backuplogs_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-MYSQL_START_TIMEOUT = 60
+# DATADIR, BACKUP_DIR, and LOGDIR are now created per-test with test name included
 
 # KMIP Configurations
 KMIP_CONFIGS = {
@@ -59,9 +57,9 @@ class BackupTestHelper:
         self,
         xtrabackup_dir: str = XTRABACKUP_DIR,
         mysqldir: str = MYSQLDIR,
-        datadir: str = DATADIR,
-        backup_dir: str = BACKUP_DIR,
-        logdir: str = LOGDIR,
+        datadir: Optional[str] = None,
+        backup_dir: Optional[str] = None,
+        logdir: Optional[str] = None,
         load_tool: str = LOAD_TOOL,
         load_tool_dir: str = LOAD_TOOL_DIR,
         num_tables: int = NUM_TABLES,
@@ -69,13 +67,11 @@ class BackupTestHelper:
         seconds: int = SECONDS,
         threads: int = THREADS,
         lock_ddl: str = LOCK_DDL,
+        test_name: Optional[str] = None,
     ):
         """Initialize test helper with configuration."""
         self.xtrabackup_dir = xtrabackup_dir
         self.mysqldir = mysqldir
-        self.datadir = datadir
-        self.backup_dir = backup_dir
-        self.logdir = logdir
         self.load_tool = load_tool
         self.load_tool_dir = load_tool_dir
         self.num_tables = num_tables
@@ -84,6 +80,22 @@ class BackupTestHelper:
         self.threads = threads
         self.lock_ddl = lock_ddl
         self.mysql_start_timeout = MYSQL_START_TIMEOUT
+
+        # Create test-specific directories with test name
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        if test_name:
+            # Use test name in directory names
+            test_suffix = test_name.replace("test_", "").replace("_", "-")
+            self.datadir = datadir or os.path.join(TEST_BASE_DIR, f"data_{test_suffix}_{timestamp}")
+            self.backup_dir = backup_dir or os.path.join(TEST_BASE_DIR, f"dbbackup_{test_suffix}_{timestamp}")
+            self.logdir = logdir or os.path.join(TEST_BASE_DIR, f"backuplogs_{test_suffix}_{timestamp}")
+            self.socket_path = os.path.join(TEST_BASE_DIR, f"socket_{test_suffix}.sock")
+        else:
+            # Fallback to timestamp-only if no test name provided
+            self.datadir = datadir or os.path.join(TEST_BASE_DIR, f"data_{timestamp}")
+            self.backup_dir = backup_dir or os.path.join(TEST_BASE_DIR, f"dbbackup_{timestamp}")
+            self.logdir = logdir or os.path.join(TEST_BASE_DIR, f"backuplogs_{timestamp}")
+            self.socket_path = os.path.join(TEST_BASE_DIR, "socket.sock")
 
         # Runtime variables
         self.server_type: Optional[str] = None
@@ -105,9 +117,6 @@ class BackupTestHelper:
 
         # Initialize paths
         os.environ["PATH"] = f"{os.environ.get('PATH', '')}:{self.xtrabackup_dir}"
-
-        # Socket path in TEST_BASE_DIR
-        self.socket_path = os.path.join(TEST_BASE_DIR, "socket.sock")
 
     @staticmethod
     def normalize_version(version_str: str) -> int:
@@ -276,7 +285,7 @@ class BackupTestHelper:
             os.makedirs(self.logdir)
 
         print("=>Creating data directory")
-        log_file = os.path.join(TEST_BASE_DIR, "mysql_install_db.log")
+        log_file = os.path.join(self.logdir, "mysql_install_db.log")
         with open(log_file, "w") as f:
             subprocess.run(
                 [
@@ -581,7 +590,7 @@ class BackupTestHelper:
         # Collect table count before restore
         print("Collecting existing table count")
         old_cwd = os.getcwd()
-        os.chdir(TEST_BASE_DIR)
+        os.chdir(self.logdir)
         try:
             with open("file1", "w") as f:
                 subprocess.run(
@@ -622,7 +631,7 @@ class BackupTestHelper:
             check=True,
         )
 
-        data_orig = os.path.join(TEST_BASE_DIR, f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        data_orig = os.path.join(self.logdir, f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         if os.path.exists(data_orig):
             shutil.rmtree(data_orig)
         shutil.move(self.datadir, data_orig)
@@ -691,7 +700,7 @@ class BackupTestHelper:
             # Collect table count after restore
             print("Collecting table count after restore")
             old_cwd = os.getcwd()
-            os.chdir(TEST_BASE_DIR)
+            os.chdir(self.logdir)
             try:
                 with open("file2", "w") as f:
                     subprocess.run(
@@ -940,9 +949,11 @@ class BackupTestHelper:
 
 # Pytest fixtures and test functions
 @pytest.fixture(scope="function")
-def test_helper():
+def test_helper(request):
     """Create a test helper instance."""
-    helper = BackupTestHelper()
+    # Get the test name from the request
+    test_name = request.node.name if hasattr(request, 'node') else None
+    helper = BackupTestHelper(test_name=test_name)
     helper.version, helper.version_normalized = helper.get_mysql_version()
     helper.check_pt_checksum()
     yield helper
@@ -950,11 +961,11 @@ def test_helper():
 
 
 @pytest.fixture(scope="function", autouse=True)
-def setup_logdir():
+def setup_logdir(test_helper):
     """Setup log directory."""
-    if not os.path.exists(LOGDIR):
-        os.makedirs(LOGDIR)
-    pstress_logdir = os.path.join(LOGDIR, "pstress")
+    if not os.path.exists(test_helper.logdir):
+        os.makedirs(test_helper.logdir)
+    pstress_logdir = os.path.join(test_helper.logdir, "pstress")
     if os.path.exists(pstress_logdir):
         shutil.rmtree(pstress_logdir)
     os.makedirs(pstress_logdir)
@@ -1166,7 +1177,7 @@ if __name__ == "__main__":
         print("   Rocksdb_tests")
         print("   Page_Tracking_tests")
         print(" ")
-        print("4. Logs are available at:", LOGDIR)
+        print("4. Logs are available at:", TEST_BASE_DIR, "(test-specific directories)")
         sys.exit(1)
 
     # Run pytest with selected tests

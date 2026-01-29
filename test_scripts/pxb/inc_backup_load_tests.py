@@ -631,7 +631,7 @@ class BackupTestHelper:
             check=True,
         )
 
-        data_orig = os.path.join(self.logdir, f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        data_orig = os.path.join(self.backup_dir, f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         if os.path.exists(data_orig):
             shutil.rmtree(data_orig)
         shutil.move(self.datadir, data_orig)

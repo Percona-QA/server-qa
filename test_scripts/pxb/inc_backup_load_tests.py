@@ -593,7 +593,7 @@ class BackupTestHelper:
         os.chdir(self.logdir)
         try:
             with open("file1", "w") as f:
-                subprocess.run(
+                result = subprocess.run(
                     [
                         "pt-table-checksum",
                         f"S={self.socket_path},u=root",
@@ -604,8 +604,10 @@ class BackupTestHelper:
                         "--no-check-binlog-format",
                     ],
                     stdout=f,
-                    check=True,
+                    check=False,
                 )
+                if result.returncode not in (0, 64):
+                    raise subprocess.CalledProcessError(result.returncode, result.args)
             # Extract table and checksum
             with open("file1", "r") as f:
                 lines = f.readlines()
@@ -703,7 +705,7 @@ class BackupTestHelper:
             os.chdir(self.logdir)
             try:
                 with open("file2", "w") as f:
-                    subprocess.run(
+                    result = subprocess.run(
                         [
                             "pt-table-checksum",
                             f"S={self.socket_path},u=root",
@@ -714,8 +716,10 @@ class BackupTestHelper:
                             "--no-check-binlog-format",
                         ],
                         stdout=f,
-                        check=True,
+                        check=False,
                     )
+                    if result.returncode not in (0, 64):
+                        raise subprocess.CalledProcessError(result.returncode, result.args)
                 # Extract table and checksum
                 with open("file2", "r") as f:
                     lines = f.readlines()

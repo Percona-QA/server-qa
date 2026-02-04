@@ -30,6 +30,8 @@ XTRABACKUP_DIR = os.environ.get("XTRABACKUP_DIR", os.path.join(HOME, "pxb-9.1/bl
 MYSQLDIR = os.environ.get("MYSQLDIR", os.path.join(HOME, "mysql-9.1/bld_9.1/install"))
 QASCRIPTS = os.environ.get("QASCRIPTS", os.path.join(HOME, "server-qa"))
 # DATADIR, BACKUP_DIR, and LOGDIR are now created per-test with test name included
+# Optional: run xtrabackup under rr (record and replay). Set USE_RR=1 to enable.
+USE_RR = os.environ.get("USE_RR", "0") == "1"
 
 # KMIP Configurations
 KMIP_CONFIGS = {
@@ -48,10 +50,6 @@ THREADS = 5
 
 # PXB Lock option
 LOCK_DDL = "on"  # lock_ddl accepted values (on, reduced)
-
-# Optional: run xtrabackup under rr (record and replay). Set USE_RR=1 to enable.
-USE_RR = os.environ.get("USE_RR", "0") == "1"
-
 
 class BackupTestHelper:
     """Helper class for backup tests."""

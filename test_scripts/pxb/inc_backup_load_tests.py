@@ -463,6 +463,7 @@ class BackupTestHelper:
                     f"-S{self.socket_path}",
             f"--datadir={self.datadir}",
         ] + self.backup_params.split() + ["--register-redo-log-consumer"]
+        print(f"=>Command for executing full backup: {' '.join(cmd)}")
 
         log_file = os.path.join(self.logdir, f"full_backup_{log_date}_log")
         result = self.run_command(cmd, check=False, log_file=log_file)
@@ -499,6 +500,7 @@ class BackupTestHelper:
                     f"-S{self.socket_path}",
                     f"--datadir={self.datadir}",
                 ] + self.backup_params.split() + ["--register-redo-log-consumer"]
+            print(f"=>Command for executing incremental backup: {inc_num}: {' '.join(cmd)}")
 
             log_file = os.path.join(self.logdir, f"inc{inc_num}_backup_{log_date}_log")
             result = self.run_command(cmd, check=False, log_file=log_file)
@@ -534,6 +536,7 @@ class BackupTestHelper:
                                 f"-S{self.socket_path}",
                                 f"--datadir={self.datadir}",
                             ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
+                        print(f"=>Command for executing incremental backup: {inc_num}: {' '.join(cmd)}")
 
                         result = self.run_command(cmd, check=False, log_file=log_file)
                         if result.returncode != 0:
@@ -554,6 +557,7 @@ class BackupTestHelper:
             "--apply-log-only",
             f"--target_dir={self.backup_dir}/full",
         ] + self.prepare_params.split()
+        print(f"=>Command for executing backup preparation: {' '.join(cmd)}")
 
         log_file = os.path.join(self.logdir, f"prepare_full_backup_{log_date}_log")
         result = self.run_command(cmd, check=False, log_file=log_file)
@@ -579,6 +583,7 @@ class BackupTestHelper:
                     f"--target_dir={self.backup_dir}/full",
                     f"--incremental-dir={self.backup_dir}/inc{i}",
                 ] + self.prepare_params.split()
+            print(f"=>Command for executing incremental backup preparation: {' '.join(cmd)}")
 
             log_file = os.path.join(self.logdir, f"prepare_inc{i}_backup_{log_date}_log")
             result = self.run_command(cmd, check=False, log_file=log_file)
@@ -646,6 +651,7 @@ class BackupTestHelper:
             f"--target-dir={self.backup_dir}/full",
             f"--datadir={self.datadir}",
         ] + self.restore_params.split()
+        print(f"=>Command for executing backup restoration: {' '.join(cmd)}")
 
         log_file = os.path.join(self.logdir, f"res_backup_{log_date}_log")
         result = self.run_command(cmd, check=False, log_file=log_file)

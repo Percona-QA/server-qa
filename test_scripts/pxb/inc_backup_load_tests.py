@@ -49,6 +49,9 @@ THREADS = 5
 # PXB Lock option
 LOCK_DDL = "on"  # lock_ddl accepted values (on, reduced)
 
+# Optional: run xtrabackup under rr (record and replay). Set USE_RR=1 to enable.
+USE_RR = os.environ.get("USE_RR", "0") == "1"
+
 
 class BackupTestHelper:
     """Helper class for backup tests."""
@@ -117,6 +120,13 @@ class BackupTestHelper:
 
         # Initialize paths
         os.environ["PATH"] = f"{os.environ.get('PATH', '')}:{self.xtrabackup_dir}"
+
+    def _xtrabackup_cmd_prefix(self) -> List[str]:
+        """Return command prefix for xtrabackup; prepend 'rr' when USE_RR=1."""
+        xtrabackup_path = os.path.join(self.xtrabackup_dir, "xtrabackup")
+        if USE_RR:
+            return ["rr", xtrabackup_path]
+        return [xtrabackup_path]
 
     @staticmethod
     def normalize_version(version_str: str) -> int:
@@ -446,8 +456,7 @@ class BackupTestHelper:
 
         # Full backup
         print("=>Taking full backup")
-        cmd = [
-            os.path.join(self.xtrabackup_dir, "xtrabackup"),
+        cmd = self._xtrabackup_cmd_prefix() + [
             "--no-defaults",
             "--user=root",
             "--password=",
@@ -471,8 +480,7 @@ class BackupTestHelper:
         while self.is_load_running():
             print(f"=>Taking incremental backup: {inc_num}")
             if inc_num == 1:
-                cmd = [
-                    os.path.join(self.xtrabackup_dir, "xtrabackup"),
+                cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults",
                     "--user=root",
                     "--password=",
@@ -483,8 +491,7 @@ class BackupTestHelper:
                     f"--datadir={self.datadir}",
                 ] + self.backup_params.split() + ["--register-redo-log-consumer"]
             else:
-                cmd = [
-                    os.path.join(self.xtrabackup_dir, "xtrabackup"),
+                cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults",
                     "--user=root",
                     "--password=",
@@ -508,8 +515,7 @@ class BackupTestHelper:
                             shutil.rmtree(f"{self.backup_dir}/inc{inc_num}")
 
                         if inc_num == 1:
-                            cmd = [
-                                os.path.join(self.xtrabackup_dir, "xtrabackup"),
+                            cmd = self._xtrabackup_cmd_prefix() + [
                                 "--no-defaults",
                                 "--user=root",
                                 "--password=",
@@ -520,8 +526,7 @@ class BackupTestHelper:
                                 f"--datadir={self.datadir}",
                             ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
                         else:
-                            cmd = [
-                                os.path.join(self.xtrabackup_dir, "xtrabackup"),
+                            cmd = self._xtrabackup_cmd_prefix() + [
                                 "--no-defaults",
                                 "--user=root",
                                 "--password=",
@@ -545,8 +550,7 @@ class BackupTestHelper:
 
         # Prepare backups
         print("=>Preparing full backup")
-        cmd = [
-            os.path.join(self.xtrabackup_dir, "xtrabackup"),
+        cmd = self._xtrabackup_cmd_prefix() + [
             "--no-defaults",
             "--prepare",
             "--apply-log-only",
@@ -563,16 +567,14 @@ class BackupTestHelper:
         for i in range(1, inc_num):
             print(f"=>Preparing incremental backup: {i}")
             if i == inc_num - 1:
-                cmd = [
-                    os.path.join(self.xtrabackup_dir, "xtrabackup"),
+                cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults",
                     "--prepare",
                     f"--target_dir={self.backup_dir}/full",
                     f"--incremental-dir={self.backup_dir}/inc{i}",
                 ] + self.prepare_params.split()
             else:
-                cmd = [
-                    os.path.join(self.xtrabackup_dir, "xtrabackup"),
+                cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults",
                     "--prepare",
                     "--apply-log-only",
@@ -640,8 +642,7 @@ class BackupTestHelper:
 
         # Restore backup
         print("=>Restoring full backup")
-        cmd = [
-            os.path.join(self.xtrabackup_dir, "xtrabackup"),
+        cmd = self._xtrabackup_cmd_prefix() + [
             "--no-defaults",
             "--copy-back",
             f"--target-dir={self.backup_dir}/full",

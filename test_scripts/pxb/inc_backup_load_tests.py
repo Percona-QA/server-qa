@@ -878,7 +878,7 @@ class BackupTestHelper:
 
     def cleanup(self):
         """Cleanup function."""
-        print("################################## CleanUp #######################################")
+        print("\n################################## CleanUp #######################################")
         print("Killing any previously running mysqld process")
 
         # Kill mysqld processes

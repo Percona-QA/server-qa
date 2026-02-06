@@ -747,6 +747,328 @@ class BackupTestHelper:
         else:
             print("Binlog applying skipped, ignore differences between actual data and restored data")
 
+    def run_pstress_prepare(self, tool_options: str):
+        """Run pstress with --prepare to create metadata."""
+        print(f"=>Run pstress to prepare metadata: {tool_options}")
+        pstress_logdir = os.path.join(self.logdir, "pstress")
+        log_file = os.path.join(pstress_logdir, "pstress_prepare.log")
+        cmd = [
+            os.path.join(self.load_tool_dir, self.pstress_binary),
+        ] + tool_options.split() + [
+            "--prepare",
+            "--exact-initial-records",
+            f"--logdir={pstress_logdir}",
+            f"--socket={self.socket_path}",
+        ]
+        result = self.run_command(cmd, check=False, log_file=log_file)
+        if result.returncode != 0:
+            pytest.fail(f"ERR: pstress prepare failed. Check {log_file}")
+        print("..Metadata created")
+
+    def take_full_backup(self, log_date: str) -> None:
+        """Take a single full backup to backup_dir/full."""
+        print("=>Taking full backup")
+        cmd = self._xtrabackup_cmd_prefix() + [
+            "--no-defaults",
+            "--user=root",
+            "--password=",
+            "--backup",
+            f"--target-dir={self.backup_dir}/full",
+            f"-S{self.socket_path}",
+            f"--datadir={self.datadir}",
+        ] + self.backup_params.split() + ["--register-redo-log-consumer"]
+        log_file = os.path.join(self.logdir, f"full_backup_{log_date}_log")
+        result = self.run_command(cmd, check=False, log_file=log_file)
+        if result.returncode != 0:
+            pytest.fail(f"ERR: Full Backup failed. Please check the log at: {log_file}")
+        print(f"..Full backup was successfully created at: {self.backup_dir}/full")
+
+    def take_incremental_backup(
+        self, inc_num: int, incremental_basedir: str, log_date: str
+    ) -> None:
+        """Take one incremental backup."""
+        print(f"=>Taking incremental backup: {inc_num}")
+        cmd = self._xtrabackup_cmd_prefix() + [
+            "--no-defaults",
+            "--user=root",
+            "--password=",
+            "--backup",
+            f"--target-dir={self.backup_dir}/inc{inc_num}",
+            f"--incremental-basedir={incremental_basedir}",
+            f"-S{self.socket_path}",
+            f"--datadir={self.datadir}",
+        ] + self.backup_params.split() + ["--register-redo-log-consumer"]
+        log_file = os.path.join(self.logdir, f"inc{inc_num}_backup_{log_date}_log")
+        result = self.run_command(cmd, check=False, log_file=log_file)
+        if result.returncode != 0:
+            pytest.fail(f"ERR: Incremental Backup failed. Please check the log at: {log_file}")
+        print(f"..Inc backup was successfully created at: {self.backup_dir}/inc{inc_num}")
+
+    def crash_and_save_datadir(self, save_name: str) -> None:
+        """Kill the server with SIGKILL and copy datadir to a sibling directory."""
+        print("Crash the mysql server")
+        if self.mysql_pid:
+            try:
+                os.kill(self.mysql_pid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            self.mysql_pid = None
+        time.sleep(1)
+        crash_save_path = os.path.join(os.path.dirname(self.datadir), save_name)
+        if os.path.exists(crash_save_path):
+            shutil.rmtree(crash_save_path)
+        shutil.copytree(self.datadir, crash_save_path)
+
+    def prepare_crash_backup_chain(self, num_incremental: int, log_date: str) -> None:
+        """Prepare full backup then incremental 1..num_incremental (last one without --apply-log-only)."""
+        print("=>Preparing full backup")
+        cmd = self._xtrabackup_cmd_prefix() + [
+            "--no-defaults",
+            "--prepare",
+            "--apply-log-only",
+            f"--target_dir={self.backup_dir}/full",
+        ] + self.prepare_params.split()
+        log_file = os.path.join(self.logdir, f"prepare_full_backup_{log_date}_log")
+        result = self.run_command(cmd, check=False, log_file=log_file)
+        if result.returncode != 0:
+            pytest.fail(f"ERR: Prepare of full backup failed. Please check the log at: {log_file}")
+
+        for i in range(1, num_incremental + 1):
+            print(f"=>Preparing incremental backup: {i}")
+            if i == num_incremental:
+                cmd = self._xtrabackup_cmd_prefix() + [
+                    "--no-defaults",
+                    "--prepare",
+                    f"--target_dir={self.backup_dir}/full",
+                    f"--incremental-dir={self.backup_dir}/inc{i}",
+                ] + self.prepare_params.split()
+            else:
+                cmd = self._xtrabackup_cmd_prefix() + [
+                    "--no-defaults",
+                    "--prepare",
+                    "--apply-log-only",
+                    f"--target_dir={self.backup_dir}/full",
+                    f"--incremental-dir={self.backup_dir}/inc{i}",
+                ] + self.prepare_params.split()
+            log_file = os.path.join(self.logdir, f"prepare_inc{i}_backup_{log_date}_log")
+            result = self.run_command(cmd, check=False, log_file=log_file)
+            if result.returncode != 0:
+                pytest.fail(f"ERR: Prepare of incremental backup failed. Please check the log at: {log_file}")
+
+    def run_crash_tests_pstress(self, storage_engine: str, page_tracking: bool) -> None:
+        """
+        Run crash tests with pstress: crash server during load, then backup/restore and verify.
+        storage_engine: 'innodb' or 'rocksdb'
+        page_tracking: if True, enable page-tracking and component_mysqlbackup.
+        """
+        if self.load_tool != "pstress":
+            pytest.skip("Crash tests require load_tool=pstress")
+
+        # Set options based on storage engine
+        if storage_engine == "rocksdb":
+            result = subprocess.run(
+                [os.path.join(self.mysqldir, "bin/mysqld"), "--version"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            if "5.7" in result.stdout:
+                pytest.skip("Rocksdb backup is not supported in MS/PS 5.7")
+            if "MySQL Community Server" in result.stdout:
+                pytest.skip("RocksDB is unsupported in MS")
+            self.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
+            self.backup_params = f"--core-file --lock-ddl={self.lock_ddl}"
+            self.prepare_params = "--core-file"
+            self.restore_params = ""
+            load_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --no-encryption --engine=rocksdb"
+        else:
+            self.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
+            self.backup_params = f"--core-file --lock-ddl={self.lock_ddl}"
+            self.prepare_params = "--core-file"
+            self.restore_params = ""
+            load_options = ""  # set after initialize_db() when server_type is known
+
+        if page_tracking:
+            result = subprocess.run(
+                [os.path.join(self.mysqldir, "bin/mysqld"), "--version"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            if "5.7" in result.stdout:
+                pytest.skip("Page Tracking is not supported in MS/PS 5.7")
+            print("Running test with page tracking enabled")
+            self.backup_params = self.backup_params + " --page-tracking"
+
+        if os.path.exists(self.backup_dir):
+            shutil.rmtree(self.backup_dir)
+        os.makedirs(self.backup_dir)
+        log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        self.initialize_db()
+
+        if storage_engine == "innodb":
+            if self.server_type == "MS":
+                load_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --no-encryption --undo-tbs-sql 0 --no-column-compression"
+            else:
+                load_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --no-encryption --undo-tbs-sql 0"
+
+        if storage_engine == "rocksdb":
+            subprocess.run(
+                [
+                    os.path.join(self.mysqldir, "bin/ps-admin"),
+                    "--enable-rocksdb",
+                    "-uroot",
+                    f"-S{self.socket_path}",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            subprocess.run(
+                [
+                    os.path.join(self.mysqldir, "bin/mysql"),
+                    "-uroot",
+                    f"-S{self.socket_path}",
+                    "-e",
+                    "CREATE DATABASE IF NOT EXISTS test",
+                ],
+                check=False,
+            )
+
+        if page_tracking:
+            subprocess.run(
+                [
+                    os.path.join(self.mysqldir, "bin/mysql"),
+                    "-uroot",
+                    f"-S{self.socket_path}",
+                    "-e",
+                    "INSTALL COMPONENT 'file://component_mysqlbackup';",
+                ],
+                check=True,
+            )
+
+        self.run_pstress_prepare(load_options)
+        self.run_load(load_options + " --step 2")
+
+        self.take_full_backup(log_date)
+        if os.path.exists(f"{self.backup_dir}/full_save"):
+            shutil.rmtree(f"{self.backup_dir}/full_save")
+        shutil.copytree(f"{self.backup_dir}/full", f"{self.backup_dir}/full_save")
+        time.sleep(1)
+
+        self.crash_and_save_datadir("data_crash_save1")
+        self.start_server()
+        self.run_load(load_options + " --step 3")
+
+        for inc_num in range(1, 5):
+            base = f"{self.backup_dir}/full" if inc_num == 1 else f"{self.backup_dir}/inc{inc_num - 1}"
+            self.take_incremental_backup(inc_num, base, log_date)
+            inc_save = f"{self.backup_dir}/inc{inc_num}_save"
+            if os.path.exists(inc_save):
+                shutil.rmtree(inc_save)
+            shutil.copytree(f"{self.backup_dir}/inc{inc_num}", inc_save)
+
+        self.crash_and_save_datadir("data_crash_save2")
+        self.start_server()
+        self.run_load(load_options + " --step 4")
+
+        for inc_num in range(5, 9):
+            base = f"{self.backup_dir}/inc{inc_num - 1}"
+            self.take_incremental_backup(inc_num, base, log_date)
+            inc_save = f"{self.backup_dir}/inc{inc_num}_save"
+            if os.path.exists(inc_save):
+                shutil.rmtree(inc_save)
+            shutil.copytree(f"{self.backup_dir}/inc{inc_num}", inc_save)
+
+        self.prepare_crash_backup_chain(8, log_date)
+
+        print("Collecting existing table count")
+        orig_data = self.count_rows()
+
+        print("Stopping mysql server and moving data directory")
+        subprocess.run(
+            [
+                os.path.join(self.mysqldir, "bin/mysqladmin"),
+                "-uroot",
+                f"-S{self.socket_path}",
+                "shutdown",
+            ],
+            check=True,
+        )
+        data_orig = os.path.join(
+            os.path.dirname(self.datadir),
+            f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        )
+        if os.path.exists(data_orig):
+            shutil.rmtree(data_orig)
+        shutil.move(self.datadir, data_orig)
+
+        print("=>Restoring full backup")
+        cmd = self._xtrabackup_cmd_prefix() + [
+            "--no-defaults",
+            "--copy-back",
+            f"--target-dir={self.backup_dir}/full",
+            f"--datadir={self.datadir}",
+        ] + self.restore_params.split()
+        log_file = os.path.join(self.logdir, f"res_backup_{log_date}_log")
+        result = self.run_command(cmd, check=False, log_file=log_file)
+        if result.returncode != 0:
+            pytest.fail(f"ERR: Restore of full backup failed. Please check the log at: {log_file}")
+        self.start_server()
+
+        if (
+            "binlog-encryption" not in self.mysqld_options
+            and "--encrypt-binlog" not in self.mysqld_options
+            and "skip-log-bin" not in self.mysqld_options
+        ):
+            print("Check xtrabackup for binlog position")
+            binlog_info_file = os.path.join(self.backup_dir, "full/xtrabackup_binlog_info")
+            with open(binlog_info_file, "r") as f:
+                line = f.readline().strip()
+                parts = line.split()
+                xb_binlog_file = parts[0] if parts else ""
+                xb_binlog_pos = parts[1] if len(parts) > 1 else ""
+            print(f"Xtrabackup binlog position: {xb_binlog_file}, {xb_binlog_pos}")
+            print(f"Applying binlog to restored data starting from {xb_binlog_file}, {xb_binlog_pos}")
+            binlog_path = os.path.join(data_orig, xb_binlog_file)
+            if os.path.exists(binlog_path):
+                mysqlbinlog = subprocess.Popen(
+                    [
+                        os.path.join(self.mysqldir, "bin/mysqlbinlog"),
+                        binlog_path,
+                        f"--start-position={xb_binlog_pos}",
+                    ],
+                    stdout=subprocess.PIPE,
+                )
+                mysql = subprocess.Popen(
+                    [
+                        os.path.join(self.mysqldir, "bin/mysql"),
+                        "-uroot",
+                        f"-S{self.socket_path}",
+                    ],
+                    stdin=mysqlbinlog.stdout,
+                )
+                mysqlbinlog.stdout.close()
+                mysql.communicate()
+                if mysql.returncode != 0:
+                    print("ERR: The binlog could not be applied to the restored data")
+            time.sleep(5)
+            print("Collecting table count after restore")
+            res_data = self.count_rows()
+            if orig_data != res_data:
+                print("ERR: Data changed after restore.")
+                print("Original data:")
+                print(orig_data)
+                print("Restored data:")
+                print(res_data)
+                pytest.fail("Data mismatch after restore")
+            print("Data is the same before and after restore: Pass")
+        else:
+            print("Binlog applying skipped, ignore differences between actual data and restored data")
+
+        self.check_tables()
+
     def count_rows(self, database: str = "test") -> str:
         """Count rows and checksums of all tables in a database."""
         result = subprocess.run(
@@ -902,6 +1224,23 @@ class BackupTestHelper:
             print("=>Found previously existing data directory")
             shutil.rmtree(self.datadir)
             print("..Deleted")
+
+        # Clean crash-test save directories (siblings of datadir)
+        for name in ("data_crash_save1", "data_crash_save2"):
+            crash_save = os.path.join(os.path.dirname(self.datadir), name)
+            if os.path.exists(crash_save):
+                print(f"=>Removing {crash_save}")
+                shutil.rmtree(crash_save)
+                print("..Deleted")
+        try:
+            for entry in os.listdir(os.path.dirname(self.datadir)):
+                if entry.startswith("data_orig_"):
+                    path = os.path.join(os.path.dirname(self.datadir), entry)
+                    if os.path.isdir(path):
+                        shutil.rmtree(path)
+                        print(f"..Removed {path}")
+        except OSError:
+            pass
 
         if os.path.exists(os.path.join(self.mysqldir, "bin/mysqld.my")):
             print("=>Found older manifest file in mysql bin directory")
@@ -1149,6 +1488,26 @@ def test_page_tracking_backup(test_helper):
     test_helper.check_tables()
 
 
+def test_crash_innodb_no_page_tracking(test_helper):
+    """Crash test: InnoDB, page-tracking disabled."""
+    test_helper.run_crash_tests_pstress(storage_engine="innodb", page_tracking=False)
+
+
+def test_crash_innodb_page_tracking(test_helper):
+    """Crash test: InnoDB, page-tracking enabled."""
+    test_helper.run_crash_tests_pstress(storage_engine="innodb", page_tracking=True)
+
+
+def test_crash_rocksdb_no_page_tracking(test_helper):
+    """Crash test: RocksDB, page-tracking disabled."""
+    test_helper.run_crash_tests_pstress(storage_engine="rocksdb", page_tracking=False)
+
+
+def test_crash_rocksdb_page_tracking(test_helper):
+    """Crash test: RocksDB, page-tracking enabled."""
+    test_helper.run_crash_tests_pstress(storage_engine="rocksdb", page_tracking=True)
+
+
 if __name__ == "__main__":
     # Allow running as a script for easier debugging
     import argparse
@@ -1157,7 +1516,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "test_suites",
         nargs="*",
-        choices=["Normal_and_Encryption_tests", "Kmip_Encryption_tests", "Kms_Encryption_tests", "Rocksdb_tests", "Page_Tracking_tests"],
+        choices=["Normal_and_Encryption_tests", "Kmip_Encryption_tests", "Kms_Encryption_tests", "Rocksdb_tests", "Page_Tracking_tests", "Crash_tests"],
         help="Test suites to run",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
@@ -1199,6 +1558,12 @@ if __name__ == "__main__":
         "Normal_and_Encryption_tests": ["test_normal_backup", "test_keyring_plugin_backup", "test_keyring_component_backup"],
         "Rocksdb_tests": ["test_rocksdb_backup"],
         "Page_Tracking_tests": ["test_page_tracking_backup"],
+        "Crash_tests": [
+            "test_crash_innodb_no_page_tracking",
+            "test_crash_innodb_page_tracking",
+            "test_crash_rocksdb_no_page_tracking",
+            "test_crash_rocksdb_page_tracking",
+        ],
     }
 
     for suite in args.test_suites:

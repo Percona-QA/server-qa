@@ -1556,7 +1556,7 @@ if __name__ == "__main__":
     # Map test suites to test functions
     test_mapping = {
         "Normal_and_Encryption_tests": ["test_normal_backup", "test_keyring_plugin_backup", "test_keyring_component_backup", "test_crash_innodb_no_page_tracking"],
-        "Rocksdb_tests": ["test_rocksdb_backup","test_crash_rocksdb_no_page_tracking","test_crash_rocksdb_page_tracking"],
+        "Rocksdb_tests": ["test_rocksdb_backup","test_crash_rocksdb_no_page_tracking"],
         "Page_Tracking_tests": ["test_page_tracking_backup", "test_crash_innodb_page_tracking", "test_crash_rocksdb_page_tracking"],
     }
 

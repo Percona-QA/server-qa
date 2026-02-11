@@ -1337,6 +1337,29 @@ def test_normal_backup(test_helper):
     test_helper.check_tables()
 
 
+def test_memory_estimation_backup(test_helper):
+    """Test incremental backup and restore with memory estimation (sysbench only)."""
+    if not test_helper.version or not test_helper.version_normalized:
+        test_helper.version, test_helper.version_normalized = test_helper.get_mysql_version()
+    if test_helper.version_normalized < 80000:
+        pytest.skip("Memory estimation is not supported in PXB 2.4 (5.7), skipping tests")
+
+    original_tool = test_helper.load_tool
+    test_helper.load_tool = "sysbench"
+    try:
+        test_helper.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
+        test_helper.backup_params = f"--core-file --lock-ddl={test_helper.lock_ddl}"
+        test_helper.prepare_params = "--core-file --use-free-memory-pct=20"
+        test_helper.restore_params = ""
+
+        test_helper.initialize_db()
+        test_helper.run_load("")
+        test_helper.take_backup()
+        test_helper.check_tables()
+    finally:
+        test_helper.load_tool = original_tool
+
+
 def test_keyring_plugin_backup(test_helper):
     """Test backup with keyring_file plugin."""
     # Ensure version is detected
@@ -1555,8 +1578,14 @@ if __name__ == "__main__":
 
     # Map test suites to test functions
     test_mapping = {
-        "Normal_and_Encryption_tests": ["test_normal_backup", "test_keyring_plugin_backup", "test_keyring_component_backup", "test_crash_innodb_no_page_tracking"],
-        "Rocksdb_tests": ["test_rocksdb_backup","test_crash_rocksdb_no_page_tracking"],
+        "Normal_and_Encryption_tests": [
+            "test_normal_backup",
+            "test_keyring_plugin_backup",
+            "test_keyring_component_backup",
+            "test_memory_estimation_backup",
+            "test_crash_innodb_no_page_tracking",
+        ],
+        "Rocksdb_tests": ["test_rocksdb_backup", "test_crash_rocksdb_no_page_tracking"],
         "Page_Tracking_tests": ["test_page_tracking_backup", "test_crash_innodb_page_tracking", "test_crash_rocksdb_page_tracking"],
     }
 

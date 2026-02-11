@@ -242,8 +242,8 @@ class BackupTestHelper:
     def start_server(self):
         """Start MySQL server."""
         print("=>Starting MySQL server")
-        cmd = [
-            os.path.join(self.mysqldir, "bin/mysqld"),
+        mysqld_path = os.path.join(self.mysqldir, "bin/mysqld")
+        cmd = (["rr", mysqld_path] if USE_RR else [mysqld_path]) + [
             "--no-defaults",
             f"--basedir={self.mysqldir}",
             f"--datadir={self.datadir}",

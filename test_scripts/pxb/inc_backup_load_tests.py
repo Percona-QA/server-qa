@@ -1560,9 +1560,14 @@ if __name__ == "__main__":
         "Page_Tracking_tests": ["test_page_tracking_backup", "test_crash_innodb_page_tracking", "test_crash_rocksdb_page_tracking"],
     }
 
+    selected_tests = []
     for suite in args.test_suites:
         if suite in test_mapping:
-            for test_name in test_mapping[suite]:
-                pytest_args.extend(["-k", test_name])
+            selected_tests.extend(test_mapping[suite])
+
+    if selected_tests:
+        # Build a single -k expression
+        k_expr = " or ".join(selected_tests)
+        pytest_args.extend(["-k", k_expr])
 
     pytest.main(pytest_args)

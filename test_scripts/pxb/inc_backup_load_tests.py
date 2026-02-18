@@ -129,39 +129,14 @@ def test_keyring_plugin_backup(test_helper):
     test_helper.check_tables()
 
 
-def test_keyring_component_backup(test_helper):
-    """Test backup with keyring_file component."""
-    # Ensure version is detected
-    if not test_helper.version or not test_helper.version_normalized:
-        test_helper.version, test_helper.version_normalized = test_helper.get_mysql_version()
-    
-    if test_helper.version_normalized < 80000:
-        pytest.skip("Component not supported in 5.7")
+def test_keyring_component_backup_no_page_tracking(test_helper):
+    """Test backup with keyring_file component, page-tracking disabled."""
+    test_helper.run_keyring_component_backup(page_tracking=False)
 
-    # Create keyring component files
-    manifest_file = os.path.join(test_helper.mysqldir, "bin/mysqld.my")
-    with open(manifest_file, "w") as f:
-        f.write('{\n  "components": "file://component_keyring_file"\n}\n')
 
-    config_file = os.path.join(test_helper.mysqldir, "lib/plugin/component_keyring_file.cnf")
-    with open(config_file, "w") as f:
-        f.write(f'{{\n  "path": "{test_helper.logdir}/keyring",\n  "read_only": false\n}}\n')
-
-    test_helper.backup_params = f"--xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = f"{test_helper.backup_params} --component-keyring-config={config_file}"
-    test_helper.restore_params = test_helper.backup_params
-
-    if test_helper.server_type == "MS":
-        test_helper.mysqld_options = "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
-        tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds 50 --undo-tbs-sql 0 --no-column-compression"
-    else:
-        test_helper.mysqld_options = "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
-        tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds 50 --undo-tbs-sql 0"
-
-    test_helper.initialize_db()
-    test_helper.run_load(tool_options)
-    test_helper.take_backup()
-    test_helper.check_tables()
+def test_keyring_component_backup_page_tracking(test_helper):
+    """Test backup with keyring_file component, page-tracking enabled."""
+    test_helper.run_keyring_component_backup(page_tracking=True)
 
 
 def test_rocksdb_backup(test_helper):
@@ -297,7 +272,8 @@ if __name__ == "__main__":
         "Normal_and_Encryption_tests": [
             "test_normal_backup",
             "test_keyring_plugin_backup",
-            "test_keyring_component_backup",
+            "test_keyring_component_backup_no_page_tracking",
+            "test_keyring_component_backup_page_tracking",
             "test_memory_estimation_backup",
             "test_crash_innodb_no_page_tracking",
         ],

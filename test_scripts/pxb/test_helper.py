@@ -863,6 +863,44 @@ class BackupTestHelper:
             if result.returncode != 0:
                 pytest.fail(f"ERR: Prepare of incremental backup failed. Please check the log at: {log_file}")
 
+    def run_keyring_component_backup(self, page_tracking: bool = False) -> None:
+        """
+        Run backup with keyring_file component (encryption).
+        page_tracking: if True, add --page-tracking to backup params.
+        """
+        if not self.version or not self.version_normalized:
+            self.version, self.version_normalized = self.get_mysql_version()
+        if self.version_normalized < 80000:
+            pytest.skip("Component not supported in 5.7")
+        if not self.server_type:
+            self.get_mysql_type()
+
+        manifest_file = os.path.join(self.mysqldir, "bin/mysqld.my")
+        with open(manifest_file, "w", encoding="utf-8") as f:
+            f.write('{\n  "components": "file://component_keyring_file"\n}\n')
+
+        config_file = os.path.join(self.mysqldir, "lib/plugin/component_keyring_file.cnf")
+        with open(config_file, "w", encoding="utf-8") as f:
+            f.write(f'{{\n  "path": "{self.logdir}/keyring",\n  "read_only": false\n}}\n')
+
+        self.backup_params = f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={self.lock_ddl}"
+        if page_tracking:
+            self.backup_params += " --page-tracking"
+        self.prepare_params = f"{self.backup_params} --component-keyring-config={config_file}"
+        self.restore_params = self.backup_params
+
+        if self.server_type == "MS":
+            self.mysqld_options = "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
+            tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds 50 --undo-tbs-sql 0 --no-column-compression"
+        else:
+            self.mysqld_options = "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
+            tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds 50 --undo-tbs-sql 0"
+
+        self.initialize_db()
+        self.run_load(tool_options)
+        self.take_backup()
+        self.check_tables()
+
     def run_crash_tests_pstress(self, storage_engine: str, page_tracking: bool) -> None:
         """
         Run crash tests with pstress: crash server during load, then backup/restore and verify.

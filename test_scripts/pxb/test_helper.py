@@ -863,6 +863,49 @@ class BackupTestHelper:
             if result.returncode != 0:
                 pytest.fail(f"ERR: Prepare of incremental backup failed. Please check the log at: {log_file}")
 
+    def run_keyring_plugin_backup(self, page_tracking: bool = False) -> None:
+        """
+        Run backup with keyring_file plugin (encryption).
+        Keyring plugin is not supported in 8.4+. page_tracking: if True, add --page-tracking to backup params.
+        """
+        if not self.version or not self.version_normalized:
+            self.version, self.version_normalized = self.get_mysql_version()
+        if not self.server_type:
+            self.get_mysql_type()
+
+        if self.version_normalized >= 80400:
+            pytest.skip(
+                f"Keyring plugin not supported in 8.4+ (detected version: {self.version}, normalized: {self.version_normalized})"
+            )
+        if self.version_normalized < 80000:
+            pytest.skip("Page Tracking is not supported in MS/PS 5.7")
+
+        self.backup_params = f"--keyring_file_data={self.logdir}/keyring --xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={self.lock_ddl}"
+        if page_tracking:
+            self.backup_params += " --page-tracking"
+        self.prepare_params = f"--keyring_file_data={self.logdir}/keyring --xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin --core-file"
+        self.restore_params = self.prepare_params
+
+        if self.version_normalized >= 80000:
+            if self.server_type == "MS":
+                self.mysqld_options = f"--early-plugin-load=keyring_file.so --keyring_file_data={self.logdir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
+                tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --undo-tbs-sql 0 --no-column-compression"
+            else:
+                self.mysqld_options = f"--early-plugin-load=keyring_file.so --keyring_file_data={self.logdir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
+                tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --undo-tbs-sql 0"
+        else:
+            if self.server_type == "MS":
+                self.mysqld_options = f"--log-bin=binlog --early-plugin-load=keyring_file.so --keyring_file_data={self.logdir}/keyring --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
+                tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --undo-tbs-sql 0 --no-ddl --no-column-compression"
+            else:
+                self.mysqld_options = f"--log-bin=binlog --early-plugin-load=keyring_file.so --keyring_file_data={self.logdir}/keyring --innodb-encrypt-tables=ON --encrypt-binlog --encrypt-tmp-files --innodb-encrypt-online-alter-logs=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
+                tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --undo-tbs-sql 0 --no-temp-tables"
+
+        self.initialize_db()
+        self.run_load(tool_options)
+        self.take_backup()
+        self.check_tables()
+
     def run_keyring_component_backup(self, page_tracking: bool = False) -> None:
         """
         Run backup with keyring_file component (encryption).

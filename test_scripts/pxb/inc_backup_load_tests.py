@@ -166,15 +166,15 @@ def test_keyring_component_backup(test_helper):
 
 def test_rocksdb_backup(test_helper):
     """Test backup with RocksDB."""
-    result = subprocess.run(
-        [os.path.join(test_helper.mysqldir, "bin/mysqld"), "--version"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    if "5.7" in result.stdout:
+    # Ensure version and server type are detected (same pattern as version-only checks)
+    if not test_helper.version or not test_helper.version_normalized:
+        test_helper.version, test_helper.version_normalized = test_helper.get_mysql_version()
+    if not test_helper.server_type:
+        test_helper.get_mysql_type()
+
+    if test_helper.version_normalized < 80000:
         pytest.skip("Rocksdb backup is not supported in MS/PS 5.7")
-    if "MySQL Community Server" in result.stdout:
+    if test_helper.server_type == "MS":
         pytest.skip("RocksDB is unsupported in MS")
 
     test_helper.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
@@ -201,13 +201,11 @@ def test_rocksdb_backup(test_helper):
 
 def test_page_tracking_backup(test_helper):
     """Test backup with page tracking."""
-    result = subprocess.run(
-        [os.path.join(test_helper.mysqldir, "bin/mysqld"), "--version"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    if "5.7" in result.stdout:
+    # Ensure version is detected (same pattern as other version checks)
+    if not test_helper.version or not test_helper.version_normalized:
+        test_helper.version, test_helper.version_normalized = test_helper.get_mysql_version()
+
+    if test_helper.version_normalized < 80000:
         pytest.skip("Page Tracking is not supported in MS/PS 5.7")
 
     test_helper.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"

@@ -154,7 +154,7 @@ class BackupTestHelper:
         return int(f"{major:02d}{minor:02d}{patch:02d}")
 
     def get_mysql_version(self) -> Tuple[str, int]:
-        """Get MySQL version and normalized version."""
+        """Get MySQL version and normalized version. Also sets server_type from version output."""
         try:
             result = subprocess.run(
                 [os.path.join(self.mysqldir, "bin/mysqld"), "--version"],
@@ -162,6 +162,8 @@ class BackupTestHelper:
                 text=True,
                 check=True,
             )
+            if self.server_type is None:
+                self.server_type = "MS" if "MySQL Community Server" in result.stdout else "PS"
             version_match = re.search(r"Ver\s+([0-9]+\.[0-9]+[\.0-9]*)", result.stdout)
             if version_match:
                 ver = version_match.group(1)
@@ -170,6 +172,12 @@ class BackupTestHelper:
         except Exception as e:
             print(f"Error getting MySQL version: {e}")
         return "0.0.0", 0
+
+    def get_mysql_type(self) -> str:
+        """Get server type (PS or MS). Uses version output; does not require server to be running."""
+        if self.server_type is None:
+            self.get_mysql_version()
+        return self.server_type or "PS"
 
     def check_pt_checksum(self):
         """Check PT Checksum tools compatibility."""

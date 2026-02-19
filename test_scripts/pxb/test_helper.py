@@ -85,8 +85,13 @@ class BackupTestHelper:
         # Create test-specific directories with test name
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         if test_name:
-            # Use test name in directory names
-            test_suffix = test_name.replace("test_", "").replace("_", "-")
+            # Use test name in directory names; sanitize for paths (e.g. parametrized: test_foo[bar] -> foo-bar)
+            test_suffix = (
+                test_name.replace("test_", "")
+                .replace("_", "-")
+                .replace("[", "-")
+                .replace("]", "")
+            )
             self.datadir = datadir or os.path.join(TEST_BASE_DIR, f"data_{test_suffix}_{timestamp}")
             self.backup_dir = backup_dir or os.path.join(TEST_BASE_DIR, f"dbbackup_{test_suffix}_{timestamp}")
             self.logdir = logdir or os.path.join(TEST_BASE_DIR, f"backuplogs_{test_suffix}_{timestamp}")

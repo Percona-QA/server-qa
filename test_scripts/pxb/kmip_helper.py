@@ -31,6 +31,7 @@ class KMIPHelper:
         self.kmip_configs = kmip_configs or self.DEFAULT_KMIP_CONFIGS.copy()
         self.kmip_container_names: List[str] = []
         self.kmip_config: Dict[str, str] = {}
+        self.last_error: str = ""  # Set before return False to surface failure reason
 
     def init_kmip_configs(self):
         """Initialize default configurations if not already set."""
@@ -122,10 +123,12 @@ class KMIPHelper:
     def validate_environment(self, kmip_type: str) -> bool:
         """Validate KMIP type."""
         if not kmip_type:
+            self.last_error = "No KMIP type specified"
             print("ERROR: No KMIP type specified", file=sys.stderr)
             return False
 
         if kmip_type not in self.kmip_configs:
+            self.last_error = f"Invalid type '{kmip_type}'. Available: {list(self.kmip_configs.keys())}"
             print(f"ERROR: Invalid type '{kmip_type}'. Available types:", file=sys.stderr)
             for key in self.kmip_configs.keys():
                 print(f"  - {key}", file=sys.stderr)
@@ -205,6 +208,7 @@ class KMIPHelper:
         if self.cleanup_existing_container(container_name):
             print("Done")
         else:
+            self.last_error = "Cleanup of existing container failed"
             print("Failed")
             return False
 
@@ -225,6 +229,7 @@ class KMIPHelper:
                 self.cleanup_existing_container(kmip_name)
 
             if not self.validate_port_available(port):
+                self.last_error = f"Port {port} still in use after cleanup. Check and free the port."
                 print(f"Still unavailable {port}, please check and clean up port {port} and retry")
                 return False
 
@@ -251,7 +256,10 @@ class KMIPHelper:
                 check=False,
             )
             if result.returncode != 0:
+                err = (result.stderr or result.stdout or "").strip() or f"docker run exited with code {result.returncode}"
+                self.last_error = "Docker run failed: " + err
                 print("Failed")
+                print(result.stderr)
                 return False
 
             # Get container ID
@@ -262,7 +270,8 @@ class KMIPHelper:
                 check=True,
             )
             print(f"Started (ID: {result.stdout.strip()})")
-        except Exception:
+        except Exception as e:
+            self.last_error = "Docker start failed: " + str(e)
             print("Failed")
             return False
 
@@ -316,6 +325,7 @@ class KMIPHelper:
         try:
             self.generate_kmip_config(kmip_type, addr, port, cert_dir)
         except Exception as e:
+            self.last_error = "Generate KMIP config failed: " + str(e)
             print(f"Failed to generate KMIP config: {e}")
             return False
 
@@ -403,6 +413,7 @@ class KMIPHelper:
 
     def start_kmip_server(self, kmip_type: str) -> bool:
         """Main function to start KMIP server."""
+        self.last_error = ""
         if not self.validate_environment(kmip_type):
             return False
 
@@ -416,6 +427,7 @@ class KMIPHelper:
         elif kmip_type == "ciphertrust":
             return self.setup_cipher_api()
         else:
+            self.last_error = f"Unsupported KMIP type: {kmip_type}"
             print(f"Unsupported KMIP Type: {kmip_type}")
             return False
 

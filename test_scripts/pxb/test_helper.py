@@ -992,7 +992,8 @@ class BackupTestHelper:
         if not self.kmip_helper:
             self.kmip_helper = KMIPHelper(KMIP_CONFIGS)
         if not self.kmip_helper.start_kmip_server(vault_type):
-            pytest.fail(f"Failed to start KMIP server for vault_type={vault_type}")
+            detail = getattr(self.kmip_helper, "last_error", None) or "unknown"
+            pytest.fail(f"Failed to start KMIP server for vault_type={vault_type}. {detail}")
 
         manifest_file = os.path.join(self.mysqldir, "bin/mysqld.my")
         with open(manifest_file, "w", encoding="utf-8") as f:

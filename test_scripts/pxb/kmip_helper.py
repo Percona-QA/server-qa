@@ -55,7 +55,6 @@ class KMIPHelper:
 
             subprocess.run(
                 ["docker", "rm", "-f", container_id],
-                capture_output=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
@@ -251,8 +250,7 @@ class KMIPHelper:
                     image,
                 ],
                 capture_output=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                text=True,
                 check=False,
             )
             if result.returncode != 0:
@@ -286,7 +284,6 @@ class KMIPHelper:
                     f"{container_name}:/opt/certs/root_certificate.pem",
                     os.path.join(cert_dir, "root_certificate.pem"),
                 ],
-                capture_output=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
@@ -298,7 +295,6 @@ class KMIPHelper:
                     f"{container_name}:/opt/certs/client_key_jane_doe.pem",
                     os.path.join(cert_dir, "client_key.pem"),
                 ],
-                capture_output=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
@@ -310,7 +306,6 @@ class KMIPHelper:
                     f"{container_name}:/opt/certs/client_certificate_jane_doe.pem",
                     os.path.join(cert_dir, "client_certificate.pem"),
                 ],
-                capture_output=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,

@@ -488,7 +488,7 @@ class BackupTestHelper:
             print(result.stderr)
             pytest.fail(f"ERR: Full Backup failed. Please check the log at: {log_file}")
         else:
-            print(f"..Full backup was successfully created at: {self.backup_dir}/full.\n   Logs available at: {log_file}")
+            print(f"..Full backup was successfully created at: {self.backup_dir}/full.\n  Logs available at: {log_file}")
 
         time.sleep(1)
 
@@ -560,7 +560,7 @@ class BackupTestHelper:
                     else:
                         pytest.fail(f"ERR: Incremental Backup failed. Please check the log at: {log_file}")
             else:
-                print(f"..Inc backup was successfully created at: {self.backup_dir}/inc{inc_num}.\n   Logs available at: {log_file}")
+                print(f"..Inc backup was successfully created at: {self.backup_dir}/inc{inc_num}.\n  Logs available at: {log_file}")
 
             inc_num += 1
             time.sleep(10)  # Sleep before next backup
@@ -579,7 +579,7 @@ class BackupTestHelper:
         if result.returncode != 0:
             pytest.fail(f"ERR: Prepare of full backup failed. Please check the log at: {log_file}")
         else:
-            print(f"..Prepare of full backup was successful.\n   Logs available at: {log_file}")
+            print(f"..Prepare of full backup was successful.\n  Logs available at: {log_file}")
 
         for i in range(1, inc_num):
             print(f"=>Preparing incremental backup: {i}")
@@ -604,7 +604,7 @@ class BackupTestHelper:
             if result.returncode != 0:
                 pytest.fail(f"ERR: Prepare of incremental backup failed. Please check the log at: {log_file}")
             else:
-                print(f"..Prepare of incremental backup was successful.\n   Logs available at: {log_file}")
+                print(f"..Prepare of incremental backup was successful.\n  Logs available at: {log_file}")
 
         # Collect table count before restore
         print("Collecting existing table count")
@@ -671,7 +671,7 @@ class BackupTestHelper:
         if result.returncode != 0:
             pytest.fail(f"ERR: Restore of full backup failed. Please check the log at: {log_file}")
         else:
-            print(f"..Restore of full backup was successful.\n   Logs available at: {log_file}")
+            print(f"..Restore of full backup was successful.\n  Logs available at: {log_file}")
 
         self.start_server()
 

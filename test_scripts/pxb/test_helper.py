@@ -476,6 +476,8 @@ class BackupTestHelper:
         log_file = os.path.join(self.logdir, f"full_backup_{log_date}_log")
         result = self.run_command(cmd, check=False, log_file=log_file)
         if result.returncode != 0:
+            print(f"=>Backup failed: {''.join(result.stdout)}")
+            print(result.stderr)
             pytest.fail(f"ERR: Full Backup failed. Please check the log at: {log_file}")
         else:
             print(f"..Full backup was successfully created at: {self.backup_dir}/full. Logs available at: {log_file}")
@@ -877,7 +879,7 @@ class BackupTestHelper:
             pytest.skip(
                 f"Keyring plugin not supported in 8.4+ (detected version: {self.version}, normalized: {self.version_normalized})"
             )
-        if self.version_normalized < 80000:
+        if page_tracking and self.version_normalized < 80000:
             pytest.skip("Page Tracking is not supported in MS/PS 5.7")
 
         self.backup_params = f"--keyring_file_data={self.logdir}/keyring --xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={self.lock_ddl}"
@@ -902,6 +904,17 @@ class BackupTestHelper:
                 tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --undo-tbs-sql 0 --no-temp-tables"
 
         self.initialize_db()
+        if page_tracking:
+            subprocess.run(
+                [
+                    os.path.join(self.mysqldir, "bin/mysql"),
+                    "-uroot",
+                    f"-S{self.socket_path}",
+                    "-e",
+                    "INSTALL COMPONENT 'file://component_mysqlbackup';",
+                ],
+                check=True,
+            )
         self.run_load(tool_options)
         self.take_backup()
         self.check_tables()
@@ -940,6 +953,17 @@ class BackupTestHelper:
             tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds 50 --undo-tbs-sql 0"
 
         self.initialize_db()
+        if page_tracking:
+            subprocess.run(
+                [
+                    os.path.join(self.mysqldir, "bin/mysql"),
+                    "-uroot",
+                    f"-S{self.socket_path}",
+                    "-e",
+                    "INSTALL COMPONENT 'file://component_mysqlbackup';",
+                ],
+                check=True,
+            )
         self.run_load(tool_options)
         self.take_backup()
         self.check_tables()

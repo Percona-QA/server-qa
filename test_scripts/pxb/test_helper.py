@@ -35,7 +35,7 @@ USE_RR = os.environ.get("USE_RR", "0") == "1"
 
 # KMIP Configurations
 KMIP_CONFIGS = {
-    "pykmip": "addr=127.0.0.1,image=mohitpercona/kmip:latest,port=5696,name=kmip_pykmip",
+    "pykmip": "addr=127.0.0.1,image=satyapercona/kmip:latest,port=5696,name=kmip_pykmip",
     # "hashicorp": "addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp-kmip-setup.sh",
     # "ciphertrust": "addr=127.0.0.1,port=5696,name=kmip_ciphertrust,setup_script=setup_kmip_api.py",
 }
@@ -964,6 +964,54 @@ class BackupTestHelper:
                 ],
                 check=True,
             )
+        self.run_load(tool_options)
+        self.take_backup()
+        self.check_tables()
+
+    def run_kmip_component_backup(self, vault_type: str) -> None:
+        """
+        Run backup with keyring_kmip component for the given vault type.
+        Starts the KMIP server for vault_type, creates manifest and config, then runs backup flow.
+        """
+        if not self.version or not self.version_normalized:
+            self.version, self.version_normalized = self.get_mysql_version()
+        if not self.server_type:
+            self.get_mysql_type()
+
+        if self.version_normalized < 80000:
+            pytest.skip("KMIP component is not supported in MS/PS 5.7")
+        if self.server_type == "MS":
+            pytest.skip("MS 8.0 does not support keyring kmip for encryption, skipping keyring kmip tests")
+
+        if not KMIPHelper:
+            pytest.skip("KMIP helper not available (kmip_helper module)")
+
+        if vault_type not in KMIP_CONFIGS:
+            pytest.skip(f"Unknown vault_type '{vault_type}'. Available: {list(KMIP_CONFIGS.keys())}")
+
+        if not self.kmip_helper:
+            self.kmip_helper = KMIPHelper(KMIP_CONFIGS)
+        if not self.kmip_helper.start_kmip_server(vault_type):
+            pytest.fail(f"Failed to start KMIP server for vault_type={vault_type}")
+
+        manifest_file = os.path.join(self.mysqldir, "bin/mysqld.my")
+        with open(manifest_file, "w", encoding="utf-8") as f:
+            f.write('{\n  "components": "file://component_keyring_kmip"\n}\n')
+
+        cert_dir = os.path.join(os.path.expanduser("~"), self.kmip_helper.kmip_config["cert_dir"])
+        kmip_cnf_src = os.path.join(cert_dir, "component_keyring_kmip.cnf")
+        kmip_cnf_dst = os.path.join(self.mysqldir, "lib/plugin/component_keyring_kmip.cnf")
+        if os.path.isfile(kmip_cnf_src):
+            shutil.copy2(kmip_cnf_src, kmip_cnf_dst)
+
+        self.backup_params = f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin --core-file"
+        self.prepare_params = f"{self.backup_params} --component-keyring-config={kmip_cnf_dst}"
+        self.restore_params = self.backup_params
+
+        self.mysqld_options = "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
+        tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --undo-tbs-sql 0"
+
+        self.initialize_db()
         self.run_load(tool_options)
         self.take_backup()
         self.check_tables()

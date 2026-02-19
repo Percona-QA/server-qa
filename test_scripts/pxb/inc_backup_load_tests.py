@@ -10,7 +10,7 @@ import subprocess
 import shutil
 import pytest
 
-from test_helper import BackupTestHelper, TEST_BASE_DIR
+from test_helper import BackupTestHelper, TEST_BASE_DIR, KMIP_CONFIGS
 
 
 # Pytest fixtures and test functions
@@ -181,6 +181,16 @@ def test_crash_rocksdb_page_tracking(test_helper):
     test_helper.run_crash_tests_pstress(storage_engine="rocksdb", page_tracking=True)
 
 
+# One test per vault_type in KMIP_CONFIGS (mirrors run_kmip_component_tests in inc_backup_load_tests.sh)
+VAULT_TYPES = list(KMIP_CONFIGS.keys())
+
+
+@pytest.mark.parametrize("vault_type", VAULT_TYPES)
+def test_kmip_component_backup(test_helper, vault_type):
+    """Test backup with keyring_kmip component for vault type."""
+    test_helper.run_kmip_component_backup(vault_type)
+
+
 if __name__ == "__main__":
     # Allow running as a script for easier debugging
     import argparse
@@ -237,6 +247,7 @@ if __name__ == "__main__":
             "test_memory_estimation_backup",
             "test_crash_innodb_no_page_tracking",
         ],
+        "Kmip_Encryption_tests": ["test_kmip_component_backup"],
         "Rocksdb_tests": ["test_rocksdb_backup", "test_crash_rocksdb_no_page_tracking"],
         "Page_Tracking_tests": ["test_page_tracking_backup", "test_crash_innodb_page_tracking", "test_crash_rocksdb_page_tracking"],
     }

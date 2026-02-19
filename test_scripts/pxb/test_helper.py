@@ -990,7 +990,7 @@ class BackupTestHelper:
             pytest.skip(f"Unknown vault_type '{vault_type}'. Available: {list(KMIP_CONFIGS.keys())}")
 
         if not self.kmip_helper:
-            self.kmip_helper = KMIPHelper(KMIP_CONFIGS)
+            self.kmip_helper = KMIPHelper(KMIP_CONFIGS, cert_base_dir=TEST_BASE_DIR)
         if not self.kmip_helper.start_kmip_server(vault_type):
             detail = getattr(self.kmip_helper, "last_error", None) or "unknown"
             pytest.fail(f"Failed to start KMIP server for vault_type={vault_type}. {detail}")
@@ -999,7 +999,7 @@ class BackupTestHelper:
         with open(manifest_file, "w", encoding="utf-8") as f:
             f.write('{\n  "components": "file://component_keyring_kmip"\n}\n')
 
-        cert_dir = os.path.join(os.path.expanduser("~"), self.kmip_helper.kmip_config["cert_dir"])
+        cert_dir = self.kmip_helper.kmip_config["cert_dir"]
         kmip_cnf_src = os.path.join(cert_dir, "component_keyring_kmip.cnf")
         kmip_cnf_dst = os.path.join(self.mysqldir, "lib/plugin/component_keyring_kmip.cnf")
         if os.path.isfile(kmip_cnf_src):

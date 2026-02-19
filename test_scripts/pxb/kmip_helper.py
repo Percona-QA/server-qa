@@ -26,11 +26,18 @@ class KMIPHelper:
         # "ciphertrust": "addr=127.0.0.1,port=5696,name=kmip_ciphertrust,setup_script=setup_kmip_api.py",
     }
 
-    def __init__(self, kmip_configs: Optional[Dict[str, str]] = None):
-        """Initialize KMIP helper with configurations."""
+    def __init__(
+        self,
+        kmip_configs: Optional[Dict[str, str]] = None,
+        cert_base_dir: Optional[str] = None,
+    ):
+        """Initialize KMIP helper with configurations.
+        cert_base_dir: If set, KMIP cert dirs are created under this path (e.g. TEST_BASE_DIR); else under ~.
+        """
         self.kmip_configs = kmip_configs or self.DEFAULT_KMIP_CONFIGS.copy()
         self.kmip_container_names: List[str] = []
         self.kmip_config: Dict[str, str] = {}
+        self.cert_base_dir = cert_base_dir
         self.last_error: str = ""  # Set before return False to surface failure reason
 
     def init_kmip_configs(self):
@@ -170,6 +177,11 @@ class KMIPHelper:
         if "cert_dir" not in self.kmip_config:
             self.kmip_config["cert_dir"] = f"kmip_certs_{kmip_type}"
 
+    def _cert_dir_path(self) -> str:
+        """Return full path to the cert directory for current kmip_config."""
+        base = self.cert_base_dir or os.path.expanduser("~")
+        return os.path.join(base, self.kmip_config["cert_dir"])
+
     def generate_kmip_config(self, kmip_type: str, addr: str, port: str, cert_dir: str):
         """Generate KMIP configuration file."""
         config_file = os.path.join(cert_dir, "component_keyring_kmip.cnf")
@@ -194,7 +206,7 @@ class KMIPHelper:
         addr = self.kmip_config["addr"]
         port = self.kmip_config["port"]
         image = self.kmip_config.get("image", "")
-        cert_dir = os.path.join(os.path.expanduser("~"), self.kmip_config["cert_dir"])
+        cert_dir = self._cert_dir_path()
 
         if os.path.exists(cert_dir):
             print(f"Cleaning existing certificate directory: {cert_dir}")
@@ -324,6 +336,7 @@ class KMIPHelper:
             print(f"Failed to generate KMIP config: {e}")
             return False
 
+        self.kmip_config["cert_dir"] = cert_dir
         print(f"PyKMIP server started successfully on address {addr} and port {port}")
         return True
 
@@ -334,7 +347,7 @@ class KMIPHelper:
         addr = self.kmip_config["addr"]
         port = self.kmip_config["port"]
         setup_script = self.kmip_config.get("setup_script", "")
-        cert_dir = os.path.join(os.path.expanduser("~"), self.kmip_config["cert_dir"])
+        cert_dir = self._cert_dir_path()
 
         print("Cleaning up existing container... ", end="", flush=True)
         if self.cleanup_existing_container(container_name):
@@ -398,6 +411,7 @@ class KMIPHelper:
             print(f"Failed to setup HashiCorp: {e}")
             return False
 
+        self.kmip_config["cert_dir"] = cert_dir
         print(f"Hashicorp server started successfully on address {addr} and port {port}")
         return True
 

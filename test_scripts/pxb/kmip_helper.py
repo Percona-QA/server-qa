@@ -16,6 +16,17 @@ import shutil
 from typing import Dict, List, Optional
 
 
+def _fully_qualified_image(image: str) -> str:
+    """Return a fully qualified image name for Podman/short-name resolution (no TTY)."""
+    if not image:
+        return image
+    # If the first segment (registry) contains a dot, it's already qualified (e.g. docker.io, quay.io).
+    first = image.split("/")[0]
+    if "." in first or first == "localhost":
+        return image
+    return "docker.io/" + image
+
+
 class KMIPHelper:
     """Helper class for managing KMIP servers."""
 
@@ -244,8 +255,9 @@ class KMIPHelper:
                 print(f"Still unavailable {port}, please check and clean up port {port} and retry")
                 return False
 
-        # Start container
+        # Start container (use FQIN so Podman does not prompt for short-name resolution without TTY)
         print("Starting container... ", end="", flush=True)
+        image_fq = _fully_qualified_image(image)
         try:
             result = subprocess.run(
                 [
@@ -259,7 +271,7 @@ class KMIPHelper:
                     "--cap-add=NET_ADMIN",
                     "-p",
                     f"{port}:5696",
-                    image,
+                    image_fq,
                 ],
                 capture_output=True,
                 text=True,

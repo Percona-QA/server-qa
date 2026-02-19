@@ -476,7 +476,7 @@ class BackupTestHelper:
         log_file = os.path.join(self.logdir, f"full_backup_{log_date}_log")
         result = self.run_command(cmd, check=False, log_file=log_file)
         if result.returncode != 0:
-            print(f"=>Backup failed: {''.join(result.stdout)}")
+            print(f"=>Backup failed: {' '.join(result.stdout)}")
             print(result.stderr)
             pytest.fail(f"ERR: Full Backup failed. Please check the log at: {log_file}")
         else:

@@ -247,9 +247,14 @@ class BackupTestHelper:
                 text=True,
                 check=check,
             )
-            if log_file and result.stdout:
-                with open(log_file, "a") as f:
-                    f.write(result.stdout)
+            if log_file and capture_output:
+                with open(log_file, "a", encoding="utf-8") as f:
+                    if result.stdout:
+                        f.write(result.stdout)
+                    if result.stderr:
+                        if result.stdout:
+                            f.write("\n--- stderr ---\n")
+                        f.write(result.stderr)
             return result
 
     def start_server(self):

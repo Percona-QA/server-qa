@@ -993,6 +993,11 @@ class BackupTestHelper:
         if vault_type not in KMIP_CONFIGS:
             pytest.skip(f"Unknown vault_type '{vault_type}'. Available: {list(KMIP_CONFIGS.keys())}")
 
+        if vault_type == "fortanix" and (
+            not os.environ.get("FORTANIX_EMAIL", "").strip() or not os.environ.get("FORTANIX_PASSWORD", "").strip()
+        ):
+            pytest.skip("Fortanix KMIP requires FORTANIX_EMAIL and FORTANIX_PASSWORD environment variables")
+
         if not self.kmip_helper:
             self.kmip_helper = KMIPHelper(KMIP_CONFIGS, cert_base_dir=TEST_BASE_DIR)
         if not self.kmip_helper.start_kmip_server(vault_type):

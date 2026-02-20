@@ -428,6 +428,81 @@ class KMIPHelper:
         print(f"Hashicorp server started successfully on address {addr} and port {port}")
         return True
 
+    def setup_fortanix(self) -> bool:
+        """Setup Fortanix KMIP (remote server). Requires FORTANIX_EMAIL and FORTANIX_PASSWORD."""
+        kmip_type = "fortanix"
+        addr = self.kmip_config["addr"]
+        port = self.kmip_config["port"]
+        setup_script = self.kmip_config.get("setup_script", "fortanix_kmip_setup.py")
+        cert_dir = self._cert_dir_path()
+
+        email = os.environ.get("FORTANIX_EMAIL", "").strip()
+        password = os.environ.get("FORTANIX_PASSWORD", "").strip()
+        if not email or not password:
+            self.last_error = (
+                "FORTANIX_EMAIL and FORTANIX_PASSWORD environment variables must be set for Fortanix KMIP. "
+                "export FORTANIX_EMAIL=your-email@example.com FORTANIX_PASSWORD=your-password"
+            )
+            print("ERROR: Both FORTANIX_EMAIL and FORTANIX_PASSWORD must be set for Fortanix KMIP.", file=sys.stderr)
+            return False
+
+        if os.path.exists(cert_dir):
+            print(f"Cleaning existing certificate directory: {cert_dir}")
+            shutil.rmtree(cert_dir, ignore_errors=True)
+        os.makedirs(cert_dir, mode=0o700, exist_ok=True)
+
+        # Prefer local script (same directory as this module), else download from GitHub
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        script_path = os.path.join(script_dir, setup_script)
+
+        if not os.path.isfile(script_path):
+            print(f"Local script not found: {script_path}, downloading from GitHub...")
+            try:
+                import urllib.request
+                url = f"https://raw.githubusercontent.com/Percona-QA/percona-qa/refs/heads/master/{setup_script}"
+                with urllib.request.urlopen(url) as response:
+                    script_content = response.read().decode("utf-8")
+                if not script_content:
+                    self.last_error = "Downloaded Fortanix setup script is empty"
+                    return False
+                result = subprocess.run(
+                    [sys.executable, "-", f"--cert-dir={cert_dir}", f"--email={email}", f"--password={password}"],
+                    input=script_content,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    cwd=script_dir,
+                )
+            except Exception as e:
+                self.last_error = f"Fortanix setup failed: {e}"
+                print(f"Failed to run Fortanix setup: {e}")
+                return False
+        else:
+            result = subprocess.run(
+                [sys.executable, script_path, f"--cert-dir={cert_dir}", f"--email={email}", f"--password={password}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        if result.returncode != 0:
+            self.last_error = f"Fortanix setup script exited with code {result.returncode}: {(result.stderr or result.stdout or '').strip()}"
+            print(f"Failed to run Fortanix setup script (exit code {result.returncode})")
+            if result.stderr:
+                print(result.stderr)
+            return False
+
+        try:
+            self.generate_kmip_config(kmip_type, addr, port, cert_dir)
+        except Exception as e:
+            self.last_error = "Generate KMIP config failed: " + str(e)
+            print(f"Failed to generate KMIP config: {e}")
+            return False
+
+        self.kmip_config["cert_dir"] = cert_dir
+        print(f"Fortanix server setup successfully on address {addr} and port {port}")
+        return True
+
     def setup_cipher_api(self) -> bool:
         """Placeholder for CipherTrust setup."""
         print("CipherTrust setup not implemented yet")
@@ -446,6 +521,8 @@ class KMIPHelper:
             return self.setup_pykmip()
         elif kmip_type == "hashicorp":
             return self.setup_hashicorp()
+        elif kmip_type == "fortanix":
+            return self.setup_fortanix()
         elif kmip_type == "ciphertrust":
             return self.setup_cipher_api()
         else:

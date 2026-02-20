@@ -78,24 +78,16 @@ def test_memory_estimation_backup(test_helper):
         test_helper.load_tool = original_tool
 
 
-def test_keyring_plugin_backup_no_page_tracking(test_helper):
-    """Test backup with keyring_file plugin, page-tracking disabled."""
-    test_helper.run_keyring_plugin_backup(page_tracking=False)
+@pytest.mark.parametrize("page_tracking", [False, True], ids=["no_page_tracking", "page_tracking"])
+def test_keyring_plugin_backup(test_helper, page_tracking):
+    """Test backup with keyring_file plugin, page-tracking on/off."""
+    test_helper.run_keyring_plugin_backup(page_tracking=page_tracking)
 
 
-def test_keyring_plugin_backup_page_tracking(test_helper):
-    """Test backup with keyring_file plugin, page-tracking enabled."""
-    test_helper.run_keyring_plugin_backup(page_tracking=True)
-
-
-def test_keyring_component_backup_no_page_tracking(test_helper):
-    """Test backup with keyring_file component, page-tracking disabled."""
-    test_helper.run_keyring_component_backup(page_tracking=False)
-
-
-def test_keyring_component_backup_page_tracking(test_helper):
-    """Test backup with keyring_file component, page-tracking enabled."""
-    test_helper.run_keyring_component_backup(page_tracking=True)
+@pytest.mark.parametrize("page_tracking", [False, True], ids=["no_page_tracking", "page_tracking"])
+def test_keyring_component_backup(test_helper, page_tracking):
+    """Test backup with keyring_file component, page-tracking on/off."""
+    test_helper.run_keyring_component_backup(page_tracking=page_tracking)
 
 
 def test_rocksdb_backup(test_helper):
@@ -233,16 +225,14 @@ if __name__ == "__main__":
     test_mapping = {
         "Normal_and_Encryption_tests": [
             "test_normal_backup",
-            "test_keyring_plugin_backup_no_page_tracking",
-            "test_keyring_plugin_backup_page_tracking",
-            "test_keyring_component_backup_no_page_tracking",
-            "test_keyring_component_backup_page_tracking",
+            "test_keyring_plugin_backup",
+            "test_keyring_component_backup",
             "test_memory_estimation_backup",
-            "test_crash_backup and innodb-no_pt",
+            "test_crash_backup[innodb-no_pt]",
         ],
         "Kmip_Encryption_tests": ["test_kmip_component_backup"],
-        "Rocksdb_tests": ["test_rocksdb_backup", "test_crash_backup and rocksdb"],
-        "Page_Tracking_tests": ["test_page_tracking_backup", "test_crash_backup and pt"],
+        "Rocksdb_tests": ["test_rocksdb_backup", "test_crash_backup[rocksdb-no_pt or rocksdb-pt]"],
+        "Page_Tracking_tests": ["test_page_tracking_backup", "test_crash_backup[innodb-pt or rocksdb-pt]"],
         "Crash_tests": ["test_crash_backup"],
     }
 

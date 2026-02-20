@@ -161,29 +161,22 @@ def test_page_tracking_backup(test_helper):
     test_helper.check_tables()
 
 
-def test_crash_innodb_no_page_tracking(test_helper):
-    """Crash test: InnoDB, page-tracking disabled."""
-    test_helper.run_crash_tests_pstress(storage_engine="innodb", page_tracking=False)
+# Crash tests: (storage_engine, page_tracking)
+CRASH_TEST_PARAMS = [
+    ("innodb", False),
+    ("innodb", True),
+    ("rocksdb", False),
+    ("rocksdb", True),
+]
 
-
-def test_crash_innodb_page_tracking(test_helper):
-    """Crash test: InnoDB, page-tracking enabled."""
-    test_helper.run_crash_tests_pstress(storage_engine="innodb", page_tracking=True)
-
-
-def test_crash_rocksdb_no_page_tracking(test_helper):
-    """Crash test: RocksDB, page-tracking disabled."""
-    test_helper.run_crash_tests_pstress(storage_engine="rocksdb", page_tracking=False)
-
-
-def test_crash_rocksdb_page_tracking(test_helper):
-    """Crash test: RocksDB, page-tracking enabled."""
-    test_helper.run_crash_tests_pstress(storage_engine="rocksdb", page_tracking=True)
+@pytest.mark.parametrize("storage_engine,page_tracking", CRASH_TEST_PARAMS, ids=["innodb-no_pt", "innodb-pt", "rocksdb-no_pt", "rocksdb-pt"])
+def test_crash_backup(test_helper, storage_engine, page_tracking):
+    """Crash test: storage engine with page-tracking on/off."""
+    test_helper.run_crash_tests_pstress(storage_engine=storage_engine, page_tracking=page_tracking)
 
 
 # One test per vault_type in KMIP_CONFIGS (mirrors run_kmip_component_tests in inc_backup_load_tests.sh)
 VAULT_TYPES = list(KMIP_CONFIGS.keys())
-
 
 @pytest.mark.parametrize("vault_type", VAULT_TYPES)
 def test_kmip_component_backup(test_helper, vault_type):
@@ -245,11 +238,12 @@ if __name__ == "__main__":
             "test_keyring_component_backup_no_page_tracking",
             "test_keyring_component_backup_page_tracking",
             "test_memory_estimation_backup",
-            "test_crash_innodb_no_page_tracking",
+            "test_crash_backup and innodb-no_pt",
         ],
         "Kmip_Encryption_tests": ["test_kmip_component_backup"],
-        "Rocksdb_tests": ["test_rocksdb_backup", "test_crash_rocksdb_no_page_tracking"],
-        "Page_Tracking_tests": ["test_page_tracking_backup", "test_crash_innodb_page_tracking", "test_crash_rocksdb_page_tracking"],
+        "Rocksdb_tests": ["test_rocksdb_backup", "test_crash_backup and rocksdb"],
+        "Page_Tracking_tests": ["test_page_tracking_backup", "test_crash_backup and pt"],
+        "Crash_tests": ["test_crash_backup"],
     }
 
     selected_tests = []

@@ -78,13 +78,13 @@ def test_memory_estimation_backup(test_helper):
         test_helper.load_tool = original_tool
 
 
-@pytest.mark.parametrize("page_tracking", [False, True], ids=["no_page_tracking", "page_tracking"])
+@pytest.mark.parametrize("page_tracking", [False, True], ids=["no_pt", "pt"])
 def test_keyring_plugin_backup(test_helper, page_tracking):
     """Test backup with keyring_file plugin, page-tracking on/off."""
     test_helper.run_keyring_plugin_backup(page_tracking=page_tracking)
 
 
-@pytest.mark.parametrize("page_tracking", [False, True], ids=["no_page_tracking", "page_tracking"])
+@pytest.mark.parametrize("page_tracking", [False, True], ids=["no_pt", "pt"])
 def test_keyring_component_backup(test_helper, page_tracking):
     """Test backup with keyring_file component, page-tracking on/off."""
     test_helper.run_keyring_component_backup(page_tracking=page_tracking)

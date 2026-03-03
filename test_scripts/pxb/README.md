@@ -25,6 +25,17 @@ Tests in `inc_backup_load_tests.py` run backup/restore with a load tool (pquery/
 
    If `DISABLE_CLEANUP` is not set or is not `1`, cleanup runs as usual.
 
+   **For KMS encryption tests** (`test_kms_component_backup`), set:
+
+   ```bash
+   export KMS_KEYID=<your-key-id>
+   export KMS_SECRET_KEY=<your-secret-key>
+   export KMS_AUTH_KEY=<your-auth-key>
+   export KMS_REGION=us-east-1
+   ```
+
+   If any of these are unset, KMS tests are skipped. PS 8.0+ only; skipped on MS.
+
 3. **Run from the `pxb` directory** so that `test_helper` and `kmip_helper` can be imported:
 
    ```bash
@@ -91,6 +102,13 @@ Vault types come from `KMIP_CONFIGS` (e.g. `pykmip`, `fortanix`). Node id is the
 pytest inc_backup_load_tests.py -v -s -k "test_kmip_component_backup[pykmip]"
 ```
 
+**KMS (page_tracking = no_pt | pt):**  
+Requires `KMS_KEYID`, `KMS_SECRET_KEY`, `KMS_AUTH_KEY`, `KMS_REGION`. Node ids: `no_pt`, `pt`.
+
+```bash
+pytest inc_backup_load_tests.py -v -s -k "test_kms_component_backup[pt]"
+```
+
 To see all node ids:
 
 ```bash
@@ -125,6 +143,7 @@ The script defines logical **suites** and maps them to test names. You can run a
 ```bash
 python inc_backup_load_tests.py Normal_and_Encryption_tests
 python inc_backup_load_tests.py Kmip_Encryption_tests
+python inc_backup_load_tests.py Kms_Encryption_tests
 python inc_backup_load_tests.py Rocksdb_tests
 python inc_backup_load_tests.py Page_Tracking_tests
 python inc_backup_load_tests.py Crash_tests
@@ -142,6 +161,7 @@ python inc_backup_load_tests.py -v Normal_and_Encryption_tests
 |------------------------------|----------------------|
 | Normal_and_Encryption_tests  | `test_normal_backup or test_keyring_plugin_backup or test_keyring_component_backup or test_memory_estimation_backup or test_crash_backup[innodb-no_pt]` |
 | Kmip_Encryption_tests        | `test_kmip_component_backup` |
+| Kms_Encryption_tests         | `test_kms_component_backup` |
 | Rocksdb_tests                | `test_rocksdb_backup or test_crash_backup[rocksdb-no_pt] or test_crash_backup[rocksdb-pt]` |
 | Page_Tracking_tests          | `test_page_tracking_backup or test_crash_backup[innodb-pt] or test_crash_backup[rocksdb-pt]` |
 | Crash_tests                  | `test_crash_backup` |
@@ -182,3 +202,4 @@ pytest inc_backup_load_tests.py --collect-only -q
 | `test_page_tracking_backup`| Non-param     | Page tracking; skipped on 5.7 |
 | `test_crash_backup`         | Param         | `[innodb-no_pt]`, `[innodb-pt]`, `[rocksdb-no_pt]`, `[rocksdb-pt]` |
 | `test_kmip_component_backup`| Param         | One id per vault in `KMIP_CONFIGS` (e.g. `[pykmip]`, `[fortanix]`) |
+| `test_kms_component_backup` | Param `[no_pt]`, `[pt]` | keyring_kms component; requires `KMS_KEYID`, `KMS_SECRET_KEY`, `KMS_AUTH_KEY`, `KMS_REGION`; skipped on 5.7 and MS |

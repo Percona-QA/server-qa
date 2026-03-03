@@ -1050,7 +1050,7 @@ class BackupTestHelper:
 
         manifest_file = os.path.join(self.mysqldir, "bin/mysqld.my")
         config_file = os.path.join(self.mysqldir, "lib/plugin/component_keyring_kms.cnf")
-        keyring_path = os.path.join(self.mysqldir, "keyring_kms")
+        keyring_path = os.path.join(self.logdir, "keyring_kms")
 
         try:
             with open(manifest_file, "w", encoding="utf-8") as f:
@@ -1508,6 +1508,11 @@ class BackupTestHelper:
         if os.path.exists(os.path.join(self.logdir, "keyfile")):
             print("=>Found older keyring_component keyfile in lib/plugin directory")
             os.remove(os.path.join(self.logdir, "keyfile"))
+            print("..Deleted")
+
+        if os.path.exists(os.path.join(self.logdir, "keyring_kms")):
+            print("=>Found older keyring_kms file in backuplogs directory")
+            os.remove(os.path.join(self.logdir, "keyring_kms"))
             print("..Deleted")
 
         # Cleanup KMIP containers

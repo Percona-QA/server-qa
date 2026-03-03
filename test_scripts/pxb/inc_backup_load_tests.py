@@ -23,7 +23,8 @@ def test_helper(request):
     helper.version, helper.version_normalized = helper.get_mysql_version()
     helper.check_pt_checksum()
     yield helper
-    helper.cleanup()
+    if os.environ.get("DISABLE_CLEANUP") != "1":
+        helper.cleanup()
 
 
 @pytest.fixture(scope="function", autouse=True)

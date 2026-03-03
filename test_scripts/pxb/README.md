@@ -17,6 +17,14 @@ Tests in `inc_backup_load_tests.py` run backup/restore with a load tool (pquery/
    export LOAD_TOOL_DIR=$HOME/lab/pstress/src
    ```
 
+   **Optional:** To skip cleanup after each test (e.g. for debugging), set:
+
+   ```bash
+   export DISABLE_CLEANUP=1
+   ```
+
+   If `DISABLE_CLEANUP` is not set or is not `1`, cleanup runs as usual.
+
 3. **Run from the `pxb` directory** so that `test_helper` and `kmip_helper` can be imported:
 
    ```bash

@@ -1026,6 +1026,83 @@ class BackupTestHelper:
         self.take_backup()
         self.check_tables()
 
+    def run_kms_component_backup(self, page_tracking: bool = False) -> None:
+        """
+        Run backup with keyring_kms component (encryption).
+        Requires KMS_KEYID, KMS_SECRET_KEY, KMS_AUTH_KEY, KMS_REGION environment variables.
+        page_tracking: if True, add --page-tracking to backup params and install component_mysqlbackup.
+        """
+        if not self.version or not self.version_normalized:
+            self.version, self.version_normalized = self.get_mysql_version()
+        if not self.server_type:
+            self.get_mysql_type()
+
+        if self.version_normalized < 80000:
+            pytest.skip("KMS component is not supported in MS/PS 5.7")
+        if self.server_type == "MS":
+            pytest.skip("MS 8.0 does not support keyring kms for encryption, skipping keyring kms tests")
+
+        # Validate KMS env vars (read from instance attributes set in __init__ from env)
+        if not (self.kms_id and self.kms_auth_key and self.kms_secret_key and self.kms_region):
+            pytest.skip(
+                "KMS tests require KMS_KEYID, KMS_SECRET_KEY, KMS_AUTH_KEY and KMS_REGION environment variables"
+            )
+
+        manifest_file = os.path.join(self.mysqldir, "bin/mysqld.my")
+        config_file = os.path.join(self.mysqldir, "lib/plugin/component_keyring_kms.cnf")
+        keyring_path = os.path.join(self.mysqldir, "keyring_kms")
+
+        try:
+            with open(manifest_file, "w", encoding="utf-8") as f:
+                f.write('{\n  "components": "file://component_keyring_kms"\n}\n')
+
+            with open(config_file, "w", encoding="utf-8") as f:
+                f.write(
+                    f'{{\n  "path": "{keyring_path}", "region": "{self.kms_region}", '
+                    f'"kms_key": "{self.kms_id}", "auth_key": "{self.kms_auth_key}", '
+                    f'"secret_access_key": "{self.kms_secret_key}", "read_only": false\n}}\n'
+                )
+
+            self.backup_params = (
+                f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={self.lock_ddl}"
+            )
+            if page_tracking:
+                self.backup_params += " --page-tracking"
+            self.prepare_params = f"{self.backup_params} --component-keyring-config={config_file}"
+            self.restore_params = self.backup_params
+
+            self.mysqld_options = (
+                "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON "
+                "--innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates "
+                "--gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON "
+                "--binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
+            )
+            tool_options = (
+                f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} "
+                f"--seconds {self.seconds} --undo-tbs-sql 0"
+            )
+
+            self.initialize_db()
+            if page_tracking:
+                subprocess.run(
+                    [
+                        os.path.join(self.mysqldir, "bin/mysql"),
+                        "-uroot",
+                        f"-S{self.socket_path}",
+                        "-e",
+                        "INSTALL COMPONENT 'file://component_mysqlbackup';",
+                    ],
+                    check=True,
+                )
+            self.run_load(tool_options)
+            self.take_backup()
+            self.check_tables()
+        finally:
+            if os.path.exists(manifest_file):
+                os.remove(manifest_file)
+            if os.path.exists(config_file):
+                os.remove(config_file)
+
     def run_crash_tests_pstress(self, storage_engine: str, page_tracking: bool) -> None:
         """
         Run crash tests with pstress: crash server during load, then backup/restore and verify.
@@ -1421,6 +1498,11 @@ class BackupTestHelper:
         if os.path.exists(os.path.join(self.mysqldir, "lib/plugin/component_keyring_file.cnf")):
             print("=>Found older keyring_component config file in lib/plugin directory")
             os.remove(os.path.join(self.mysqldir, "lib/plugin/component_keyring_file.cnf"))
+            print("..Deleted")
+
+        if os.path.exists(os.path.join(self.mysqldir, "lib/plugin/component_keyring_kms.cnf")):
+            print("=>Found older keyring_kms config file in lib/plugin directory")
+            os.remove(os.path.join(self.mysqldir, "lib/plugin/component_keyring_kms.cnf"))
             print("..Deleted")
 
         if os.path.exists(os.path.join(self.logdir, "keyfile")):

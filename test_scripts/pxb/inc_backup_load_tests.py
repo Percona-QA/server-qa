@@ -177,6 +177,12 @@ def test_kmip_component_backup(test_helper, vault_type):
     test_helper.run_kmip_component_backup(vault_type)
 
 
+@pytest.mark.parametrize("page_tracking", [False, True], ids=["no_pt", "pt"])
+def test_kms_component_backup(test_helper, page_tracking):
+    """Test backup with keyring_kms component, page-tracking on/off. Requires KMS_KEYID, KMS_SECRET_KEY, KMS_AUTH_KEY, KMS_REGION."""
+    test_helper.run_kms_component_backup(page_tracking=page_tracking)
+
+
 if __name__ == "__main__":
     # Allow running as a script for easier debugging
     import argparse
@@ -232,6 +238,7 @@ if __name__ == "__main__":
             "test_crash_backup[innodb-no_pt]",
         ],
         "Kmip_Encryption_tests": ["test_kmip_component_backup"],
+        "Kms_Encryption_tests": ["test_kms_component_backup"],
         "Rocksdb_tests": ["test_rocksdb_backup", "test_crash_backup[rocksdb-no_pt or rocksdb-pt]"],
         "Page_Tracking_tests": ["test_page_tracking_backup", "test_crash_backup[innodb-pt or rocksdb-pt]"],
         "Crash_tests": ["test_crash_backup"],

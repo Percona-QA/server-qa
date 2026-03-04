@@ -833,6 +833,134 @@ class BackupTestHelper:
             shutil.rmtree(crash_save_path)
         shutil.copytree(self.datadir, crash_save_path)
 
+    def _run_crash_flow(self, load_options: str, log_date: str) -> None:
+        """
+        Shared crash test flow: pstress prepare, full backup, crash, incremental backups,
+        prepare chain, restore, optional binlog apply, check_tables.
+        Assumes backup_params, prepare_params, restore_params, mysqld_options are set and
+        initialize_db() has been called (server is running).
+        """
+        self.run_pstress_prepare(load_options)
+        self.run_load(load_options + " --step 2")
+
+        self.take_full_backup(log_date)
+        if os.path.exists(f"{self.backup_dir}/full_save"):
+            shutil.rmtree(f"{self.backup_dir}/full_save")
+        shutil.copytree(f"{self.backup_dir}/full", f"{self.backup_dir}/full_save")
+        time.sleep(1)
+
+        self.crash_and_save_datadir("data_crash_save1")
+        self.start_server()
+        self.run_load(load_options + " --step 3")
+
+        for inc_num in range(1, 5):
+            base = f"{self.backup_dir}/full" if inc_num == 1 else f"{self.backup_dir}/inc{inc_num - 1}"
+            self.take_incremental_backup(inc_num, base, log_date)
+            inc_save = f"{self.backup_dir}/inc{inc_num}_save"
+            if os.path.exists(inc_save):
+                shutil.rmtree(inc_save)
+            shutil.copytree(f"{self.backup_dir}/inc{inc_num}", inc_save)
+
+        self.crash_and_save_datadir("data_crash_save2")
+        self.start_server()
+        self.run_load(load_options + " --step 4")
+
+        for inc_num in range(5, 9):
+            base = f"{self.backup_dir}/inc{inc_num - 1}"
+            self.take_incremental_backup(inc_num, base, log_date)
+            inc_save = f"{self.backup_dir}/inc{inc_num}_save"
+            if os.path.exists(inc_save):
+                shutil.rmtree(inc_save)
+            shutil.copytree(f"{self.backup_dir}/inc{inc_num}", inc_save)
+
+        self.prepare_crash_backup_chain(8, log_date)
+
+        print("Collecting existing table count")
+        orig_data = self.count_rows()
+
+        print("Stopping mysql server and moving data directory")
+        subprocess.run(
+            [
+                os.path.join(self.mysqldir, "bin/mysqladmin"),
+                "-uroot",
+                f"-S{self.socket_path}",
+                "shutdown",
+            ],
+            check=True,
+        )
+        data_orig = os.path.join(
+            os.path.dirname(self.datadir),
+            f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        )
+        if os.path.exists(data_orig):
+            shutil.rmtree(data_orig)
+        shutil.move(self.datadir, data_orig)
+
+        print("=>Restoring full backup")
+        cmd = self._xtrabackup_cmd_prefix() + [
+            "--no-defaults",
+            "--copy-back",
+            f"--target-dir={self.backup_dir}/full",
+            f"--datadir={self.datadir}",
+        ] + self.restore_params.split()
+        log_file = os.path.join(self.logdir, f"res_backup_{log_date}_log")
+        result = self.run_command(cmd, check=False, log_file=log_file)
+        if result.returncode != 0:
+            pytest.fail(f"ERR: Restore of full backup failed. Please check the log at: {log_file}")
+        self.start_server()
+
+        if (
+            "binlog-encryption" not in self.mysqld_options
+            and "encrypt-binlog" not in self.mysqld_options
+            and "skip-log-bin" not in self.mysqld_options
+        ):
+            print("Check xtrabackup for binlog position")
+            binlog_info_file = os.path.join(self.backup_dir, "full/xtrabackup_binlog_info")
+            with open(binlog_info_file, "r") as f:
+                line = f.readline().strip()
+                parts = line.split()
+                xb_binlog_file = parts[0] if parts else ""
+                xb_binlog_pos = parts[1] if len(parts) > 1 else ""
+            print(f"Xtrabackup binlog position: {xb_binlog_file}, {xb_binlog_pos}")
+            print(f"Applying binlog to restored data starting from {xb_binlog_file}, {xb_binlog_pos}")
+            binlog_path = os.path.join(data_orig, xb_binlog_file)
+            if os.path.exists(binlog_path):
+                mysqlbinlog = subprocess.Popen(
+                    [
+                        os.path.join(self.mysqldir, "bin/mysqlbinlog"),
+                        binlog_path,
+                        f"--start-position={xb_binlog_pos}",
+                    ],
+                    stdout=subprocess.PIPE,
+                )
+                mysql = subprocess.Popen(
+                    [
+                        os.path.join(self.mysqldir, "bin/mysql"),
+                        "-uroot",
+                        f"-S{self.socket_path}",
+                    ],
+                    stdin=mysqlbinlog.stdout,
+                )
+                mysqlbinlog.stdout.close()
+                mysql.communicate()
+                if mysql.returncode != 0:
+                    print("ERR: The binlog could not be applied to the restored data")
+            time.sleep(5)
+            print("Collecting table count after restore")
+            res_data = self.count_rows()
+            if orig_data != res_data:
+                print("ERR: Data changed after restore.")
+                print("Original data:")
+                print(orig_data)
+                print("Restored data:")
+                print(res_data)
+                pytest.fail("Data mismatch after restore")
+            print("Data is the same before and after restore: Pass")
+        else:
+            print("Binlog applying skipped, ignore differences between actual data and restored data")
+
+        self.check_tables()
+
     def prepare_crash_backup_chain(self, num_incremental: int, log_date: str) -> None:
         """Prepare full backup then incremental 1..num_incremental (last one without --apply-log-only)."""
         print("=>Preparing full backup")
@@ -1196,126 +1324,175 @@ class BackupTestHelper:
                 check=True,
             )
 
-        self.run_pstress_prepare(load_options)
-        self.run_load(load_options + " --step 2")
+        self._run_crash_flow(load_options, log_date)
 
-        self.take_full_backup(log_date)
-        if os.path.exists(f"{self.backup_dir}/full_save"):
-            shutil.rmtree(f"{self.backup_dir}/full_save")
-        shutil.copytree(f"{self.backup_dir}/full", f"{self.backup_dir}/full_save")
-        time.sleep(1)
+    def run_crash_tests_pstress_encrypted(
+        self, page_tracking: bool, vault_type: Optional[str] = None
+    ) -> None:
+        """
+        Run crash tests with pstress and encryption (keyring_file or keyring_kmip).
+        When vault_type is None, use keyring_file component; otherwise use keyring_kmip
+        for the given vault type. Optionally enable page_tracking.
+        """
+        if self.load_tool != "pstress":
+            pytest.skip("Crash tests require load_tool=pstress")
 
-        self.crash_and_save_datadir("data_crash_save1")
-        self.start_server()
-        self.run_load(load_options + " --step 3")
+        if not self.version or not self.version_normalized:
+            self.version, self.version_normalized = self.get_mysql_version()
+        if not self.server_type:
+            self.get_mysql_type()
 
-        for inc_num in range(1, 5):
-            base = f"{self.backup_dir}/full" if inc_num == 1 else f"{self.backup_dir}/inc{inc_num - 1}"
-            self.take_incremental_backup(inc_num, base, log_date)
-            inc_save = f"{self.backup_dir}/inc{inc_num}_save"
-            if os.path.exists(inc_save):
-                shutil.rmtree(inc_save)
-            shutil.copytree(f"{self.backup_dir}/inc{inc_num}", inc_save)
+        if self.version_normalized < 80000:
+            pytest.skip("Encrypted crash tests require 8.0+ (component keyring)")
 
-        self.crash_and_save_datadir("data_crash_save2")
-        self.start_server()
-        self.run_load(load_options + " --step 4")
-
-        for inc_num in range(5, 9):
-            base = f"{self.backup_dir}/inc{inc_num - 1}"
-            self.take_incremental_backup(inc_num, base, log_date)
-            inc_save = f"{self.backup_dir}/inc{inc_num}_save"
-            if os.path.exists(inc_save):
-                shutil.rmtree(inc_save)
-            shutil.copytree(f"{self.backup_dir}/inc{inc_num}", inc_save)
-
-        self.prepare_crash_backup_chain(8, log_date)
-
-        print("Collecting existing table count")
-        orig_data = self.count_rows()
-
-        print("Stopping mysql server and moving data directory")
-        subprocess.run(
-            [
-                os.path.join(self.mysqldir, "bin/mysqladmin"),
-                "-uroot",
-                f"-S{self.socket_path}",
-                "shutdown",
-            ],
-            check=True,
+        # Seconds for encrypted crash test (shell uses 50)
+        crash_seconds = 50
+        load_options_base = (
+            f"--tables {self.num_tables} --records {self.table_size} "
+            f"--threads {self.threads} --seconds {crash_seconds} --undo-tbs-sql 0"
         )
-        data_orig = os.path.join(
-            os.path.dirname(self.datadir),
-            f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-        )
-        if os.path.exists(data_orig):
-            shutil.rmtree(data_orig)
-        shutil.move(self.datadir, data_orig)
+        if self.server_type == "MS":
+            load_options_base += " --no-column-compression --no-temp-tables"
+        keyring_config_file: Optional[str] = None
+        manifest_file = os.path.join(self.mysqldir, "bin/mysqld.my")
 
-        print("=>Restoring full backup")
-        cmd = self._xtrabackup_cmd_prefix() + [
-            "--no-defaults",
-            "--copy-back",
-            f"--target-dir={self.backup_dir}/full",
-            f"--datadir={self.datadir}",
-        ] + self.restore_params.split()
-        log_file = os.path.join(self.logdir, f"res_backup_{log_date}_log")
-        result = self.run_command(cmd, check=False, log_file=log_file)
-        if result.returncode != 0:
-            pytest.fail(f"ERR: Restore of full backup failed. Please check the log at: {log_file}")
-        self.start_server()
-
-        if (
-            "binlog-encryption" not in self.mysqld_options
-            and "encrypt-binlog" not in self.mysqld_options
-            and "skip-log-bin" not in self.mysqld_options
-        ):
-            print("Check xtrabackup for binlog position")
-            binlog_info_file = os.path.join(self.backup_dir, "full/xtrabackup_binlog_info")
-            with open(binlog_info_file, "r") as f:
-                line = f.readline().strip()
-                parts = line.split()
-                xb_binlog_file = parts[0] if parts else ""
-                xb_binlog_pos = parts[1] if len(parts) > 1 else ""
-            print(f"Xtrabackup binlog position: {xb_binlog_file}, {xb_binlog_pos}")
-            print(f"Applying binlog to restored data starting from {xb_binlog_file}, {xb_binlog_pos}")
-            binlog_path = os.path.join(data_orig, xb_binlog_file)
-            if os.path.exists(binlog_path):
-                mysqlbinlog = subprocess.Popen(
-                    [
-                        os.path.join(self.mysqldir, "bin/mysqlbinlog"),
-                        binlog_path,
-                        f"--start-position={xb_binlog_pos}",
-                    ],
-                    stdout=subprocess.PIPE,
+        try:
+            if vault_type is None:
+                # keyring_file
+                print("Testing keyring_file (encrypted crash)...")
+                if not os.path.exists(os.path.join(self.mysqldir, "lib/plugin")):
+                    os.makedirs(os.path.join(self.mysqldir, "lib/plugin"), exist_ok=True)
+                with open(manifest_file, "w", encoding="utf-8") as f:
+                    f.write('{\n  "components": "file://component_keyring_file"\n}\n')
+                keyring_config_file = os.path.join(
+                    self.mysqldir, "lib/plugin/component_keyring_file.cnf"
                 )
-                mysql = subprocess.Popen(
+                with open(keyring_config_file, "w", encoding="utf-8") as f:
+                    f.write(
+                        f'{{\n  "path": "{self.logdir}/keyring",\n  "read_only": false\n}}\n'
+                    )
+                self.backup_params = (
+                    f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin "
+                    f"--core-file --lock-ddl={self.lock_ddl}"
+                )
+                if page_tracking:
+                    self.backup_params += " --page-tracking"
+                self.prepare_params = (
+                    f"{self.backup_params} --component-keyring-config={keyring_config_file}"
+                )
+                self.restore_params = self.backup_params
+                if self.server_type == "MS":
+                    self.mysqld_options = (
+                        "--innodb-undo-log-encrypt --innodb-redo-log-encrypt "
+                        "--default-table-encryption=ON --log-slave-updates --gtid-mode=ON "
+                        "--enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON "
+                        "--binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup "
+                        "--table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
+                    )
+                else:
+                    self.mysqld_options = (
+                        "--innodb-undo-log-encrypt --innodb-redo-log-encrypt "
+                        "--default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON "
+                        "--innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON "
+                        "--enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON "
+                        "--binlog_checksum=CRC32 --encrypt-tmp-files "
+                        "--table-encryption-privilege-check=ON --max-connections=5000"
+                    )
+            else:
+                # keyring_kmip
+                if self.server_type == "MS":
+                    pytest.skip(
+                        "MS 8.0 does not support keyring kmip for encryption, skipping"
+                    )
+                if not KMIPHelper:
+                    pytest.skip("KMIP helper not available (kmip_helper module)")
+                if vault_type not in KMIP_CONFIGS:
+                    pytest.skip(
+                        f"Unknown vault_type '{vault_type}'. "
+                        f"Available: {list(KMIP_CONFIGS.keys())}"
+                    )
+                if vault_type == "fortanix" and (
+                    not os.environ.get("FORTANIX_EMAIL", "").strip()
+                    or not os.environ.get("FORTANIX_PASSWORD", "").strip()
+                ):
+                    pytest.skip(
+                        "Fortanix KMIP requires FORTANIX_EMAIL and FORTANIX_PASSWORD"
+                    )
+                print(f"Testing keyring_kmip with vault {vault_type} (encrypted crash)...")
+                if not self.kmip_helper:
+                    self.kmip_helper = KMIPHelper(KMIP_CONFIGS, cert_base_dir=TEST_BASE_DIR)
+                if not self.kmip_helper.start_kmip_server(vault_type):
+                    detail = getattr(self.kmip_helper, "last_error", None) or "unknown"
+                    pytest.fail(
+                        f"Failed to start KMIP server for vault_type={vault_type}. {detail}"
+                    )
+                with open(manifest_file, "w", encoding="utf-8") as f:
+                    f.write('{\n  "components": "file://component_keyring_kmip"\n}\n')
+                cert_dir = self.kmip_helper.kmip_config["cert_dir"]
+                kmip_cnf_src = os.path.join(cert_dir, "component_keyring_kmip.cnf")
+                keyring_config_file = os.path.join(
+                    self.mysqldir, "lib/plugin/component_keyring_kmip.cnf"
+                )
+                if os.path.isfile(kmip_cnf_src):
+                    shutil.copy2(kmip_cnf_src, keyring_config_file)
+                self.backup_params = (
+                    f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin "
+                    f"--core-file --lock-ddl={self.lock_ddl}"
+                )
+                if page_tracking:
+                    self.backup_params += " --page-tracking"
+                self.prepare_params = (
+                    f"{self.backup_params} --component-keyring-config={keyring_config_file}"
+                )
+                self.restore_params = self.backup_params
+                self.mysqld_options = (
+                    "--innodb-undo-log-encrypt --innodb-redo-log-encrypt "
+                    "--default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON "
+                    "--innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON "
+                    "--enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON "
+                    "--binlog_checksum=CRC32 --encrypt-tmp-files "
+                    "--table-encryption-privilege-check=ON --max-connections=5000"
+                )
+
+            if os.path.exists(self.backup_dir):
+                shutil.rmtree(self.backup_dir)
+            os.makedirs(self.backup_dir)
+            log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            self.initialize_db()
+
+            if page_tracking and self.version_normalized >= 80000:
+                print("Running test with page tracking enabled")
+                subprocess.run(
                     [
                         os.path.join(self.mysqldir, "bin/mysql"),
                         "-uroot",
                         f"-S{self.socket_path}",
+                        "-e",
+                        "INSTALL COMPONENT 'file://component_mysqlbackup';",
                     ],
-                    stdin=mysqlbinlog.stdout,
+                    check=True,
                 )
-                mysqlbinlog.stdout.close()
-                mysql.communicate()
-                if mysql.returncode != 0:
-                    print("ERR: The binlog could not be applied to the restored data")
-            time.sleep(5)
-            print("Collecting table count after restore")
-            res_data = self.count_rows()
-            if orig_data != res_data:
-                print("ERR: Data changed after restore.")
-                print("Original data:")
-                print(orig_data)
-                print("Restored data:")
-                print(res_data)
-                pytest.fail("Data mismatch after restore")
-            print("Data is the same before and after restore: Pass")
-        else:
-            print("Binlog applying skipped, ignore differences between actual data and restored data")
 
-        self.check_tables()
+            self._run_crash_flow(load_options_base, log_date)
+        finally:
+            # Remove keyring config so later tests can run without encryption
+            if os.path.isfile(manifest_file):
+                try:
+                    os.remove(manifest_file)
+                except OSError:
+                    pass
+            if keyring_config_file and os.path.isfile(keyring_config_file):
+                try:
+                    os.remove(keyring_config_file)
+                except OSError:
+                    pass
+            kmip_cnf = os.path.join(self.mysqldir, "lib/plugin/component_keyring_kmip.cnf")
+            if os.path.isfile(kmip_cnf):
+                try:
+                    os.remove(kmip_cnf)
+                except OSError:
+                    pass
 
     def count_rows(self, database: str = "test") -> str:
         """Count rows and checksums of all tables in a database."""

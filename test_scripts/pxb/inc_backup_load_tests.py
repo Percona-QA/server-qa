@@ -162,14 +162,26 @@ CRASH_TEST_PARAMS = [
     ("rocksdb", True),
 ]
 
+# One test per vault_type in KMIP_CONFIGS (used by test_kmip_component_backup and test_crash_backup_encrypted_kmip)
+VAULT_TYPES = list(KMIP_CONFIGS.keys())
+
 @pytest.mark.parametrize("storage_engine,page_tracking", CRASH_TEST_PARAMS, ids=["innodb-no_pt", "innodb-pt", "rocksdb-no_pt", "rocksdb-pt"])
 def test_crash_backup(test_helper, storage_engine, page_tracking):
     """Crash test: storage engine with page-tracking on/off."""
     test_helper.run_crash_tests_pstress(storage_engine=storage_engine, page_tracking=page_tracking)
 
 
-# One test per vault_type in KMIP_CONFIGS (mirrors run_kmip_component_tests in inc_backup_load_tests.sh)
-VAULT_TYPES = list(KMIP_CONFIGS.keys())
+@pytest.mark.parametrize("page_tracking", [False, True], ids=["no_pt", "pt"])
+def test_crash_backup_encrypted_keyring_file(test_helper, page_tracking):
+    """Crash test with keyring_file encryption, page-tracking on/off (mirrors run_crash_tests_pstress_encrypted)."""
+    test_helper.run_crash_tests_pstress_encrypted(page_tracking=page_tracking, vault_type=None)
+
+
+@pytest.mark.parametrize("vault_type,page_tracking", [(v, pt) for v in VAULT_TYPES for pt in [False, True]], ids=[f"{v}-no_pt" if not pt else f"{v}-pt" for v in VAULT_TYPES for pt in [False, True]])
+def test_crash_backup_encrypted_kmip(test_helper, vault_type, page_tracking):
+    """Crash test with keyring_kmip for each vault type, page-tracking on/off."""
+    test_helper.run_crash_tests_pstress_encrypted(page_tracking=page_tracking, vault_type=vault_type)
+
 
 @pytest.mark.parametrize("vault_type", VAULT_TYPES)
 def test_kmip_component_backup(test_helper, vault_type):
@@ -236,12 +248,21 @@ if __name__ == "__main__":
             "test_keyring_component_backup",
             "test_memory_estimation_backup",
             "test_crash_backup[innodb-no_pt]",
+            "test_crash_backup_encrypted_keyring_file",
         ],
         "Kmip_Encryption_tests": ["test_kmip_component_backup"],
         "Kms_Encryption_tests": ["test_kms_component_backup"],
         "Rocksdb_tests": ["test_rocksdb_backup", "test_crash_backup[rocksdb-no_pt or rocksdb-pt]"],
-        "Page_Tracking_tests": ["test_page_tracking_backup", "test_crash_backup[innodb-pt or rocksdb-pt]"],
-        "Crash_tests": ["test_crash_backup"],
+        "Page_Tracking_tests": [
+            "test_page_tracking_backup",
+            "test_crash_backup[innodb-pt or rocksdb-pt]",
+            "test_crash_backup_encrypted_keyring_file[pt]",
+        ],
+        "Crash_tests": [
+            "test_crash_backup",
+            "test_crash_backup_encrypted_keyring_file",
+            "test_crash_backup_encrypted_kmip",
+        ],
     }
 
     selected_tests = []

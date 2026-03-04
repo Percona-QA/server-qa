@@ -34,7 +34,20 @@ Tests in `inc_backup_load_tests.py` run backup/restore with a load tool (pquery/
    export KMS_REGION=us-east-1
    ```
 
-   If any of these are unset, KMS tests are skipped. PS 8.0+ only; skipped on MS.
+  If any of these are unset, KMS tests are skipped. PS 8.0+ only; skipped on MS.
+
+  **For KMIP tests** (`test_kmip_component_backup`, `test_crash_backup_encrypted_kmip`):
+
+  - Vault types come from `KMIP_CONFIGS` in `test_helper.py` (currently `pykmip`, `fortanix`).
+  - KMIP tests require PS 8.0+ (skipped on 5.7); `keyring_kmip` tests are skipped on MS.
+  - For **Fortanix** vault variants, export:
+
+  ```bash
+  export FORTANIX_EMAIL=<your-fortanix-email>
+  export FORTANIX_PASSWORD=<your-fortanix-password>
+  ```
+
+  If Fortanix vars are not set, Fortanix-only variants are skipped.
 
 3. **Run from the `pxb` directory** so that `test_helper` and `kmip_helper` can be imported:
 
@@ -109,12 +122,16 @@ Ids: one per `vault_type` x page tracking, e.g. `[pykmip-no_pt]`, `[pykmip-pt]`,
 pytest inc_backup_load_tests.py -v -s -k "test_crash_backup_encrypted_kmip[pykmip-pt]"
 ```
 
+For `fortanix` variants, ensure `FORTANIX_EMAIL` and `FORTANIX_PASSWORD` are exported first.
+
 **KMIP (one vault type):**  
 Vault types come from `KMIP_CONFIGS` (e.g. `pykmip`, `fortanix`). Node id is the vault name:
 
 ```bash
 pytest inc_backup_load_tests.py -v -s -k "test_kmip_component_backup[pykmip]"
 ```
+
+For `fortanix` variants, ensure `FORTANIX_EMAIL` and `FORTANIX_PASSWORD` are exported first.
 
 **KMS (page_tracking = no_pt | pt):**  
 Requires `KMS_KEYID`, `KMS_SECRET_KEY`, `KMS_AUTH_KEY`, `KMS_REGION`. Node ids: `no_pt`, `pt`.
@@ -216,6 +233,6 @@ pytest inc_backup_load_tests.py --collect-only -q
 | `test_page_tracking_backup`| Non-param     | Page tracking; skipped on 5.7 |
 | `test_crash_backup`         | Param         | `[innodb-no_pt]`, `[innodb-pt]`, `[rocksdb-no_pt]`, `[rocksdb-pt]` |
 | `test_crash_backup_encrypted_keyring_file` | Param `[no_pt]`, `[pt]` | Encrypted crash flow using keyring_file component |
-| `test_crash_backup_encrypted_kmip` | Param | One id per `vault_type` x page tracking, e.g. `[pykmip-no_pt]`, `[pykmip-pt]` |
-| `test_kmip_component_backup`| Param         | One id per vault in `KMIP_CONFIGS` (e.g. `[pykmip]`, `[fortanix]`) |
+| `test_crash_backup_encrypted_kmip` | Param | One id per `vault_type` x page tracking, e.g. `[pykmip-no_pt]`, `[pykmip-pt]`; Fortanix variants require `FORTANIX_EMAIL`, `FORTANIX_PASSWORD` |
+| `test_kmip_component_backup`| Param         | One id per vault in `KMIP_CONFIGS` (e.g. `[pykmip]`, `[fortanix]`); Fortanix variants require `FORTANIX_EMAIL`, `FORTANIX_PASSWORD` |
 | `test_kms_component_backup` | Param `[no_pt]`, `[pt]` | keyring_kms component; requires `KMS_KEYID`, `KMS_SECRET_KEY`, `KMS_AUTH_KEY`, `KMS_REGION`; skipped on 5.7 and MS |

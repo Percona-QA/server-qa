@@ -95,6 +95,20 @@ Ids: `innodb-no_pt`, `innodb-pt`, `rocksdb-no_pt`, `rocksdb-pt`
 pytest inc_backup_load_tests.py -v -s -k "test_crash_backup[innodb-pt]"
 ```
 
+**Encrypted crash tests (keyring_file):**  
+Ids: `no_pt`, `pt`
+
+```bash
+pytest inc_backup_load_tests.py -v -s -k "test_crash_backup_encrypted_keyring_file[pt]"
+```
+
+**Encrypted crash tests (keyring_kmip):**  
+Ids: one per `vault_type` x page tracking, e.g. `[pykmip-no_pt]`, `[pykmip-pt]`, `[fortanix-no_pt]`, `[fortanix-pt]`
+
+```bash
+pytest inc_backup_load_tests.py -v -s -k "test_crash_backup_encrypted_kmip[pykmip-pt]"
+```
+
 **KMIP (one vault type):**  
 Vault types come from `KMIP_CONFIGS` (e.g. `pykmip`, `fortanix`). Node id is the vault name:
 
@@ -159,12 +173,12 @@ python inc_backup_load_tests.py -v Normal_and_Encryption_tests
 
 | Suite                         | Pytest -k equivalent |
 |------------------------------|----------------------|
-| Normal_and_Encryption_tests  | `test_normal_backup or test_keyring_plugin_backup or test_keyring_component_backup or test_memory_estimation_backup or test_crash_backup[innodb-no_pt]` |
+| Normal_and_Encryption_tests  | `test_normal_backup or test_keyring_plugin_backup or test_keyring_component_backup or test_memory_estimation_backup or test_crash_backup[innodb-no_pt] or test_crash_backup_encrypted_keyring_file` |
 | Kmip_Encryption_tests        | `test_kmip_component_backup` |
 | Kms_Encryption_tests         | `test_kms_component_backup` |
 | Rocksdb_tests                | `test_rocksdb_backup or test_crash_backup[rocksdb-no_pt] or test_crash_backup[rocksdb-pt]` |
-| Page_Tracking_tests          | `test_page_tracking_backup or test_crash_backup[innodb-pt] or test_crash_backup[rocksdb-pt]` |
-| Crash_tests                  | `test_crash_backup` |
+| Page_Tracking_tests          | `test_page_tracking_backup or test_crash_backup[innodb-pt] or test_crash_backup[rocksdb-pt] or test_crash_backup_encrypted_keyring_file[pt]` |
+| Crash_tests                  | `test_crash_backup or test_crash_backup_encrypted_keyring_file or test_crash_backup_encrypted_kmip` |
 
 Example:
 
@@ -201,5 +215,7 @@ pytest inc_backup_load_tests.py --collect-only -q
 | `test_rocksdb_backup`       | Non-param     | RocksDB; skipped on 5.7 and MS |
 | `test_page_tracking_backup`| Non-param     | Page tracking; skipped on 5.7 |
 | `test_crash_backup`         | Param         | `[innodb-no_pt]`, `[innodb-pt]`, `[rocksdb-no_pt]`, `[rocksdb-pt]` |
+| `test_crash_backup_encrypted_keyring_file` | Param `[no_pt]`, `[pt]` | Encrypted crash flow using keyring_file component |
+| `test_crash_backup_encrypted_kmip` | Param | One id per `vault_type` x page tracking, e.g. `[pykmip-no_pt]`, `[pykmip-pt]` |
 | `test_kmip_component_backup`| Param         | One id per vault in `KMIP_CONFIGS` (e.g. `[pykmip]`, `[fortanix]`) |
 | `test_kms_component_backup` | Param `[no_pt]`, `[pt]` | keyring_kms component; requires `KMS_KEYID`, `KMS_SECRET_KEY`, `KMS_AUTH_KEY`, `KMS_REGION`; skipped on 5.7 and MS |

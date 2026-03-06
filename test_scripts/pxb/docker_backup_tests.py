@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 
 ###################################################################################################
-# Created By Manish Chawla, Percona LLC                                                           #
-# Modified By Mohit Joshi, Percona LLC                                                            #
 # This script runs PXB against Percona Server and MySQL server in a docker container              #
 # Converted to Python with pytest                                                                 #
 ###################################################################################################

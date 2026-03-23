@@ -38,28 +38,7 @@ def setup_logdir(test_helper):
     os.makedirs(pstress_logdir)
 
 
-def _masked_env_value(name):
-    """Return a masked environment variable value for safe debugging."""
-    value = os.environ.get(name, "")
-    if not value:
-        return "<missing>"
-    if len(value) <= 4:
-        return "*" * len(value)
-    return f"{value[:2]}***{value[-2:]} (len={len(value)})"
-
-
 # Test functions
-def test_debug_credentials_env():
-    """Temporary debug test to verify Jenkins-injected credentials are present."""
-    print("FORTANIX_EMAIL:", _masked_env_value("FORTANIX_EMAIL"))
-    print("FORTANIX_PASSWORD present:", bool(os.environ.get("FORTANIX_PASSWORD", "")))
-    print("KMS_KEYID:", _masked_env_value("KMS_KEYID"))
-    print("KMS_KEY_ID:", _masked_env_value("KMS_KEY_ID"))
-    print("KMS_AUTH_KEY present:", bool(os.environ.get("KMS_AUTH_KEY", "")))
-    print("KMS_SECRET_KEY present:", bool(os.environ.get("KMS_SECRET_KEY", "")))
-    print("KMS_REGION:", os.environ.get("KMS_REGION", "<missing>"))
-
-
 def test_normal_backup(test_helper):
     """Test normal incremental backup and restore."""
     test_helper.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"

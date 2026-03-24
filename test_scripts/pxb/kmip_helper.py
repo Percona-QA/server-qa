@@ -438,17 +438,8 @@ class KMIPHelper:
 
         email = os.environ.get("FORTANIX_EMAIL", "").strip()
         password = os.environ.get("FORTANIX_PASSWORD", "").strip()
-        kms_keyid = os.environ.get("KMS_KEYID", "").strip()
-        kms_auth_key = os.environ.get("KMS_AUTH_KEY", "").strip()
-        kms_secret_key = os.environ.get("KMS_SECRET_KEY", "").strip()
-        kms_region = os.environ.get("KMS_REGION", "").strip()
-
         print(f"FORTANIX_EMAIL: {email}")
         print(f"FORTANIX_PASSWORD: {password}")
-        print(f"KMS_KEYID: {kms_keyid}")
-        print(f"KMS_AUTH_KEY: {kms_auth_key}")
-        print(f"KMS_SECRET_KEY: {kms_secret_key}")
-        print(f"KMS_REGION: {kms_region}")
         if not email or not password:
             self.last_error = (
                 "FORTANIX_EMAIL and FORTANIX_PASSWORD environment variables must be set for Fortanix KMIP. "

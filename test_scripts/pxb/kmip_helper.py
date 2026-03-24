@@ -438,6 +438,8 @@ class KMIPHelper:
 
         email = os.environ.get("FORTANIX_EMAIL", "").strip()
         password = os.environ.get("FORTANIX_PASSWORD", "").strip()
+        print(f"FORTANIX_EMAIL: {email}")
+        print(f"FORTANIX_PASSWORD: {password}")
         if not email or not password:
             self.last_error = (
                 "FORTANIX_EMAIL and FORTANIX_PASSWORD environment variables must be set for Fortanix KMIP. "

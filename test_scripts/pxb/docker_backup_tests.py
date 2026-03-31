@@ -82,7 +82,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = f"pxb_backup_data:/backup_{innovation}"
         config["target_backup_dir"] = f"/backup_{innovation}"
-        config["mount_dir"] = ["-v", f"{MYSQL_DATA_DIR}:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
+        config["mount_dir"] = ["-v", f"{MYSQL_DATA_DIR}:/var/lib/mysql"]
     
     elif repo_name == "pxb-8x-innovation":
         if server == "ms":
@@ -103,7 +103,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = f"pxb_backup_data:/backup_{innovation}"
         config["target_backup_dir"] = f"/backup_{innovation}"
-        config["mount_dir"] = ["-v", f"{MYSQL_DATA_DIR}:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
+        config["mount_dir"] = ["-v", f"{MYSQL_DATA_DIR}:/var/lib/mysql"]
     
     elif repo_name == "pxb-80":
         if server == "ms":
@@ -166,7 +166,7 @@ def get_config(repo_name, repo_type, server, innovation=""):
         
         config["pxb_backup_dir"] = "pxb_backup_data:/backup_84"
         config["target_backup_dir"] = "/backup_84"
-        config["mount_dir"] = ["-v", f"{MYSQL_DATA_DIR}:/var/lib/mysql", "-v", "/tmp/run/mysqld:/var/run/mysqld"]
+        config["mount_dir"] = ["-v", f"{MYSQL_DATA_DIR}:/var/lib/mysql"]
     
     else:
         raise ValueError("Invalid version parameter. Exiting")

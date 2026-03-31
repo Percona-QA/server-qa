@@ -17,15 +17,22 @@ import pytest
 # MySQL data directory in user's home directory
 MYSQL_DATA_DIR = os.path.join(os.path.expanduser("~"), "mysql_data")
 
+# Configuration from environment variables
+REPO_NAME = os.environ.get("REPO_NAME", "")
+REPO_TYPE = os.environ.get("REPO_TYPE", "")
+SERVER = os.environ.get("SERVER", "")
+INNOVATION = os.environ.get("INNOVATION", "")
+
 
 def help():
     """Print usage information and exit."""
-    print("Usage: pytest docker_backup_tests.py --repo-name=REPO_NAME --repo-type=REPO_TYPE --server=SERVER [--innovation=INNOVATION]")
-    print("Accepted values of repo_name: pxb-24, pxb-80, pxb-8x-innovation, pxb-84-lts, pxb-9x-innovation")
-    print("Accepted values of repo_type: release, testing, experimental")
-    print("Accepted value of server: ps, ms")
-    print("Accepted value of innovation: 8.1, 8.2, 8.3, 8.4, 9.1")
+    print("Usage: Set environment variables and run: pytest docker_backup_tests.py -s -v")
+    print("  export REPO_NAME=<pxb-24|pxb-80|pxb-8x-innovation|pxb-84-lts|pxb-9x-innovation>")
+    print("  export REPO_TYPE=<release|testing|experimental>")
+    print("  export SERVER=<ps|ms>")
+    print("  export INNOVATION=<8.1|8.2|8.3|8.4|9.1>  (required for pxb-8x-innovation and pxb-9x-innovation)")
     print("Release repo is the percona docker image and testing repo is the perconalab docker image")
+    print("Or run directly: python docker_backup_tests.py --repo-name=REPO_NAME --repo-type=REPO_TYPE --server=SERVER [--innovation=INNOVATION]")
     sys.exit(1)
 
 
@@ -282,28 +289,26 @@ def wait_for_mysql_container(container_name, max_wait=180):
 
 
 @pytest.fixture(scope="function")
-def test_config(request):
-    """Fixture to get test configuration from command-line options."""
-    repo_name = request.config.getoption("--repo-name")
-    repo_type = request.config.getoption("--repo-type")
-    server = request.config.getoption("--server")
-    innovation = request.config.getoption("--innovation")
+def test_config():
+    """Fixture to get test configuration from environment variables."""
+    repo_name = REPO_NAME
+    repo_type = REPO_TYPE
+    server = SERVER
+    innovation = INNOVATION
 
-    # Validate required options
     if not repo_name:
-        pytest.fail("ERR: '--repo-name' argument is required. Accepted values: pxb-24, pxb-80, pxb-8x-innovation, pxb-84-lts, pxb-9x-innovation")
+        pytest.fail("ERR: 'REPO_NAME' env var is required. Accepted values: pxb-24, pxb-80, pxb-8x-innovation, pxb-84-lts, pxb-9x-innovation")
     if not repo_type:
-        pytest.fail("ERR: '--repo-type' argument is required. Accepted values: release, testing, experimental")
+        pytest.fail("ERR: 'REPO_TYPE' env var is required. Accepted values: release, testing, experimental")
     if not server:
-        pytest.fail("ERR: '--server' argument is required. Accepted values: ps, ms")
+        pytest.fail("ERR: 'SERVER' env var is required. Accepted values: ps, ms")
 
-    # Validate innovation requirement for pxb-8x-innovation and pxb-9x-innovation
     if repo_name in ("pxb-8x-innovation", "pxb-9x-innovation") and not innovation:
-        pytest.fail(f"ERR: '--innovation' argument is required for {repo_name}. Accepted values: 8.1, 8.2, 8.3, 8.4, 9.1")
+        pytest.fail(f"ERR: 'INNOVATION' env var is required for {repo_name}. Accepted values: 8.1, 8.2, 8.3, 8.4, 9.1")
 
     try:
         config = get_config(repo_name, repo_type, server, innovation)
-        config["repo_type"] = repo_type  # Store repo_type in config for use in test
+        config["repo_type"] = repo_type
         return config
     except ValueError as e:
         pytest.fail(str(e))
@@ -500,24 +505,20 @@ def setup_and_teardown(test_config, log_file):
 
 
 if __name__ == "__main__":
-    # Allow running as a script for easier debugging
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="PXB Docker Backup Tests")
     parser.add_argument("--repo-name", required=True, help="Repo name")
     parser.add_argument("--repo-type", required=True, help="Repo type")
     parser.add_argument("--server", required=True, help="Server type")
     parser.add_argument("--innovation", default="", help="Innovation version")
-    
+
     args = parser.parse_args()
-    
-    # Run pytest with the arguments
-    pytest.main([
-        __file__,
-        f"--repo-name={args.repo_name}",
-        f"--repo-type={args.repo_type}",
-        f"--server={args.server}",
-        f"--innovation={args.innovation}",
-        "-v"
-    ])
+
+    os.environ["REPO_NAME"] = args.repo_name
+    os.environ["REPO_TYPE"] = args.repo_type
+    os.environ["SERVER"] = args.server
+    os.environ["INNOVATION"] = args.innovation
+
+    pytest.main([__file__, "-v"])
 

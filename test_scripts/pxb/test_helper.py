@@ -11,8 +11,10 @@ import time
 import shutil
 import re
 import signal
+import glob
+import threading
 from datetime import datetime
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 import psutil
 import pytest
 
@@ -52,6 +54,14 @@ THREADS = 5
 # PXB Lock option
 LOCK_DDL = "on"  # lock_ddl accepted values (on, reduced)
 
+# Additional configuration from environment
+CLOUD_CONFIG = os.environ.get("CLOUD_CONFIG", os.path.join(HOME, "aws.cnf"))
+INSTALL_TYPE = os.environ.get("INSTALL_TYPE", "tarball")  # tarball or package
+ROCKSDB = os.environ.get("ROCKSDB", "disabled")  # enabled or disabled
+BACKUP_USER = os.environ.get("BACKUP_USER", "root")
+ENCRYPT_KEY = os.environ.get("ENCRYPT_KEY", "mHU3Zs5sRcSB7zBAJP1BInPP5lgShKly")
+RANDOM_TYPE = os.environ.get("RANDOM_TYPE", "uniform")
+
 class BackupTestHelper:
     """Helper class for backup tests."""
 
@@ -82,6 +92,14 @@ class BackupTestHelper:
         self.threads = threads
         self.lock_ddl = lock_ddl
         self.mysql_start_timeout = MYSQL_START_TIMEOUT
+
+        self.cloud_config = CLOUD_CONFIG
+        self.install_type = INSTALL_TYPE
+        self.rocksdb = ROCKSDB
+        self.backup_user = BACKUP_USER
+        self.encrypt_key = ENCRYPT_KEY
+        self.random_type = RANDOM_TYPE
+        self.qascripts = QASCRIPTS
 
         # Create test-specific directories with test name
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -305,10 +323,25 @@ class BackupTestHelper:
                     f"ERR: Database could not be started. Please check error logs: {self.logdir}/error.log"
                 )
 
-    def initialize_db(self):
-        """Initialize and start MySQL database."""
+    def run_mysql_query(self, query: str, database: str = "", check: bool = True, capture: bool = False) -> Optional[str]:
+        """Run a MySQL query via the mysql CLI client. Returns stdout if capture=True."""
+        cmd = [os.path.join(self.mysqldir, "bin/mysql"), f"-u{self.backup_user}", f"-S{self.socket_path}"]
+        if database:
+            cmd.append(database)
+        cmd.extend(["-e", query])
+        if capture:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=check)
+            return result.stdout.strip() if result.returncode == 0 else None
+        subprocess.run(cmd, capture_output=True, check=check)
+        return None
+
+    def initialize_db(self, rocksdb: bool = False):
+        """Initialize and start MySQL database. When rocksdb=True, also set up RocksDB engine and test_rocksdb database."""
         if not os.path.exists(self.logdir):
             os.makedirs(self.logdir)
+
+        if os.path.exists(self.datadir):
+            shutil.rmtree(self.datadir)
 
         print("=>Creating data directory")
         log_file = os.path.join(self.logdir, "mysql_install_db.log")
@@ -328,25 +361,19 @@ class BackupTestHelper:
 
         self.start_server()
 
+        # Load MyRocks SQL if present
+        myrocks_sql = os.path.join(self.qascripts, "MyRocks.sql")
+        if os.path.isfile(myrocks_sql):
+            subprocess.run(
+                [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}"],
+                stdin=open(myrocks_sql),
+                capture_output=True,
+                check=False,
+            )
+
         # Drop and create test database
         subprocess.run(
-            [
-                os.path.join(self.mysqldir, "bin/mysql"),
-                "-uroot",
-                f"-S{self.socket_path}",
-                "-e",
-                "DROP DATABASE IF EXISTS test",
-            ],
-            check=False,
-        )
-        subprocess.run(
-            [
-                os.path.join(self.mysqldir, "bin/mysql"),
-                "-uroot",
-                f"-S{self.socket_path}",
-                "-e",
-                "CREATE DATABASE IF NOT EXISTS test",
-            ],
+            [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-e", "CREATE DATABASE IF NOT EXISTS test"],
             check=True,
         )
 
@@ -385,41 +412,88 @@ class BackupTestHelper:
             pytest.fail("Invalid server version!")
 
         # Create data using sysbench
-        if self.load_tool == "sysbench":
+        if self.load_tool == "sysbench" or rocksdb:
             if "keyring" not in self.mysqld_options:
                 subprocess.run(
                     [
-                        "sysbench",
-                        "/usr/share/sysbench/oltp_insert.lua",
-                        f"--tables={self.num_tables}",
-                        f"--table-size={self.table_size}",
-                        "--mysql-db=test",
-                        "--mysql-user=root",
-                        "--threads=50",
-                        "--db-driver=mysql",
-                        f"--mysql-socket={self.socket_path}",
-                        "prepare",
+                        "sysbench", "/usr/share/sysbench/oltp_insert.lua",
+                        f"--tables={self.num_tables}", f"--table-size={self.table_size}",
+                        "--mysql-db=test", "--mysql-user=root", "--threads=100",
+                        "--db-driver=mysql", f"--mysql-socket={self.socket_path}",
+                        f"--rand-type={self.random_type}", "prepare",
                     ],
-                    stdout=open(os.path.join(self.logdir, "sysbench.log"), "w"),
+                    stdout=open(os.path.join(self.logdir, "sysbench_prepare.log"), "w"),
+                    stderr=subprocess.STDOUT,
                     check=True,
                 )
-            else:
-                # Encryption enabled
-                for i in range(1, self.num_tables + 1):
-                    print(f"Creating the table sbtest{i}...")
+
+                if rocksdb:
+                    print("Installing rocksdb storage engine")
+                    subprocess.run(
+                        [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}"],
+                        stdin=open(myrocks_sql) if os.path.isfile(myrocks_sql) else subprocess.DEVNULL,
+                        capture_output=True, check=False,
+                    )
+                    print("Creating rocksdb data in database")
+                    subprocess.run(
+                        [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-e",
+                         "CREATE DATABASE IF NOT EXISTS test_rocksdb;"],
+                        check=False,
+                    )
                     subprocess.run(
                         [
-                            os.path.join(self.mysqldir, "bin/mysql"),
-                            "-uroot",
-                            f"-S{self.socket_path}",
-                            "-e",
-                            f"CREATE TABLE test.sbtest{i} (id int(11) NOT NULL AUTO_INCREMENT, k int(11) NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k)) ENGINE=InnoDB DEFAULT CHARSET=latin1 ENCRYPTION='Y';",
+                            "sysbench", "/usr/share/sysbench/oltp_insert.lua",
+                            f"--tables={self.num_tables}", f"--table-size={self.table_size}",
+                            "--mysql-db=test_rocksdb", "--mysql-user=root", "--threads=100",
+                            "--db-driver=mysql", "--mysql-storage-engine=ROCKSDB",
+                            f"--mysql-socket={self.socket_path}", f"--rand-type={self.random_type}", "prepare",
                         ],
+                        stdout=open(os.path.join(self.logdir, "sysbench_rocksdb_prepare.log"), "w"),
+                        stderr=subprocess.STDOUT,
                         check=True,
                     )
+            else:
+                # Encryption enabled - create encrypted tables
+                print("Creating encrypted tables in innodb")
+                result = subprocess.run(
+                    [
+                        "sysbench", "/usr/share/sysbench/oltp_insert.lua",
+                        f"--tables={self.num_tables}", f"--table-size={self.table_size}",
+                        "--mysql-db=test", "--mysql-user=root", "--threads=100",
+                        "--db-driver=mysql", f"--mysql-socket={self.socket_path}",
+                        '--mysql-table-options=Encryption=\'Y\'',
+                        f"--rand-type={self.random_type}", "prepare",
+                    ],
+                    capture_output=True, check=False,
+                )
+                if result.returncode != 0:
+                    for i in range(1, self.num_tables + 1):
+                        print(f"Creating the table sbtest{i}...")
+                        subprocess.run(
+                            [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-e",
+                             f"CREATE TABLE test.sbtest{i} (id int(11) NOT NULL AUTO_INCREMENT, k int(11) NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k)) ENGINE=InnoDB DEFAULT CHARSET=latin1 ENCRYPTION='Y';"],
+                            check=True,
+                        )
+                    print("Adding data in tables...")
+                    subprocess.run(
+                        [
+                            "sysbench", "/usr/share/sysbench/oltp_insert.lua",
+                            f"--tables={self.num_tables}", "--mysql-db=test", "--mysql-user=root",
+                            "--threads=50", "--db-driver=mysql", f"--mysql-socket={self.socket_path}",
+                            "--time=30", f"--rand-type={self.random_type}", "run",
+                        ],
+                        capture_output=True, check=False,
+                    )
 
-    def run_load(self, tool_options: str):
-        """Run a load using pstress/sysbench."""
+    def run_load(self, tool_options: str, database: str = "test", engine: Optional[str] = None, time_sec: Optional[int] = None):
+        """Run a load using pstress/sysbench.
+
+        Args:
+            tool_options: pstress command-line options (ignored for sysbench).
+            database: database name for sysbench (default "test").
+            engine: if set, passes --mysql-storage-engine to sysbench (e.g. "ROCKSDB").
+            time_sec: sysbench --time value; defaults to self.seconds.
+        """
         if self.load_tool == "pstress":
             print(f"Run pstress with options: {tool_options}")
             cmd = [os.path.join(self.load_tool_dir, self.pstress_binary)] + tool_options.split()
@@ -436,20 +510,23 @@ class BackupTestHelper:
             self.run_command(cmd, check=False, background=True, log_file=log_file)
             time.sleep(2)
         else:
-            print("Run sysbench")
+            run_time = time_sec if time_sec is not None else self.seconds
+            print(f"Run sysbench on database={database} time={run_time}")
             cmd = [
-                "sysbench",
-                "/usr/share/sysbench/oltp_insert.lua",
+                "sysbench", "/usr/share/sysbench/oltp_insert.lua",
                 f"--tables={self.num_tables}",
-                "--mysql-db=test",
+                f"--mysql-db={database}",
                 "--mysql-user=root",
                 "--threads=50",
                 "--db-driver=mysql",
                 f"--mysql-socket={self.socket_path}",
-                f"--time={self.seconds}",
+                f"--time={run_time}",
+                f"--rand-type={self.random_type}",
                 "run",
             ]
-            log_file = os.path.join(self.logdir, "sysbench.log")
+            if engine:
+                cmd.insert(-1, f"--mysql-storage-engine={engine}")
+            log_file = os.path.join(self.logdir, f"sysbench_{database}.log")
             self.run_command(cmd, check=False, background=True, log_file=log_file)
 
     def is_load_running(self) -> bool:
@@ -462,117 +539,246 @@ class BackupTestHelper:
                 pass
         return False
 
-    def take_backup(self):
-        """Take incremental backup."""
+    def take_backup(
+        self,
+        backup_type: str = "",
+        cloud_params: str = "",
+        single_incremental: bool = False,
+        databases: Optional[List[str]] = None,
+    ):
+        """Take incremental backup with full/inc/prepare/restore cycle.
+
+        Args:
+            backup_type: "" (normal), "stream", "tar", or "cloud".
+            cloud_params: xbcloud options (used when backup_type="cloud").
+            single_incremental: when True, take exactly one incremental then stop.
+            databases: list of databases to verify (default ["test"]).
+        """
+        if databases is None:
+            databases = ["test"]
+
         if os.path.exists(self.backup_dir):
             shutil.rmtree(self.backup_dir)
         os.makedirs(self.backup_dir)
 
         log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+        use_detailed_verify = "test_rocksdb" in databases or not shutil.which("pt-table-checksum")
 
-        # Full backup
+        # --- Full backup ---
         print("=>Taking full backup")
-        cmd = self._xtrabackup_cmd_prefix() + [
-            "--no-defaults",
-            "--user=root",
-            "--password=",
-            "--backup",
-            f"--target-dir={self.backup_dir}/full",
-                    f"-S{self.socket_path}",
-            f"--datadir={self.datadir}",
-        ] + self.backup_params.split() + ["--register-redo-log-consumer"]
+        full_target = os.path.join(self.backup_dir, "full")
+        if backup_type in ("stream", "cloud"):
+            os.makedirs(full_target, exist_ok=True)
+            xb_cmd = self._xtrabackup_cmd_prefix() + [
+                "--no-defaults", f"--user={self.backup_user}", "--password=",
+                "--backup", f"--target-dir={full_target}_tmp",
+                f"-S{self.socket_path}", f"--datadir={self.datadir}",
+                "--stream=xbstream",
+            ] + self.backup_params.split()
 
-        log_file = os.path.join(self.logdir, f"full_backup_{log_date}_log")
-        result = self.run_command(cmd, check=False, log_file=log_file)
-        if result.returncode != 0:
-            print(f"=>Backup failed: {' '.join(result.stdout)}")
-            print(result.stderr)
-            pytest.fail(f"ERR: Full Backup failed. Please check the log at: {log_file}")
+            log_file = os.path.join(self.logdir, f"full_backup_{log_date}_log")
+            if backup_type == "cloud":
+                cloud_name = f"full_{log_date}"
+                pipe_cmd = f"{' '.join(xb_cmd)} 2>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbcloud')} put {cloud_params} {cloud_name} 2>>{log_file}"
+                result = subprocess.run(pipe_cmd, shell=True, check=False)
+                if result.returncode != 0:
+                    pytest.fail(f"ERR: Full cloud backup failed. Please check the log at: {log_file}")
+                get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {full_target} 2>>{log_file}"
+                result = subprocess.run(get_cmd, shell=True, check=False)
+                if result.returncode != 0:
+                    pytest.fail(f"ERR: Full cloud backup download failed. Please check the log at: {log_file}")
+                del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {cloud_name} 2>>{log_file}"
+                subprocess.run(del_cmd, shell=True, check=False)
+            else:
+                stream_file = os.path.join(full_target, "full_backup.xbstream")
+                with open(stream_file, "wb") as sf, open(log_file, "w") as lf:
+                    proc = subprocess.run(xb_cmd, stdout=sf, stderr=lf, check=False)
+                if proc.returncode != 0:
+                    pytest.fail(f"ERR: Full Backup (stream) failed. Please check the log at: {log_file}")
+                self.process_backup("stream", self.backup_params, full_target)
+        elif backup_type == "tar":
+            os.makedirs(full_target, exist_ok=True)
+            xb_cmd = self._xtrabackup_cmd_prefix() + [
+                "--no-defaults", f"--user={self.backup_user}", "--password=",
+                "--backup", f"--target-dir={full_target}_tmp",
+                f"-S{self.socket_path}", f"--datadir={self.datadir}",
+                "--stream=tar",
+            ] + self.backup_params.split()
+            tar_file = os.path.join(full_target, "full_backup.tar")
+            log_file = os.path.join(self.logdir, f"full_backup_{log_date}_log")
+            with open(tar_file, "wb") as tf, open(log_file, "w") as lf:
+                proc = subprocess.run(xb_cmd, stdout=tf, stderr=lf, check=False)
+            if proc.returncode != 0:
+                pytest.fail(f"ERR: Full Backup (tar) failed. Please check the log at: {log_file}")
+            self.process_backup("tar", self.backup_params, full_target)
         else:
-            print(f"..Full backup was successfully created at: {self.backup_dir}/full.\n  Logs available at: {log_file}")
+            cmd = self._xtrabackup_cmd_prefix() + [
+                "--no-defaults", f"--user={self.backup_user}", "--password=",
+                "--backup", f"--target-dir={full_target}",
+                f"-S{self.socket_path}", f"--datadir={self.datadir}",
+            ] + self.backup_params.split() + ["--register-redo-log-consumer"]
+
+            log_file = os.path.join(self.logdir, f"full_backup_{log_date}_log")
+            result = self.run_command(cmd, check=False, log_file=log_file)
+            if result.returncode != 0:
+                pytest.fail(f"ERR: Full Backup failed. Please check the log at: {log_file}")
+            else:
+                print(f"..Full backup was successfully created at: {full_target}.\n  Logs available at: {log_file}")
 
         time.sleep(1)
 
-        # Incremental backups
+        # --- Incremental backups ---
         inc_num = 1
-        while self.is_load_running():
-            print(f"=>Taking incremental backup: {inc_num}")
-            if inc_num == 1:
-                cmd = self._xtrabackup_cmd_prefix() + [
-                    "--no-defaults",
-                    "--user=root",
-                    "--password=",
-                    "--backup",
-                    f"--target-dir={self.backup_dir}/inc{inc_num}",
-                    f"--incremental-basedir={self.backup_dir}/full",
-                    f"-S{self.socket_path}",
-                    f"--datadir={self.datadir}",
-                ] + self.backup_params.split() + ["--register-redo-log-consumer"]
+        if single_incremental:
+            if backup_type in ("stream", "cloud"):
+                inc_target = os.path.join(self.backup_dir, "inc1")
+                os.makedirs(inc_target, exist_ok=True)
+                base_dir = full_target
+                xb_cmd = self._xtrabackup_cmd_prefix() + [
+                    "--no-defaults", f"--user={self.backup_user}", "--password=",
+                    "--backup", f"--target-dir={inc_target}_tmp",
+                    f"--incremental-basedir={base_dir}",
+                    f"-S{self.socket_path}", f"--datadir={self.datadir}",
+                    "--stream=xbstream",
+                ] + self.backup_params.split()
+
+                log_file = os.path.join(self.logdir, f"inc1_backup_{log_date}_log")
+                if backup_type == "cloud":
+                    cloud_name = f"inc1_{log_date}"
+                    pipe_cmd = f"{' '.join(xb_cmd)} 2>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbcloud')} put {cloud_params} {cloud_name} 2>>{log_file}"
+                    result = subprocess.run(pipe_cmd, shell=True, check=False)
+                    if result.returncode != 0:
+                        pytest.fail(f"ERR: Incremental cloud backup failed. Please check the log at: {log_file}")
+                    get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {inc_target} 2>>{log_file}"
+                    result = subprocess.run(get_cmd, shell=True, check=False)
+                    if result.returncode != 0:
+                        pytest.fail(f"ERR: Inc cloud backup download failed. Please check the log at: {log_file}")
+                    del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {cloud_name} 2>>{log_file}"
+                    subprocess.run(del_cmd, shell=True, check=False)
+                else:
+                    stream_file = os.path.join(inc_target, "inc_backup.xbstream")
+                    with open(stream_file, "wb") as sf, open(log_file, "w") as lf:
+                        proc = subprocess.run(xb_cmd, stdout=sf, stderr=lf, check=False)
+                    if proc.returncode != 0:
+                        pytest.fail(f"ERR: Incremental Backup (stream) failed. Please check the log at: {log_file}")
+                    self.process_backup("stream", self.backup_params, inc_target)
+            elif backup_type == "tar":
+                pytest.fail("Incremental backup is not supported with tar streaming")
             else:
+                print("=>Taking incremental backup: 1")
+                base_dir = full_target
+                inc_target = os.path.join(self.backup_dir, "inc1")
                 cmd = self._xtrabackup_cmd_prefix() + [
-                    "--no-defaults",
-                    "--user=root",
-                    "--password=",
-                    "--backup",
-                    f"--target-dir={self.backup_dir}/inc{inc_num}",
-                    f"--incremental-basedir={self.backup_dir}/inc{inc_num - 1}",
-                    f"-S{self.socket_path}",
-                    f"--datadir={self.datadir}",
+                    "--no-defaults", f"--user={self.backup_user}", "--password=",
+                    "--backup", f"--target-dir={inc_target}",
+                    f"--incremental-basedir={base_dir}",
+                    f"-S{self.socket_path}", f"--datadir={self.datadir}",
                 ] + self.backup_params.split() + ["--register-redo-log-consumer"]
 
-            log_file = os.path.join(self.logdir, f"inc{inc_num}_backup_{log_date}_log")
-            result = self.run_command(cmd, check=False, log_file=log_file)
-
-            if result.returncode != 0:
-                # Check for retry condition
-                with open(log_file, "r") as f:
-                    log_content = f.read()
+                log_file = os.path.join(self.logdir, f"inc1_backup_{log_date}_log")
+                result = self.run_command(cmd, check=False, log_file=log_file)
+                if result.returncode != 0:
+                    with open(log_file, "r") as f:
+                        log_content = f.read()
                     if "PXB will not be able to make a consistent backup" in log_content or "PXB will not be able to take a consistent backup" in log_content:
                         print("Retrying incremental backup with --lock-ddl option")
-                        if os.path.exists(f"{self.backup_dir}/inc{inc_num}"):
-                            shutil.rmtree(f"{self.backup_dir}/inc{inc_num}")
-
-                        if inc_num == 1:
-                            cmd = self._xtrabackup_cmd_prefix() + [
-                                "--no-defaults",
-                                "--user=root",
-                                "--password=",
-                                "--backup",
-                                f"--target-dir={self.backup_dir}/inc{inc_num}",
-                                f"--incremental-basedir={self.backup_dir}/full",
-                                f"-S{self.socket_path}",
-                                f"--datadir={self.datadir}",
-                            ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
-                        else:
-                            cmd = self._xtrabackup_cmd_prefix() + [
-                                "--no-defaults",
-                                "--user=root",
-                                "--password=",
-                                "--backup",
-                                f"--target-dir={self.backup_dir}/inc{inc_num}",
-                                f"--incremental-basedir={self.backup_dir}/inc{inc_num - 1}",
-                                f"-S{self.socket_path}",
-                                f"--datadir={self.datadir}",
-                            ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
-
+                        if os.path.exists(inc_target):
+                            shutil.rmtree(inc_target)
+                        cmd = self._xtrabackup_cmd_prefix() + [
+                            "--no-defaults", f"--user={self.backup_user}", "--password=",
+                            "--backup", f"--target-dir={inc_target}",
+                            f"--incremental-basedir={base_dir}",
+                            f"-S{self.socket_path}", f"--datadir={self.datadir}",
+                        ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
                         result = self.run_command(cmd, check=False, log_file=log_file)
                         if result.returncode != 0:
                             pytest.fail(f"ERR: Incremental Backup failed. Please check the log at: {log_file}")
                     else:
                         pytest.fail(f"ERR: Incremental Backup failed. Please check the log at: {log_file}")
-            else:
-                print(f"..Inc backup was successfully created at: {self.backup_dir}/inc{inc_num}.\n  Logs available at: {log_file}")
+                else:
+                    print(f"..Inc backup was successfully created at: {inc_target}.\n  Logs available at: {log_file}")
+            inc_num = 2  # We took exactly one incremental (inc1)
+        else:
+            while self.is_load_running():
+                print(f"=>Taking incremental backup: {inc_num}")
+                base_dir = full_target if inc_num == 1 else os.path.join(self.backup_dir, f"inc{inc_num - 1}")
+                inc_target = os.path.join(self.backup_dir, f"inc{inc_num}")
 
-            inc_num += 1
-            time.sleep(10)  # Sleep before next backup
+                if backup_type in ("stream", "cloud"):
+                    os.makedirs(inc_target, exist_ok=True)
+                    xb_cmd = self._xtrabackup_cmd_prefix() + [
+                        "--no-defaults", f"--user={self.backup_user}", "--password=",
+                        "--backup", f"--target-dir={inc_target}_tmp",
+                        f"--incremental-basedir={base_dir}",
+                        f"-S{self.socket_path}", f"--datadir={self.datadir}",
+                        "--stream=xbstream",
+                    ] + self.backup_params.split()
 
-        # Prepare backups
+                    log_file = os.path.join(self.logdir, f"inc{inc_num}_backup_{log_date}_log")
+                    if backup_type == "cloud":
+                        cloud_name = f"inc{inc_num}_{log_date}"
+                        pipe_cmd = f"{' '.join(xb_cmd)} 2>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbcloud')} put {cloud_params} {cloud_name} 2>>{log_file}"
+                        result = subprocess.run(pipe_cmd, shell=True, check=False)
+                        if result.returncode != 0:
+                            pytest.fail(f"ERR: Inc{inc_num} cloud backup failed. Log: {log_file}")
+                        get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {inc_target} 2>>{log_file}"
+                        result = subprocess.run(get_cmd, shell=True, check=False)
+                        if result.returncode != 0:
+                            pytest.fail(f"ERR: Inc{inc_num} cloud download failed. Log: {log_file}")
+                        del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {cloud_name} 2>>{log_file}"
+                        subprocess.run(del_cmd, shell=True, check=False)
+                    else:
+                        stream_file = os.path.join(inc_target, "inc_backup.xbstream")
+                        with open(stream_file, "wb") as sf, open(log_file, "w") as lf:
+                            proc = subprocess.run(xb_cmd, stdout=sf, stderr=lf, check=False)
+                        if proc.returncode != 0:
+                            pytest.fail(f"ERR: Inc{inc_num} stream backup failed. Log: {log_file}")
+                        self.process_backup("stream", self.backup_params, inc_target)
+                else:
+                    cmd = self._xtrabackup_cmd_prefix() + [
+                        "--no-defaults", f"--user={self.backup_user}", "--password=",
+                        "--backup", f"--target-dir={inc_target}",
+                        f"--incremental-basedir={base_dir}",
+                        f"-S{self.socket_path}", f"--datadir={self.datadir}",
+                    ] + self.backup_params.split() + ["--register-redo-log-consumer"]
+
+                    log_file = os.path.join(self.logdir, f"inc{inc_num}_backup_{log_date}_log")
+                    result = self.run_command(cmd, check=False, log_file=log_file)
+
+                    if result.returncode != 0:
+                        with open(log_file, "r") as f:
+                            log_content = f.read()
+                        if "PXB will not be able to make a consistent backup" in log_content or "PXB will not be able to take a consistent backup" in log_content:
+                            print("Retrying incremental backup with --lock-ddl option")
+                            if os.path.exists(inc_target):
+                                shutil.rmtree(inc_target)
+                            cmd = self._xtrabackup_cmd_prefix() + [
+                                "--no-defaults", f"--user={self.backup_user}", "--password=",
+                                "--backup", f"--target-dir={inc_target}",
+                                f"--incremental-basedir={base_dir}",
+                                f"-S{self.socket_path}", f"--datadir={self.datadir}",
+                            ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
+                            result = self.run_command(cmd, check=False, log_file=log_file)
+                            if result.returncode != 0:
+                                pytest.fail(f"ERR: Incremental Backup failed. Please check the log at: {log_file}")
+                        else:
+                            pytest.fail(f"ERR: Incremental Backup failed. Please check the log at: {log_file}")
+                    else:
+                        print(f"..Inc backup was successfully created at: {inc_target}.\n  Logs available at: {log_file}")
+
+                inc_num += 1
+                time.sleep(10)
+
+        # Stop any remaining DDL threads (best effort)
+        for t in threading.enumerate():
+            if t.name.startswith("ddl_"):
+                t.join(timeout=5)
+
+        # --- Prepare backups ---
         print("=>Preparing full backup")
         cmd = self._xtrabackup_cmd_prefix() + [
-            "--no-defaults",
-            "--prepare",
-            "--apply-log-only",
-            f"--target_dir={self.backup_dir}/full",
+            "--no-defaults", "--prepare", "--apply-log-only",
+            f"--target_dir={full_target}",
         ] + self.prepare_params.split()
 
         log_file = os.path.join(self.logdir, f"prepare_full_backup_{log_date}_log")
@@ -582,21 +788,19 @@ class BackupTestHelper:
         else:
             print(f"..Prepare of full backup was successful.\n  Logs available at: {log_file}")
 
-        for i in range(1, inc_num):
+        total_inc = inc_num - 1
+        for i in range(1, total_inc + 1):
             print(f"=>Preparing incremental backup: {i}")
-            if i == inc_num - 1:
+            if i == total_inc:
                 cmd = self._xtrabackup_cmd_prefix() + [
-                    "--no-defaults",
-                    "--prepare",
-                    f"--target_dir={self.backup_dir}/full",
+                    "--no-defaults", "--prepare",
+                    f"--target_dir={full_target}",
                     f"--incremental-dir={self.backup_dir}/inc{i}",
                 ] + self.prepare_params.split()
             else:
                 cmd = self._xtrabackup_cmd_prefix() + [
-                    "--no-defaults",
-                    "--prepare",
-                    "--apply-log-only",
-                    f"--target_dir={self.backup_dir}/full",
+                    "--no-defaults", "--prepare", "--apply-log-only",
+                    f"--target_dir={full_target}",
                     f"--incremental-dir={self.backup_dir}/inc{i}",
                 ] + self.prepare_params.split()
 
@@ -607,49 +811,39 @@ class BackupTestHelper:
             else:
                 print(f"..Prepare of incremental backup was successful.\n  Logs available at: {log_file}")
 
-        # Collect table count before restore
-        print("Collecting existing table count")
-        old_cwd = os.getcwd()
-        os.chdir(self.logdir)
-        try:
-            with open("file1", "w") as f:
-                result = subprocess.run(
-                    [
-                        "pt-table-checksum",
-                        f"S={self.socket_path},u=root",
-                        "-d",
-                        "test",
-                        "--recursion-method",
-                        "none",
-                        "--no-check-binlog-format",
-                    ],
-                    stdout=f,
-                    check=False,
-                )
-                if result.returncode not in (0, 64):
-                    raise subprocess.CalledProcessError(result.returncode, result.args)
-            # Extract table and checksum
-            with open("file1", "r") as f:
-                lines = f.readlines()
-            with open("file1", "w") as f:
-                for line in lines:
-                    parts = line.split()
-                    if len(parts) >= 9:
-                        f.write(f"{parts[3]} {parts[8]}\n")
-        finally:
-            os.chdir(old_cwd)
+        # --- Collect data before restore ---
+        if use_detailed_verify:
+            print("Collecting table data before restore (detailed verify)")
+            orig_data = self.collect_table_data(databases)
+        else:
+            print("Collecting existing table count")
+            old_cwd = os.getcwd()
+            os.chdir(self.logdir)
+            try:
+                with open("file1", "w") as f:
+                    result = subprocess.run(
+                        ["pt-table-checksum", f"S={self.socket_path},u=root",
+                         "-d", "test", "--recursion-method", "none", "--no-check-binlog-format"],
+                        stdout=f, check=False,
+                    )
+                    if result.returncode not in (0, 64):
+                        raise subprocess.CalledProcessError(result.returncode, result.args)
+                with open("file1", "r") as f:
+                    lines = f.readlines()
+                with open("file1", "w") as f:
+                    for line in lines:
+                        parts = line.split()
+                        if len(parts) >= 9:
+                            f.write(f"{parts[3]} {parts[8]}\n")
+            finally:
+                os.chdir(old_cwd)
 
         time.sleep(2)
 
-        # Stop server and move data directory
+        # --- Stop server and move data directory ---
         print("Stopping mysql server and moving data directory")
         subprocess.run(
-            [
-                os.path.join(self.mysqldir, "bin/mysqladmin"),
-                "-uroot",
-                f"-S{self.socket_path}",
-                "shutdown",
-            ],
+            [os.path.join(self.mysqldir, "bin/mysqladmin"), f"-u{self.backup_user}", f"-S{self.socket_path}", "shutdown"],
             check=True,
         )
 
@@ -658,12 +852,11 @@ class BackupTestHelper:
             shutil.rmtree(data_orig)
         shutil.move(self.datadir, data_orig)
 
-        # Restore backup
+        # --- Restore backup ---
         print("=>Restoring full backup")
         cmd = self._xtrabackup_cmd_prefix() + [
-            "--no-defaults",
-            "--copy-back",
-            f"--target-dir={self.backup_dir}/full",
+            "--no-defaults", "--copy-back",
+            f"--target-dir={full_target}",
             f"--datadir={self.datadir}",
         ] + self.restore_params.split()
 
@@ -674,92 +867,731 @@ class BackupTestHelper:
         else:
             print(f"..Restore of full backup was successful.\n  Logs available at: {log_file}")
 
+        # Copy .pem files from original datadir for SSL
+        for pem_file in glob.glob(os.path.join(data_orig, "*.pem")):
+            shutil.copy2(pem_file, self.datadir)
+
+        # Copy keyring file if it exists as transition-key
+        keyring_in_backup = os.path.join(full_target, "keyring")
+        if os.path.isfile(keyring_in_backup):
+            shutil.copy2(keyring_in_backup, self.logdir)
+
         self.start_server()
 
-        # Apply binlog if not encrypted
-        if (
-            "binlog-encryption" not in self.mysqld_options
-            and "encrypt-binlog" not in self.mysqld_options
-            and "skip-log-bin" not in self.mysqld_options
-        ):
-            print("Check xtrabackup for binlog position")
-            binlog_info_file = os.path.join(self.backup_dir, "full/xtrabackup_binlog_info")
-            with open(binlog_info_file, "r") as f:
-                line = f.readline().strip()
-                parts = line.split()
-                xb_binlog_file = parts[0] if parts else ""
-                xb_binlog_pos = parts[1] if len(parts) > 1 else ""
-
-            print(f"Xtrabackup binlog position: {xb_binlog_file}, {xb_binlog_pos}")
-
-            print(f"Applying binlog to restored data starting from {xb_binlog_file}, {xb_binlog_pos}")
-            binlog_path = os.path.join(data_orig, xb_binlog_file)
-            if os.path.exists(binlog_path):
-                mysqlbinlog = subprocess.Popen(
-                    [
-                        os.path.join(self.mysqldir, "bin/mysqlbinlog"),
-                        binlog_path,
-                        f"--start-position={xb_binlog_pos}",
-                    ],
-                    stdout=subprocess.PIPE,
-                )
-                mysql = subprocess.Popen(
-                    [
-                        os.path.join(self.mysqldir, "bin/mysql"),
-                        "-uroot",
-                        f"-S{self.socket_path}",
-                    ],
-                    stdin=mysqlbinlog.stdout,
-                )
-                mysqlbinlog.stdout.close()
-                mysql.communicate()
-                if mysql.returncode != 0:
-                    print("ERR: The binlog could not be applied to the restored data")
-
-            time.sleep(5)
-
-            # Collect table count after restore
-            print("Collecting table count after restore")
-            old_cwd = os.getcwd()
-            os.chdir(self.logdir)
-            try:
-                with open("file2", "w") as f:
-                    result = subprocess.run(
-                        [
-                            "pt-table-checksum",
-                            f"S={self.socket_path},u=root",
-                            "-d",
-                            "test",
-                            "--recursion-method",
-                            "none",
-                            "--no-check-binlog-format",
-                        ],
-                        stdout=f,
-                        check=False,
-                    )
-                    if result.returncode not in (0, 64):
-                        raise subprocess.CalledProcessError(result.returncode, result.args)
-                # Extract table and checksum
-                with open("file2", "r") as f:
-                    lines = f.readlines()
-                with open("file2", "w") as f:
-                    for line in lines:
-                        parts = line.split()
-                        if len(parts) >= 9:
-                            f.write(f"{parts[3]} {parts[8]}\n")
-
-                # Compare files
-                result = subprocess.run(["diff", "file1", "file2"], capture_output=True, text=True)
-                if result.returncode != 0:
-                    print("ERR: Difference found in table count before and after restore.")
-                else:
-                    print("Data is the same before and after restore: Pass")
-                    os.remove("file1")
-                    os.remove("file2")
-            finally:
-                os.chdir(old_cwd)
+        # --- Verify ---
+        if use_detailed_verify:
+            self.verify_data_integrity(databases, orig_data)
         else:
-            print("Binlog applying skipped, ignore differences between actual data and restored data")
+            if (
+                "binlog-encryption" not in self.mysqld_options
+                and "encrypt-binlog" not in self.mysqld_options
+                and "skip-log-bin" not in self.mysqld_options
+            ):
+                print("Check xtrabackup for binlog position")
+                binlog_info_file = os.path.join(full_target, "xtrabackup_binlog_info")
+                with open(binlog_info_file, "r") as f:
+                    line = f.readline().strip()
+                    parts = line.split()
+                    xb_binlog_file = parts[0] if parts else ""
+                    xb_binlog_pos = parts[1] if len(parts) > 1 else ""
+
+                print(f"Xtrabackup binlog position: {xb_binlog_file}, {xb_binlog_pos}")
+                print(f"Applying binlog to restored data starting from {xb_binlog_file}, {xb_binlog_pos}")
+                binlog_path = os.path.join(data_orig, xb_binlog_file)
+                if os.path.exists(binlog_path):
+                    mysqlbinlog = subprocess.Popen(
+                        [os.path.join(self.mysqldir, "bin/mysqlbinlog"), binlog_path, f"--start-position={xb_binlog_pos}"],
+                        stdout=subprocess.PIPE,
+                    )
+                    mysql = subprocess.Popen(
+                        [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}"],
+                        stdin=mysqlbinlog.stdout,
+                    )
+                    mysqlbinlog.stdout.close()
+                    mysql.communicate()
+                    if mysql.returncode != 0:
+                        print("ERR: The binlog could not be applied to the restored data")
+
+                time.sleep(5)
+
+                print("Collecting table count after restore")
+                old_cwd = os.getcwd()
+                os.chdir(self.logdir)
+                try:
+                    with open("file2", "w") as f:
+                        result = subprocess.run(
+                            ["pt-table-checksum", f"S={self.socket_path},u=root",
+                             "-d", "test", "--recursion-method", "none", "--no-check-binlog-format"],
+                            stdout=f, check=False,
+                        )
+                        if result.returncode not in (0, 64):
+                            raise subprocess.CalledProcessError(result.returncode, result.args)
+                    with open("file2", "r") as f:
+                        lines = f.readlines()
+                    with open("file2", "w") as f:
+                        for line in lines:
+                            parts = line.split()
+                            if len(parts) >= 9:
+                                f.write(f"{parts[3]} {parts[8]}\n")
+                    result = subprocess.run(["diff", "file1", "file2"], capture_output=True, text=True)
+                    if result.returncode != 0:
+                        print("ERR: Difference found in table count before and after restore.")
+                    else:
+                        print("Data is the same before and after restore: Pass")
+                        os.remove("file1")
+                        os.remove("file2")
+                finally:
+                    os.chdir(old_cwd)
+            else:
+                print("Binlog applying skipped, ignore differences between actual data and restored data")
+
+    def process_backup(self, backup_type: str, backup_params: str, target_dir: str):
+        """Post-backup processing: extract xbstream/tar, decrypt, decompress."""
+        if backup_type == "stream":
+            stream_file = os.path.join(target_dir, "full_backup.xbstream")
+            if not os.path.isfile(stream_file):
+                stream_file = os.path.join(target_dir, "inc_backup.xbstream")
+            if os.path.isfile(stream_file):
+                print(f"Extracting xbstream from {stream_file}")
+                subprocess.run(
+                    [os.path.join(self.xtrabackup_dir, "xbstream"), "-xvC", target_dir, "-f", stream_file],
+                    capture_output=True, check=True,
+                )
+                os.remove(stream_file)
+        elif backup_type == "tar":
+            tar_file = os.path.join(target_dir, "full_backup.tar")
+            if os.path.isfile(tar_file):
+                print(f"Extracting tar from {tar_file}")
+                subprocess.run(["tar", "-xvf", tar_file, "-C", target_dir], capture_output=True, check=True)
+                os.remove(tar_file)
+
+        if "--encrypt" in backup_params and "--encrypt" not in "--encrypt-key":
+            print("Decrypting backup files")
+            xb_cmd = self._xtrabackup_cmd_prefix() + [
+                "--decrypt=AES256", f"--encrypt-key={self.encrypt_key}", f"--target-dir={target_dir}",
+            ]
+            subprocess.run(xb_cmd, capture_output=True, check=True)
+            for enc_file in glob.glob(os.path.join(target_dir, "**/*.xbcrypt"), recursive=True):
+                os.remove(enc_file)
+
+        if "--compress" in backup_params:
+            print("Decompressing backup files")
+            xb_cmd = self._xtrabackup_cmd_prefix() + ["--decompress", f"--target-dir={target_dir}"]
+            subprocess.run(xb_cmd, capture_output=True, check=True)
+            for qp_file in glob.glob(os.path.join(target_dir, "**/*.qp"), recursive=True):
+                os.remove(qp_file)
+            for lz4_file in glob.glob(os.path.join(target_dir, "**/*.lz4"), recursive=True):
+                os.remove(lz4_file)
+            for zst_file in glob.glob(os.path.join(target_dir, "**/*.zst"), recursive=True):
+                os.remove(zst_file)
+
+    def collect_table_data(self, databases: List[str]) -> Dict[str, Dict[str, Tuple[str, str]]]:
+        """Collect per-table COUNT(*) and CHECKSUM for verification.
+
+        Returns dict: {db: {table: (count, checksum)}}
+        """
+        data: Dict[str, Dict[str, Tuple[str, str]]] = {}
+        for db in databases:
+            data[db] = {}
+            result = subprocess.run(
+                [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
+                 f"SHOW TABLES FROM {db};"],
+                capture_output=True, text=True, check=False,
+            )
+            if result.returncode != 0:
+                continue
+            tables = [t.strip() for t in result.stdout.strip().split("\n") if t.strip()]
+            for table in tables:
+                count_result = subprocess.run(
+                    [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
+                     f"SELECT COUNT(*) FROM {db}.{table}"],
+                    capture_output=True, text=True, check=False,
+                )
+                count = count_result.stdout.strip() if count_result.returncode == 0 else "ERR"
+                cksum_result = subprocess.run(
+                    [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
+                     f"CHECKSUM TABLE {db}.{table}"],
+                    capture_output=True, text=True, check=False,
+                )
+                cksum_parts = cksum_result.stdout.strip().split() if cksum_result.returncode == 0 else []
+                cksum = cksum_parts[1] if len(cksum_parts) >= 2 else "ERR"
+                data[db][table] = (count, cksum)
+        return data
+
+    def verify_data_integrity(self, databases: List[str], orig_data: Optional[Dict] = None):
+        """Per-table CHECK TABLE, record count comparison, checksum comparison, and ID gap detection."""
+        check_err = 0
+        for db in databases:
+            result = subprocess.run(
+                [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
+                 f"SHOW TABLES FROM {db};"],
+                capture_output=True, text=True, check=False,
+            )
+            if result.returncode != 0:
+                print(f"Warning: Could not list tables in {db}")
+                continue
+            tables = [t.strip() for t in result.stdout.strip().split("\n") if t.strip()]
+            for table in tables:
+                check_result = subprocess.run(
+                    [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
+                     f"CHECK TABLE {db}.{table}"],
+                    capture_output=True, text=True, check=False,
+                )
+                if check_result.returncode != 0 or "OK" not in check_result.stdout:
+                    print(f"ERR: CHECK TABLE {db}.{table} failed: {check_result.stdout}")
+                    check_err = 1
+
+                if orig_data and db in orig_data and table in orig_data[db]:
+                    orig_count, orig_cksum = orig_data[db][table]
+                    count_result = subprocess.run(
+                        [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
+                         f"SELECT COUNT(*) FROM {db}.{table}"],
+                        capture_output=True, text=True, check=False,
+                    )
+                    new_count = count_result.stdout.strip() if count_result.returncode == 0 else "ERR"
+                    if new_count != orig_count:
+                        print(f"Warning: Row count mismatch for {db}.{table}: before={orig_count}, after={new_count}")
+
+                    cksum_result = subprocess.run(
+                        [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
+                         f"CHECKSUM TABLE {db}.{table}"],
+                        capture_output=True, text=True, check=False,
+                    )
+                    cksum_parts = cksum_result.stdout.strip().split() if cksum_result.returncode == 0 else []
+                    new_cksum = cksum_parts[1] if len(cksum_parts) >= 2 else "ERR"
+                    if new_cksum != orig_cksum:
+                        print(f"Warning: Checksum mismatch for {db}.{table}: before={orig_cksum}, after={new_cksum}")
+
+        ping_result = subprocess.run(
+            [os.path.join(self.mysqldir, "bin/mysqladmin"), "ping", "--user=root", f"--socket={self.socket_path}"],
+            capture_output=True, check=False,
+        )
+        if ping_result.returncode != 0:
+            pytest.fail("ERR: The database has gone down due to corruption, the restore was unsuccessful")
+
+        if check_err == 0:
+            print("All table status: OK")
+        else:
+            print("After restore, some tables may be corrupt, check table status is not OK")
+
+    def start_vault_server(self) -> Dict[str, str]:
+        """Start Vault server using vault_test_setup.sh and return vault config dict."""
+        vault_setup = os.path.join(self.qascripts, "vault_test_setup.sh")
+        if not os.path.isfile(vault_setup):
+            pytest.fail(f"vault_test_setup.sh not found at {vault_setup}")
+
+        vault_dir = os.path.join(HOME, "vault")
+        log_file = os.path.join(self.logdir, "vault_setup.log")
+        result = subprocess.run(
+            ["bash", vault_setup, f"--workdir={vault_dir}", "--use-ssl"],
+            capture_output=True, text=True, check=False,
+        )
+        with open(log_file, "w") as f:
+            f.write(result.stdout + "\n" + result.stderr)
+        if result.returncode != 0:
+            pytest.fail(f"Vault setup failed. Log: {log_file}")
+
+        vault_config: Dict[str, str] = {}
+        cnf_file = os.path.join(vault_dir, "keyring_vault_ps.cnf")
+        if os.path.isfile(cnf_file):
+            with open(cnf_file, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if "=" in line:
+                        key, val = line.split("=", 1)
+                        vault_config[key.strip()] = val.strip()
+        vault_config["cnf_file"] = cnf_file
+        vault_config["vault_dir"] = vault_dir
+        return vault_config
+
+    def create_keyring_manifest(self, component_name: str):
+        """Create mysqld.my manifest file for component-based keyrings."""
+        manifest_file = os.path.join(self.mysqldir, "bin/mysqld.my")
+        with open(manifest_file, "w", encoding="utf-8") as f:
+            f.write(f'{{\n  "components": "file://{component_name}"\n}}\n')
+        return manifest_file
+
+    def create_keyring_config(self, encrypt_type: str, **kwargs) -> str:
+        """Create component configuration file for the given encryption type.
+
+        Returns path to the created config file.
+        """
+        plugin_dir = os.path.join(self.mysqldir, "lib/plugin")
+        os.makedirs(plugin_dir, exist_ok=True)
+
+        if encrypt_type in ("keyring_file_component", "keyring_file"):
+            config_file = os.path.join(plugin_dir, "component_keyring_file.cnf")
+            keyring_path = kwargs.get("keyring_path", os.path.join(self.logdir, "keyring"))
+            with open(config_file, "w", encoding="utf-8") as f:
+                f.write(f'{{\n  "path": "{keyring_path}",\n  "read_only": false\n}}\n')
+        elif encrypt_type in ("keyring_vault_component", "keyring_vault"):
+            config_file = os.path.join(plugin_dir, "component_keyring_vault.cnf")
+            vault_config = kwargs.get("vault_config", {})
+            vault_url = vault_config.get("vault_url", "")
+            secret_mount_point = vault_config.get("secret_mount_point", "")
+            token = vault_config.get("token", "")
+            vault_ca = vault_config.get("vault_ca", "")
+            with open(config_file, "w", encoding="utf-8") as f:
+                content = (
+                    f'{{\n  "vault_url": "{vault_url}",\n'
+                    f'  "secret_mount_point": "{secret_mount_point}",\n'
+                    f'  "token": "{token}",\n'
+                    f'  "vault_ca": "{vault_ca}"\n}}\n'
+                )
+                f.write(content)
+        elif encrypt_type in ("keyring_kmip_component", "keyring_kmip"):
+            cert_dir = kwargs.get("cert_dir", "")
+            config_file = os.path.join(plugin_dir, "component_keyring_kmip.cnf")
+            src = os.path.join(cert_dir, "component_keyring_kmip.cnf")
+            if os.path.isfile(src):
+                shutil.copy2(src, config_file)
+        elif encrypt_type in ("keyring_kms_component", "keyring_kms"):
+            config_file = os.path.join(plugin_dir, "component_keyring_kms.cnf")
+            keyring_path = kwargs.get("keyring_path", os.path.join(self.logdir, "keyring_kms"))
+            with open(config_file, "w", encoding="utf-8") as f:
+                f.write(
+                    f'{{\n  "path": "{keyring_path}", "region": "{self.kms_region}", '
+                    f'"kms_key": "{self.kms_id}", "auth_key": "{self.kms_auth_key}", '
+                    f'"secret_access_key": "{self.kms_secret_key}", "read_only": false\n}}\n'
+                )
+        else:
+            pytest.fail(f"Unknown encrypt_type: {encrypt_type}")
+            return ""
+        return config_file
+
+    def cleanup_keyring_configs(self):
+        """Remove manifest and config files."""
+        manifest = os.path.join(self.mysqldir, "bin/mysqld.my")
+        if os.path.isfile(manifest):
+            os.remove(manifest)
+        plugin_dir = os.path.join(self.mysqldir, "lib/plugin")
+        for cnf in ["component_keyring_file.cnf", "component_keyring_vault.cnf",
+                     "component_keyring_kmip.cnf", "component_keyring_kms.cnf"]:
+            path = os.path.join(plugin_dir, cnf)
+            if os.path.isfile(path):
+                os.remove(path)
+
+    def xbcloud_put(self, cloud_params: str, name: str, stream_file: str):
+        """Upload backup stream to cloud."""
+        cmd = f"cat {stream_file} | {os.path.join(self.xtrabackup_dir, 'xbcloud')} put {cloud_params} {name}"
+        log_file = os.path.join(self.logdir, f"xbcloud_put_{name}.log")
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
+        with open(log_file, "w") as f:
+            f.write(result.stdout + "\n" + result.stderr)
+        if result.returncode != 0:
+            pytest.fail(f"xbcloud put failed for {name}. Log: {log_file}")
+
+    def xbcloud_get(self, cloud_params: str, name: str, target_dir: str):
+        """Download backup from cloud."""
+        os.makedirs(target_dir, exist_ok=True)
+        cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {name} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {target_dir}"
+        log_file = os.path.join(self.logdir, f"xbcloud_get_{name}.log")
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
+        with open(log_file, "w") as f:
+            f.write(result.stdout + "\n" + result.stderr)
+        if result.returncode != 0:
+            pytest.fail(f"xbcloud get failed for {name}. Log: {log_file}")
+
+    def xbcloud_delete(self, cloud_params: str, name: str):
+        """Delete backup from cloud."""
+        cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {name}"
+        subprocess.run(cmd, shell=True, capture_output=True, check=False)
+
+    def run_ddl_in_background(self, ddl_func, *args, **kwargs) -> threading.Thread:
+        """Launch a DDL operation in a background thread. Returns the thread handle."""
+        thread = threading.Thread(target=ddl_func, args=args, kwargs=kwargs, daemon=True, name=f"ddl_{ddl_func.__name__}")
+        thread.start()
+        return thread
+
+    def _is_server_alive(self) -> bool:
+        """Check if MySQL server is alive via mysqladmin ping."""
+        result = subprocess.run(
+            [os.path.join(self.mysqldir, "bin/mysqladmin"), "-uroot", f"-S{self.socket_path}", "ping"],
+            capture_output=True, check=False,
+        )
+        return result.returncode == 0
+
+    def _run_sql(self, sql: str, check: bool = False) -> bool:
+        """Run SQL statement; returns True on success."""
+        result = subprocess.run(
+            [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-e", sql],
+            capture_output=True, text=True, check=False,
+        )
+        return result.returncode == 0
+
+    # --- DDL operation methods (each runs in background via run_ddl_in_background) ---
+
+    def ddl_change_storage_engine(self):
+        """Change storage engine of tables between MYISAM and INNODB (and ROCKSDB if enabled)."""
+        print("DDL: Change storage engine of test.sbtest1")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest1 ENGINE=MYISAM;")
+            self._run_sql("ALTER TABLE test.sbtest1 ENGINE=INNODB;")
+        if self.rocksdb == "enabled":
+            for _ in range(10):
+                if not self._is_server_alive():
+                    break
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ENGINE=INNODB;")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ENGINE=ROCKSDB;")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ENGINE=MYISAM;")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ENGINE=ROCKSDB;")
+
+    def ddl_add_drop_index(self):
+        """Add and drop indexes on tables."""
+        print("DDL: Add and drop index on test.sbtest1")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("CREATE INDEX kc ON test.sbtest1 (k,c);")
+            self._run_sql("ALTER TABLE test.sbtest1 ADD INDEX kc2 (k,c);")
+            self._run_sql("DROP INDEX kc2 ON test.sbtest1;")
+            self._run_sql("DROP INDEX kc ON test.sbtest1;")
+            self._run_sql("ALTER TABLE test.sbtest1 ADD INDEX kc (k,c), ALGORITHM=COPY, LOCK=EXCLUSIVE;")
+            self._run_sql("DROP INDEX kc ON test.sbtest1;")
+        if self.rocksdb == "enabled":
+            for _ in range(10):
+                if not self._is_server_alive():
+                    break
+                self._run_sql("CREATE INDEX kc ON test_rocksdb.sbtest1 (k,c);")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ADD INDEX kc2 (k,c);")
+                self._run_sql("DROP INDEX kc2 ON test_rocksdb.sbtest1;")
+                self._run_sql("DROP INDEX kc ON test_rocksdb.sbtest1;")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ADD INDEX kc (k,c), ALGORITHM=COPY, LOCK=EXCLUSIVE;")
+                self._run_sql("DROP INDEX kc ON test_rocksdb.sbtest1;")
+
+    def ddl_rename_index(self):
+        """Rename indexes on tables."""
+        print("DDL: Rename index on test.sbtest1")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest1 RENAME INDEX k_1 TO k_2, ALGORITHM=INPLACE, LOCK=NONE;")
+            self._run_sql("ALTER TABLE test.sbtest1 RENAME INDEX k_2 TO k_1, ALGORITHM=INPLACE, LOCK=NONE;")
+        if self.rocksdb == "enabled":
+            for _ in range(10):
+                if not self._is_server_alive():
+                    break
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 RENAME INDEX k_1 TO k_2, ALGORITHM=INPLACE, LOCK=NONE;")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 RENAME INDEX k_2 TO k_1, ALGORITHM=INPLACE, LOCK=NONE;")
+
+    def ddl_add_drop_full_text_index(self):
+        """Add and drop full text index."""
+        print("DDL: Add and drop full text index on test.sbtest1")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("CREATE FULLTEXT INDEX full_index ON test.sbtest1 (pad);")
+            self._run_sql("DROP INDEX full_index ON test.sbtest1;")
+        if self.rocksdb == "enabled":
+            for _ in range(10):
+                if not self._is_server_alive():
+                    break
+                self._run_sql("CREATE FULLTEXT INDEX full_index ON test_rocksdb.sbtest1 (pad);")
+                self._run_sql("DROP INDEX full_index ON test_rocksdb.sbtest1;")
+
+    def ddl_change_index_type(self):
+        """Change index type between BTREE and HASH."""
+        print("DDL: Change index type on test.sbtest1")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING BTREE, ALGORITHM=INSTANT;")
+            self._run_sql("ALTER TABLE test.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING HASH, ALGORITHM=INSTANT;")
+        if self.rocksdb == "enabled":
+            for _ in range(10):
+                if not self._is_server_alive():
+                    break
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING BTREE, ALGORITHM=INSTANT;")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING HASH, ALGORITHM=INSTANT;")
+
+    def ddl_add_drop_spatial_index(self):
+        """Add data to spatial table and add/drop spatial index."""
+        print("DDL: Spatial data and index on test.geom")
+        a, b = 1, 2
+        for _ in range(100):
+            if not self._is_server_alive():
+                break
+            self._run_sql(f"INSERT INTO test.geom VALUES(POINT({a},{b}));")
+            a += 1
+            b += 1
+        if self.rocksdb == "enabled":
+            for _ in range(10):
+                if not self._is_server_alive():
+                    break
+                self._run_sql("CREATE SPATIAL INDEX spa_index ON test.geom (g), ALGORITHM=INPLACE, LOCK=SHARED;")
+                self._run_sql("DROP INDEX spa_index ON test.geom;")
+
+    def ddl_add_drop_tablespace(self):
+        """Add table to tablespace and drop both."""
+        print("DDL: Add and drop tablespace")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd' Engine=InnoDB;")
+            self._run_sql("CREATE TABLE test.sbtest1copy SELECT * FROM test.sbtest1;")
+            self._run_sql("ALTER TABLE test.sbtest1copy TABLESPACE ts1;")
+            self._run_sql("DROP TABLE test.sbtest1copy;")
+            self._run_sql("DROP TABLESPACE ts1;")
+        if self.rocksdb == "enabled":
+            for i in range(1, 11):
+                if not self._is_server_alive():
+                    break
+                self._run_sql(f"CREATE TABLE test_rocksdb.sbrcopy{i} Engine=ROCKSDB SELECT * FROM test.sbtest1;")
+                self._run_sql(f"DROP TABLE test_rocksdb.sbrcopy{i};")
+
+    def ddl_change_compression(self):
+        """Change compression of tables."""
+        print("DDL: Change compression")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest1 COMPRESSION='lz4';")
+            self._run_sql("ALTER TABLE test.sbtest1 COMPRESSION='zlib';")
+            self._run_sql("ALTER TABLE test.sbtest1 COMPRESSION='';")
+        if self.rocksdb == "enabled":
+            for _ in range(10):
+                if not self._is_server_alive():
+                    break
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 COMMENT = 'cfname=cf1';")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 COMMENT = 'cfname=cf2';")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 COMMENT = 'cfname=cf3';")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest1 COMMENT = 'cfname=cf4';")
+
+    def ddl_change_row_format(self):
+        """Change row format of tables."""
+        print("DDL: Change row format")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest2 ROW_FORMAT=COMPRESSED;")
+            self._run_sql("ALTER TABLE test.sbtest2 ROW_FORMAT=DYNAMIC;")
+            self._run_sql("ALTER TABLE test.sbtest2 ROW_FORMAT=COMPACT;")
+            self._run_sql("ALTER TABLE test.sbtest2 ROW_FORMAT=REDUNDANT;")
+        if self.rocksdb == "enabled":
+            for _ in range(10):
+                if not self._is_server_alive():
+                    break
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest2 ROW_FORMAT=COMPRESSED;")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest2 ROW_FORMAT=DYNAMIC;")
+                self._run_sql("ALTER TABLE test_rocksdb.sbtest2 ROW_FORMAT=FIXED;")
+
+    def ddl_add_data_transaction(self):
+        """Add data in both innodb and myrocks tables in a single transaction."""
+        print("DDL: Cross-engine transaction inserts")
+        self._run_sql("CREATE TABLE IF NOT EXISTS test.innodb_t(id int(11) PRIMARY KEY AUTO_INCREMENT, k int(11), c char(120), pad char(60), KEY k_1(k), KEY kc(k,c)) ENGINE=InnoDB;")
+        self._run_sql("CREATE TABLE IF NOT EXISTS test.myrocks_t(id int(11) PRIMARY KEY AUTO_INCREMENT, k int(11), c char(120), pad char(60), KEY k_1(k), KEY kc(k,c)) ENGINE=ROCKSDB;")
+        a, b, c = 1, 11, 101
+        for _ in range(200):
+            if not self._is_server_alive():
+                break
+            self._run_sql(f"START TRANSACTION; INSERT INTO test.innodb_t(k, c, pad) VALUES({a}, {b}, {c}); INSERT INTO test.myrocks_t(k, c, pad) VALUES({a}, {b}, {c}); COMMIT;")
+            a += 1
+            b += 1
+            c += 1
+
+    def ddl_update_truncate_table(self):
+        """Update and truncate tables."""
+        print("DDL: Update and truncate tables")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("UPDATE test.sbtest1 SET c='test_update_data';")
+            self._run_sql("OPTIMIZE TABLE test.sbtest1;")
+            self._run_sql("TRUNCATE test.sbtest1;")
+        if self.rocksdb == "enabled":
+            for _ in range(10):
+                if not self._is_server_alive():
+                    break
+                self._run_sql("UPDATE test_rocksdb.sbtest2 SET c='test_update_data';")
+                self._run_sql("OPTIMIZE TABLE test_rocksdb.sbtest2;")
+                self._run_sql("TRUNCATE test_rocksdb.sbtest2;")
+
+    def ddl_create_drop_database(self):
+        """Create a database, add data, and drop it."""
+        print("DDL: Create and drop database")
+        for _ in range(3):
+            if not self._is_server_alive():
+                break
+            self._run_sql("CREATE DATABASE IF NOT EXISTS test1_innodb;")
+            subprocess.run(
+                ["sysbench", "/usr/share/sysbench/oltp_insert.lua", "--tables=1", "--table-size=1000",
+                 "--mysql-db=test1_innodb", "--mysql-user=root", "--threads=10", "--db-driver=mysql",
+                 f"--mysql-socket={self.socket_path}", "prepare"],
+                capture_output=True, check=False,
+            )
+            self._run_sql("ALTER TABLE test1_innodb.sbtest1 ADD COLUMN b JSON AS('{\"k1\": \"value\", \"k2\": [10, 20]}');")
+            self._run_sql("CREATE INDEX jindex ON test1_innodb.sbtest1( (CAST(b->'$.k2' AS UNSIGNED ARRAY)) );")
+            self._run_sql("DROP INDEX jindex ON test1_innodb.sbtest1;")
+            self._run_sql("ALTER TABLE test1_innodb.sbtest1 DROP COLUMN b;")
+            self._run_sql("DROP DATABASE test1_innodb;")
+        if self.rocksdb == "enabled":
+            for _ in range(3):
+                if not self._is_server_alive():
+                    break
+                self._run_sql("CREATE DATABASE IF NOT EXISTS test1_rocksdb;")
+                subprocess.run(
+                    ["sysbench", "/usr/share/sysbench/oltp_insert.lua", "--tables=1", "--table-size=1000",
+                     "--mysql-db=test1_rocksdb", "--mysql-user=root", "--threads=10", "--db-driver=mysql",
+                     "--mysql-storage-engine=ROCKSDB", f"--mysql-socket={self.socket_path}", "prepare"],
+                    capture_output=True, check=False,
+                )
+                self._run_sql("ALTER TABLE test1_rocksdb.sbtest1 ADD COLUMN b VARCHAR(255) DEFAULT '{\"k1\": \"value\", \"k2\": [10, 20]}';")
+                self._run_sql("ALTER TABLE test1_rocksdb.sbtest1 DROP COLUMN b;")
+                self._run_sql("DROP DATABASE test1_rocksdb;")
+
+    def ddl_create_delete_encrypted_table(self):
+        """Create an encrypted table, add data, and delete it."""
+        print("DDL: Create and delete encrypted tables")
+        self._run_sql("CREATE DATABASE IF NOT EXISTS test_innodb;")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("CREATE TABLE test_innodb.sbtest1 (id int(11) NOT NULL AUTO_INCREMENT, k int(11) NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k)) ENGINE=InnoDB DEFAULT CHARSET=latin1 ENCRYPTION='Y' COMPRESSION='lz4';")
+            subprocess.run(
+                ["sysbench", "/usr/share/sysbench/oltp_insert.lua", "--tables=1",
+                 "--mysql-db=test_innodb", "--mysql-user=root", "--threads=100", "--db-driver=mysql",
+                 f"--mysql-socket={self.socket_path}", "--time=1", "run"],
+                capture_output=True, check=False,
+            )
+            self._run_sql("DROP TABLE test_innodb.sbtest1;")
+
+    def ddl_change_encryption(self):
+        """Toggle encryption on a table."""
+        print("DDL: Change encryption")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest1 ENCRYPTION='N';")
+            self._run_sql("ALTER TABLE test.sbtest1 ENCRYPTION='Y';")
+
+    def ddl_compressed_column(self):
+        """Compress and uncompress a column."""
+        print("DDL: Compressed column")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest1 MODIFY c VARCHAR(250) COLUMN_FORMAT COMPRESSED NOT NULL DEFAULT '';")
+            self._run_sql("ALTER TABLE test.sbtest1 MODIFY c CHAR(120) COLUMN_FORMAT DEFAULT NOT NULL DEFAULT '';")
+
+    def ddl_compression_dictionary(self):
+        """Use compression dictionary to compress columns."""
+        print("DDL: Compression dictionary")
+        if not self._run_sql("CREATE COMPRESSION_DICTIONARY numbers('08566691963-88624912351-16662227201-46648573979-64646226163-77505759394-75470094713-41097360717-15161106334-50535565977');"):
+            print("Compression dictionary not supported, skipping")
+            return
+        for i in range(1, self.num_tables + 1):
+            if not self._is_server_alive():
+                break
+            self._run_sql(f"ALTER TABLE test.sbtest{i} MODIFY c VARCHAR(250) COLUMN_FORMAT COMPRESSED WITH COMPRESSION_DICTIONARY numbers NOT NULL DEFAULT '';")
+            self._run_sql(f"ALTER TABLE test.sbtest{i} MODIFY c CHAR(120) COLUMN_FORMAT DEFAULT NOT NULL DEFAULT '';")
+
+    def ddl_partitioned_tables(self):
+        """Create and manage partitioned tables."""
+        print("DDL: Partitioned tables")
+        self._run_sql("DROP TABLE IF EXISTS test.sbtest1; DROP TABLE IF EXISTS test.sbtest2; DROP TABLE IF EXISTS test.sbtest3;")
+        self._run_sql("CREATE TABLE test.sbtest1 (id int NOT NULL AUTO_INCREMENT, k int NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k) ) PARTITION BY HASH(id) PARTITIONS 10;")
+        self._run_sql("CREATE TABLE test.sbtest2 (id int NOT NULL AUTO_INCREMENT, k int NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k) ) PARTITION BY RANGE(id) (PARTITION p0 VALUES LESS THAN (500), PARTITION p1 VALUES LESS THAN (1000), PARTITION p2 VALUES LESS THAN MAXVALUE);")
+        self._run_sql("CREATE TABLE test.sbtest3 (id int NOT NULL AUTO_INCREMENT, k int NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k) ) PARTITION BY KEY() PARTITIONS 5;")
+        subprocess.run(
+            ["sysbench", "/usr/share/sysbench/oltp_insert.lua", "--tables=3", "--mysql-db=test",
+             "--mysql-user=root", "--threads=100", "--db-driver=mysql",
+             f"--mysql-socket={self.socket_path}", "--time=5", "run"],
+            capture_output=True, check=False,
+        )
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest1 COALESCE PARTITION 5;")
+            self._run_sql("ALTER TABLE test.sbtest1 PARTITION BY HASH(id) PARTITIONS 10;")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest2 DROP PARTITION p2;")
+            self._run_sql("ALTER TABLE test.sbtest2 ADD PARTITION (PARTITION p2 VALUES LESS THAN MAXVALUE);")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest3 REBUILD PARTITION p0, p1;")
+            self._run_sql("ALTER TABLE test.sbtest3 OPTIMIZE PARTITION p2;")
+            self._run_sql("ALTER TABLE test.sbtest3 ANALYZE PARTITION p3,p4;")
+        if self.rocksdb == "enabled":
+            self._run_sql("DROP TABLE IF EXISTS test_rocksdb.sbtest1; DROP TABLE IF EXISTS test_rocksdb.sbtest2; DROP TABLE IF EXISTS test_rocksdb.sbtest3;")
+            self._run_sql("CREATE TABLE test_rocksdb.sbtest1 (id int NOT NULL AUTO_INCREMENT, k int NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k) ) ENGINE=ROCKSDB PARTITION BY HASH(id) PARTITIONS 10;")
+            self._run_sql("CREATE TABLE test_rocksdb.sbtest2 (id int NOT NULL AUTO_INCREMENT, k int NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k) ) ENGINE=ROCKSDB PARTITION BY RANGE(id) (PARTITION p0 VALUES LESS THAN (500), PARTITION p1 VALUES LESS THAN (1000), PARTITION p2 VALUES LESS THAN MAXVALUE);")
+            self._run_sql("CREATE TABLE test_rocksdb.sbtest3 (id int NOT NULL AUTO_INCREMENT, k int NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k) ) ENGINE=ROCKSDB PARTITION BY KEY() PARTITIONS 5;")
+            subprocess.run(
+                ["sysbench", "/usr/share/sysbench/oltp_insert.lua", "--tables=3", "--mysql-db=test_rocksdb",
+                 "--mysql-user=root", "--threads=100", "--db-driver=mysql",
+                 "--mysql-storage-engine=ROCKSDB", f"--mysql-socket={self.socket_path}", "--time=5", "run"],
+                capture_output=True, check=False,
+            )
+
+    def ddl_grant_tables(self):
+        """Create user, grant privileges, then drop."""
+        print("DDL: Grant tables")
+        for _ in range(50):
+            if not self._is_server_alive():
+                break
+            self._run_sql("CREATE USER 'bkpuser'@'localhost' IDENTIFIED BY 's3cret';")
+            self._run_sql("GRANT RELOAD, LOCK TABLES, PROCESS, REPLICATION CLIENT ON *.* TO 'bkpuser'@'localhost'; FLUSH PRIVILEGES;")
+            self._run_sql("DROP USER 'bkpuser'@'localhost';")
+
+    def ddl_add_drop_invisible_column(self):
+        """Add and drop invisible column."""
+        print("DDL: Invisible column")
+        for _ in range(10):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest1 ADD COLUMN invisible int DEFAULT 1 invisible first;")
+            self._run_sql("UPDATE test.sbtest1 SET invisible = id;")
+            self._run_sql("ALTER TABLE test.sbtest1 DROP COLUMN invisible;")
+
+    def ddl_add_drop_blob_column(self):
+        """Add and drop blob column."""
+        print("DDL: Blob column")
+        for _ in range(30):
+            if not self._is_server_alive():
+                break
+            self._run_sql("ALTER TABLE test.sbtest1 ADD COLUMN blob_col blob;")
+            self._run_sql("UPDATE test.sbtest1 SET blob_col = c;")
+            self._run_sql("UPDATE test.sbtest1 SET blob_col = NULL;")
+            self._run_sql("UPDATE test.sbtest1 SET blob_col = id;")
+            self._run_sql("UPDATE test.sbtest1 SET blob_col = NULL;")
+            self._run_sql("ALTER TABLE test.sbtest1 DROP COLUMN blob_col;")
+
+    def ddl_add_drop_column_instant(self):
+        """Add and drop column using INSTANT algorithm."""
+        print("DDL: Add/drop column instant")
+        for table in ["sbtest1", "sbtest2", "sbtest3", "sbtest4", "sbtest5"]:
+            for _ in range(20):
+                if not self._is_server_alive():
+                    break
+                self._run_sql(f"ALTER TABLE test.{table} ADD COLUMN b CHAR(50) NOT NULL DEFAULT '' AFTER k, ALGORITHM=INSTANT;")
+                self._run_sql(f"UPDATE test.{table} SET b = k;")
+                self._run_sql(f"ALTER TABLE test.{table} DROP COLUMN b, ALGORITHM=INSTANT;")
+                self._run_sql(f"TRUNCATE TABLE test.{table};")
+
+    def ddl_add_drop_column_algorithms(self):
+        """Add and drop column using different algorithms."""
+        print("DDL: Add/drop column with various algorithms")
+        algos = [
+            ("sbtest1", "ALGORITHM=DEFAULT", "ALGORITHM=DEFAULT"),
+            ("sbtest2", "ALGORITHM=INPLACE", "ALGORITHM=INPLACE"),
+            ("sbtest3", "ALGORITHM=COPY", "ALGORITHM=COPY"),
+            ("sbtest4", "", ""),
+            ("sbtest5", "ALGORITHM=INPLACE", "ALGORITHM=COPY"),
+        ]
+        for table, add_algo, drop_algo in algos:
+            for _ in range(20):
+                if not self._is_server_alive():
+                    break
+                add_clause = f", {add_algo}" if add_algo else ""
+                drop_clause = f", {drop_algo}" if drop_algo else ""
+                self._run_sql(f"ALTER TABLE test.{table} ADD COLUMN b CHAR(50) NOT NULL DEFAULT '' AFTER k{add_clause};")
+                self._run_sql(f"UPDATE test.{table} SET b = k;")
+                self._run_sql(f"ALTER TABLE test.{table} DROP COLUMN b{drop_clause};")
 
     def run_pstress_prepare(self, tool_options: str):
         """Run pstress with --prepare to create metadata."""

@@ -1,20 +1,41 @@
-# PXB incremental backup load tests
+# PXB Backup Tests
 
-Tests in `inc_backup_load_tests.py` run backup/restore with a load tool (pquery/pstress/sysbench).  
-**Assumption:** Percona Server (PS) and Percona XtraBackup (PXB) are already installed (e.g. from tarballs).
+**Assumption:** Percona Server (PS) or MySQL Server (MS) and Percona XtraBackup (PXB) are already installed (e.g. from tarballs).
 
-## Prerequisites
+## Table of contents
 
-1. **Build the load tool** (e.g. pquery/pstress) with MySQL client libraries.
-2. **Set environment variables** (or rely on script defaults):
+- [Common prerequisites](#common-prerequisites)
+- [inc\_backup\_load\_tests.py — Incremental backup load tests](#inc_backup_load_testspy--incremental-backup-load-tests)
+  - [Additional environment variables](#additional-environment-variables)
+  - [How to run tests](#how-to-run-tests)
+    - [Run a single non-parametrized test](#run-a-single-non-parametrized-test)
+    - [Run a single parametrized test (one variant)](#run-a-single-parametrized-test-one-variant)
+    - [Run two or three tests](#run-two-or-three-tests)
+    - [Run a specific test suite](#run-a-specific-test-suite)
+    - [Run all tests](#run-all-tests)
+  - [Test reference — inc\_backup\_load\_tests.py](#test-reference--inc_backup_load_testspy)
+- [innodb\_myrocks\_backup\_tests.py — InnoDB/MyRocks backup tests](#innodb_myrocks_backup_testspy--innodbmyrocks-backup-tests)
+  - [Additional environment variables](#additional-environment-variables-1)
+  - [How to run tests](#how-to-run-tests-1)
+    - [Run a single test](#run-a-single-test)
+    - [Run a single parametrized encryption test](#run-a-single-parametrized-encryption-test)
+    - [Run multiple tests](#run-multiple-tests)
+    - [Run a specific test suite](#run-a-specific-test-suite-1)
+    - [Run all tests](#run-all-tests-1)
+  - [Test suites — innodb\_myrocks\_backup\_tests.py](#test-suites--innodb_myrocks_backup_testspy)
+  - [Test reference — innodb\_myrocks\_backup\_tests.py](#test-reference--innodb_myrocks_backup_testspy)
+
+---
+
+## Common prerequisites
+
+1. **Set environment variables** (or rely on script defaults):
 
    ```bash
    export TEST_BASE_DIR=$HOME/inc_backup_load_tests
    export XTRABACKUP_DIR=$HOME/percona-xtrabackup-8.0.35-34-Linux-x86_64.glibc2.35/bin
    export MYSQLDIR=$HOME/Percona-Server-8.0.44-35-Linux.x86_64.glibc2.35
    export QASCRIPTS=$HOME/server-qa
-   export LOAD_TOOL=pstress
-   export LOAD_TOOL_DIR=$HOME/lab/pstress/src
    ```
 
    **Optional:** To skip cleanup after each test (e.g. for debugging), set:
@@ -25,41 +46,52 @@ Tests in `inc_backup_load_tests.py` run backup/restore with a load tool (pquery/
 
    If `DISABLE_CLEANUP` is not set or is not `1`, cleanup runs as usual.
 
-   **For KMS encryption tests** (`test_kms_component_backup`), set:
-
-   ```bash
-   export KMS_KEYID=<your-key-id>
-   export KMS_SECRET_KEY=<your-secret-key>
-   export KMS_AUTH_KEY=<your-auth-key>
-   export KMS_REGION=us-east-1
-   ```
-
-  If any of these are unset, KMS tests are skipped. PS 8.0+ only; skipped on MS.
-
-  **For KMIP tests** (`test_kmip_component_backup`, `test_crash_backup_encrypted_kmip`):
-
-  - Vault types come from `KMIP_CONFIGS` in `test_helper.py` (currently `pykmip`, `fortanix`).
-  - KMIP tests require PS 8.0+ (skipped on 5.7); `keyring_kmip` tests are skipped on MS.
-  - For **Fortanix** vault variants, export:
-
-  ```bash
-  export FORTANIX_EMAIL=<your-fortanix-email>
-  export FORTANIX_PASSWORD=<your-fortanix-password>
-  ```
-
-  If Fortanix vars are not set, Fortanix-only variants are skipped.
-
-3. **Run from the `pxb` directory** so that `test_helper` and `kmip_helper` can be imported:
+2. **Run from the `pxb` directory** so that `test_helper` and `kmip_helper` can be imported:
 
    ```bash
    cd $QASCRIPTS/test_scripts/pxb
    ```
 
-Logs are written under `TEST_BASE_DIR` in test-specific subdirectories.
+3. Logs are written under `TEST_BASE_DIR` in test-specific subdirectories.
 
 ---
 
-## How to run tests
+## inc_backup_load_tests.py — Incremental backup load tests
+
+Tests in `inc_backup_load_tests.py` run backup/restore with a load tool (pquery/pstress/sysbench).
+
+### Additional environment variables
+
+```bash
+export LOAD_TOOL=pstress
+export LOAD_TOOL_DIR=$HOME/lab/pstress/src
+```
+
+**For KMS encryption tests** (`test_kms_component_backup`), set:
+
+```bash
+export KMS_KEYID=<your-key-id>
+export KMS_SECRET_KEY=<your-secret-key>
+export KMS_AUTH_KEY=<your-auth-key>
+export KMS_REGION=us-east-1
+```
+
+If any of these are unset, KMS tests are skipped. PS 8.0+ only; skipped on MS.
+
+**For KMIP tests** (`test_kmip_component_backup`, `test_crash_backup_encrypted_kmip`):
+
+- Vault types come from `KMIP_CONFIGS` in `test_helper.py` (currently `pykmip`, `fortanix`).
+- KMIP tests require PS 8.0+ (skipped on 5.7); `keyring_kmip` tests are skipped on MS.
+- For **Fortanix** vault variants, export:
+
+```bash
+export FORTANIX_EMAIL=<your-fortanix-email>
+export FORTANIX_PASSWORD=<your-fortanix-password>
+```
+
+If Fortanix vars are not set, Fortanix-only variants are skipped.
+
+### How to run tests
 
 Use **pytest** with the test file. Useful options:
 
@@ -69,7 +101,7 @@ Use **pytest** with the test file. Useful options:
 
 ---
 
-### Run a single non-parametrized test
+#### Run a single non-parametrized test
 
 Use the test function name with `-k` or as a node id:
 
@@ -87,7 +119,7 @@ pytest inc_backup_load_tests.py -v -s -k test_rocksdb_backup
 
 ---
 
-### Run a single parametrized test (one variant)
+#### Run a single parametrized test (one variant)
 
 Parametrized tests have multiple variants; each variant has a **node id** like `test_name[id1-id2]`. Use the full node id.
 
@@ -101,21 +133,21 @@ pytest inc_backup_load_tests.py -v -s -k "test_keyring_plugin_backup[pt]"
 pytest inc_backup_load_tests.py -v -s -k "test_keyring_component_backup[no_pt]"
 ```
 
-**Crash tests (storage_engine + page_tracking):**  
+**Crash tests (storage_engine + page_tracking):**
 Ids: `innodb-no_pt`, `innodb-pt`, `rocksdb-no_pt`, `rocksdb-pt`
 
 ```bash
 pytest inc_backup_load_tests.py -v -s -k "test_crash_backup[innodb-pt]"
 ```
 
-**Encrypted crash tests (keyring_file):**  
+**Encrypted crash tests (keyring_file):**
 Ids: `no_pt`, `pt`
 
 ```bash
 pytest inc_backup_load_tests.py -v -s -k "test_crash_backup_encrypted_keyring_file[pt]"
 ```
 
-**Encrypted crash tests (keyring_kmip):**  
+**Encrypted crash tests (keyring_kmip):**
 Ids: one per `vault_type` x page tracking, e.g. `[pykmip-no_pt]`, `[pykmip-pt]`, `[fortanix-no_pt]`, `[fortanix-pt]`
 
 ```bash
@@ -124,7 +156,7 @@ pytest inc_backup_load_tests.py -v -s -k "test_crash_backup_encrypted_kmip[pykmi
 
 For `fortanix` variants, ensure `FORTANIX_EMAIL` and `FORTANIX_PASSWORD` are exported first.
 
-**KMIP (one vault type):**  
+**KMIP (one vault type):**
 Vault types come from `KMIP_CONFIGS` (e.g. `pykmip`, `fortanix`). Node id is the vault name:
 
 ```bash
@@ -133,7 +165,7 @@ pytest inc_backup_load_tests.py -v -s -k "test_kmip_component_backup[pykmip]"
 
 For `fortanix` variants, ensure `FORTANIX_EMAIL` and `FORTANIX_PASSWORD` are exported first.
 
-**KMS (page_tracking = no_pt | pt):**  
+**KMS (page_tracking = no_pt | pt):**
 Requires `KMS_KEYID`, `KMS_SECRET_KEY`, `KMS_AUTH_KEY`, `KMS_REGION`. Node ids: `no_pt`, `pt`.
 
 ```bash
@@ -148,7 +180,7 @@ pytest inc_backup_load_tests.py --collect-only -q
 
 ---
 
-### Run two or three tests
+#### Run two or three tests
 
 Use `-k` with **or** to match several tests (or parametrized variants):
 
@@ -165,11 +197,11 @@ pytest inc_backup_load_tests.py -v -s -k "test_keyring_plugin_backup[no_pt] or t
 
 ---
 
-### Run a specific test suite
+#### Run a specific test suite
 
-The script defines logical **suites** and maps them to test names. You can run a suite either with the script’s CLI or by passing the same `-k` expression to pytest.
+The script defines logical **suites** and maps them to test names. You can run a suite either with the script's CLI or by passing the same `-k` expression to pytest.
 
-**Option A – script’s built-in suites (run from `pxb`):**
+**Option A — script's built-in suites (run from `pxb`):**
 
 ```bash
 python inc_backup_load_tests.py Normal_and_Encryption_tests
@@ -186,7 +218,7 @@ Verbose (no capture):
 python inc_backup_load_tests.py -v Normal_and_Encryption_tests
 ```
 
-**Option B – equivalent pytest `-k` for each suite:**
+**Option B — equivalent pytest `-k` for each suite:**
 
 | Suite                         | Pytest -k equivalent |
 |------------------------------|----------------------|
@@ -205,7 +237,7 @@ pytest inc_backup_load_tests.py -v -s -k "test_rocksdb_backup or test_crash_back
 
 ---
 
-### Run all tests
+#### Run all tests
 
 Run the whole file with pytest:
 
@@ -221,7 +253,7 @@ pytest inc_backup_load_tests.py --collect-only -q
 
 ---
 
-## Test reference
+### Test reference — inc_backup_load_tests.py
 
 | Test                         | Type          | Notes |
 |-----------------------------|---------------|--------|
@@ -236,3 +268,237 @@ pytest inc_backup_load_tests.py --collect-only -q
 | `test_crash_backup_encrypted_kmip` | Param | One id per `vault_type` x page tracking, e.g. `[pykmip-no_pt]`, `[pykmip-pt]`; Fortanix variants require `FORTANIX_EMAIL`, `FORTANIX_PASSWORD` |
 | `test_kmip_component_backup`| Param         | One id per vault in `KMIP_CONFIGS` (e.g. `[pykmip]`, `[fortanix]`); Fortanix variants require `FORTANIX_EMAIL`, `FORTANIX_PASSWORD` |
 | `test_kms_component_backup` | Param `[no_pt]`, `[pt]` | keyring_kms component; requires `KMS_KEYID`, `KMS_SECRET_KEY`, `KMS_AUTH_KEY`, `KMS_REGION`; skipped on 5.7 and MS |
+
+---
+
+## innodb_myrocks_backup_tests.py — InnoDB/MyRocks backup tests
+
+Tests in `innodb_myrocks_backup_tests.py` run backup/restore during various DDL operations, with encryption (plugin and component keyrings), streaming, compression, cloud storage, SSL, and InnoDB parameter changes. Supports both InnoDB and MyRocks engines.
+
+This is a Python rewrite of `innodb_myrocks_backup_tests.sh`.
+
+### Additional environment variables
+
+In addition to the [common prerequisites](#common-prerequisites), set:
+
+```bash
+export LOAD_TOOL=sysbench
+export ROCKSDB=enabled          # or "disabled" (default: disabled)
+export CLOUD_CONFIG=$HOME/aws.cnf
+export INSTALL_TYPE=tarball     # or "package" (default: tarball)
+```
+
+**For cloud backup tests** (`test_cloud_inc_backup`), `CLOUD_CONFIG` must point to a valid xbcloud defaults file (e.g. `aws.cnf` with S3 credentials).
+
+**For encryption tests**, the following are needed depending on the keyring type:
+
+- **Vault** (`keyring_vault_plugin`, `keyring_vault_component`): requires a running Vault server; the test calls `vault_test_setup.sh` automatically.
+- **KMIP** (`keyring_kmip_component`): requires KMIP server access; uses `kmip_helper.py` and `fortanix_kmip_setup.py`. For Fortanix variants, export `FORTANIX_EMAIL` and `FORTANIX_PASSWORD`.
+- **KMS** (`keyring_kms_component`): requires AWS KMS credentials:
+
+```bash
+export KMS_KEYID=<your-key-id>
+export KMS_SECRET_KEY=<your-secret-key>
+export KMS_AUTH_KEY=<your-auth-key>
+export KMS_REGION=us-east-1
+```
+
+### How to run tests
+
+Use **pytest** with the test file. Useful options:
+
+- `-v` — verbose (recommended)
+- `-s` — show stdout/stderr (no capture)
+- `-k EXPR` — run tests whose name matches the expression
+
+---
+
+#### Run a single test
+
+```bash
+pytest innodb_myrocks_backup_tests.py -v -s -k test_inc_backup
+```
+
+```bash
+pytest innodb_myrocks_backup_tests.py -v -s -k test_streaming_backup
+```
+
+```bash
+pytest innodb_myrocks_backup_tests.py -v -s -k test_ssl_backup
+```
+
+---
+
+#### Run a single parametrized encryption test
+
+Encryption tests are parametrized by keyring type. Node ids use the keyring name in brackets:
+
+```bash
+# 8.0+ keyring_file plugin
+pytest innodb_myrocks_backup_tests.py -v -s -k "test_encryption_8_0[keyring_file_plugin]"
+
+# 8.0+ keyring_vault component
+pytest innodb_myrocks_backup_tests.py -v -s -k "test_encryption_8_0[keyring_vault_component]"
+
+# 8.0+ keyring_kmip component
+pytest innodb_myrocks_backup_tests.py -v -s -k "test_encryption_8_0[keyring_kmip_component]"
+
+# 8.0+ keyring_kms component
+pytest innodb_myrocks_backup_tests.py -v -s -k "test_encryption_8_0[keyring_kms_component]"
+
+# 5.7 / PXB 2.4 keyring_file plugin
+pytest innodb_myrocks_backup_tests.py -v -s -k "test_encryption_2_4[keyring_file_plugin]"
+
+# 5.7 / PXB 2.4 keyring_vault plugin
+pytest innodb_myrocks_backup_tests.py -v -s -k "test_encryption_2_4[keyring_vault_plugin]"
+```
+
+To see all node ids:
+
+```bash
+pytest innodb_myrocks_backup_tests.py --collect-only -q
+```
+
+---
+
+#### Run multiple tests
+
+Use `-k` with **or**:
+
+```bash
+pytest innodb_myrocks_backup_tests.py -v -s -k "test_add_drop_index or test_rename_index or test_change_compression"
+```
+
+---
+
+#### Run a specific test suite
+
+The script defines logical **suites** mapped to groups of tests. You can run a suite either with the script's CLI or by passing `-k` expressions to pytest.
+
+**Option A — script's built-in suites (run from `pxb`):**
+
+```bash
+python innodb_myrocks_backup_tests.py Various_ddl_tests
+python innodb_myrocks_backup_tests.py File_encrypt_compress_stream_tests
+python innodb_myrocks_backup_tests.py Encryption_PXB8_0_PS8_0_tests
+python innodb_myrocks_backup_tests.py Encryption_PXB9_0_PS9_0_tests
+python innodb_myrocks_backup_tests.py Encryption_PXB8_0_PS8_0_KMIP_tests
+python innodb_myrocks_backup_tests.py Encryption_PXB8_0_PS8_0_KMS_tests
+python innodb_myrocks_backup_tests.py Encryption_PXB8_0_MS8_0_tests
+python innodb_myrocks_backup_tests.py Encryption_PXB9_0_MS9_0_tests
+python innodb_myrocks_backup_tests.py Encryption_PXB2_4_PS5_7_tests
+python innodb_myrocks_backup_tests.py Encryption_PXB2_4_MS5_7_tests
+python innodb_myrocks_backup_tests.py Cloud_backup_tests
+python innodb_myrocks_backup_tests.py Innodb_params_redo_archive_tests
+python innodb_myrocks_backup_tests.py SSL_tests
+```
+
+Verbose (no capture):
+
+```bash
+python innodb_myrocks_backup_tests.py -v Various_ddl_tests
+```
+
+Multiple suites at once:
+
+```bash
+python innodb_myrocks_backup_tests.py SSL_tests Cloud_backup_tests
+```
+
+**Option B — equivalent pytest `-k` for each suite:**
+
+| Suite | Tests included |
+|-------|---------------|
+| `Various_ddl_tests` | `test_inc_backup`, `test_add_drop_index`, `test_rename_index`, `test_add_drop_full_text_index`, `test_change_index_type`, `test_spatial_data_index`, `test_add_drop_tablespace`, `test_change_compression`, `test_change_row_format`, `test_copy_data_across_engine`, `test_add_data_across_engine`, `test_update_truncate_table`, `test_create_drop_database`, `test_partitioned_tables`, `test_compressed_column`, `test_compression_dictionary`, `test_invisible_column`, `test_blob_column`, `test_add_drop_column_instant`, `test_add_drop_column_algorithms`, `test_run_all_statements` |
+| `File_encrypt_compress_stream_tests` | `test_streaming_backup`, `test_compress_stream_backup`, `test_encrypt_compress_stream_backup`, `test_compress_backup` |
+| `Encryption_PXB8_0_PS8_0_tests` | `test_encryption_8_0[keyring_file_plugin]`, `test_encryption_8_0[keyring_vault_plugin]`, `test_encryption_8_0[keyring_vault_component]`, `test_encryption_8_0[keyring_file_component]` |
+| `Encryption_PXB9_0_PS9_0_tests` | `test_encryption_8_0[keyring_file_component]`, `test_encryption_8_0[keyring_vault_component]` |
+| `Encryption_PXB8_0_PS8_0_KMIP_tests` | `test_encryption_8_0[keyring_kmip_component]` |
+| `Encryption_PXB8_0_PS8_0_KMS_tests` | `test_encryption_8_0[keyring_kms_component]` |
+| `Encryption_PXB8_0_MS8_0_tests` | `test_encryption_8_0[keyring_file_plugin]`, `test_encryption_8_0[keyring_file_component]` |
+| `Encryption_PXB9_0_MS9_0_tests` | `test_encryption_8_0[keyring_file_component]` |
+| `Encryption_PXB2_4_PS5_7_tests` | `test_encryption_2_4[keyring_file_plugin]`, `test_encryption_2_4[keyring_vault_plugin]` |
+| `Encryption_PXB2_4_MS5_7_tests` | `test_encryption_2_4[keyring_file_plugin]` |
+| `Cloud_backup_tests` | `test_cloud_inc_backup` |
+| `Innodb_params_redo_archive_tests` | `test_inc_backup_innodb_params`, `test_inc_backup_archive_log` |
+| `SSL_tests` | `test_ssl_backup` |
+
+Example:
+
+```bash
+pytest innodb_myrocks_backup_tests.py -v -s -k "test_streaming_backup or test_compress_stream_backup or test_encrypt_compress_stream_backup or test_compress_backup"
+```
+
+---
+
+#### Run all tests
+
+Run the whole file with pytest:
+
+```bash
+pytest innodb_myrocks_backup_tests.py -v -s
+```
+
+To list all tests without running them:
+
+```bash
+pytest innodb_myrocks_backup_tests.py --collect-only -q
+```
+
+---
+
+### Test suites — innodb_myrocks_backup_tests.py
+
+| Suite | Description |
+|-------|-------------|
+| `Various_ddl_tests` | Backup/restore during DDL operations (index, tablespace, compression, row format, partitions, etc.) with concurrent background DDL |
+| `File_encrypt_compress_stream_tests` | Streaming (xbstream, tar), lz4/zstd compression, and AES256 file-level encryption |
+| `Encryption_PXB8_0_PS8_0_tests` | PXB 8.0 + PS 8.0 encryption with keyring_file (plugin/component) and keyring_vault (plugin/component) |
+| `Encryption_PXB9_0_PS9_0_tests` | PXB 9.0 + PS 9.0 encryption with keyring_file and keyring_vault components |
+| `Encryption_PXB8_0_PS8_0_KMIP_tests` | PXB 8.0 + PS 8.0 encryption with keyring_kmip component |
+| `Encryption_PXB8_0_PS8_0_KMS_tests` | PXB 8.0 + PS 8.0 encryption with keyring_kms component (requires AWS KMS credentials) |
+| `Encryption_PXB8_0_MS8_0_tests` | PXB 8.0 + MS 8.0 encryption with keyring_file (plugin/component) |
+| `Encryption_PXB9_0_MS9_0_tests` | PXB 9.0 + MS 9.0 encryption with keyring_file component |
+| `Encryption_PXB2_4_PS5_7_tests` | PXB 2.4 + PS 5.7 encryption with keyring_file and keyring_vault plugins |
+| `Encryption_PXB2_4_MS5_7_tests` | PXB 2.4 + MS 5.7 encryption with keyring_file plugin |
+| `Cloud_backup_tests` | Cloud incremental backup using xbcloud (requires `CLOUD_CONFIG`) |
+| `Innodb_params_redo_archive_tests` | Backup with custom InnoDB parameters and redo log archiving |
+| `SSL_tests` | Backup with SSL certificates, `--ssl-mode`, `--ssl-cipher`, and FIPS mode |
+
+---
+
+### Test reference — innodb_myrocks_backup_tests.py
+
+| Test | Type | Notes |
+|------|------|-------|
+| `test_inc_backup` | Non-param | Basic incremental backup/restore |
+| `test_add_drop_index` | Non-param | Backup during concurrent add/drop index |
+| `test_rename_index` | Non-param | Backup during concurrent rename index |
+| `test_add_drop_full_text_index` | Non-param | Backup during concurrent add/drop full-text index |
+| `test_change_index_type` | Non-param | Backup during concurrent index type change |
+| `test_spatial_data_index` | Non-param | Backup during concurrent add/drop spatial index |
+| `test_add_drop_tablespace` | Non-param | Backup during concurrent add/drop tablespace |
+| `test_change_compression` | Non-param | Backup during concurrent compression changes |
+| `test_change_row_format` | Non-param | Backup during concurrent row format changes |
+| `test_copy_data_across_engine` | Non-param | Cross-engine table copy (InnoDB to RocksDB); skipped if `ROCKSDB=disabled` |
+| `test_add_data_across_engine` | Non-param | Concurrent data insert into InnoDB and RocksDB tables; skipped if `ROCKSDB=disabled` |
+| `test_update_truncate_table` | Non-param | Backup during concurrent update/truncate |
+| `test_create_drop_database` | Non-param | Backup during concurrent create/drop database |
+| `test_partitioned_tables` | Non-param | Backup during concurrent partition operations |
+| `test_compressed_column` | Non-param | Backup during concurrent column compression |
+| `test_compression_dictionary` | Non-param | Backup during concurrent compression dictionary operations |
+| `test_invisible_column` | Non-param | Backup during concurrent add/drop invisible columns |
+| `test_blob_column` | Non-param | Backup during concurrent add/drop BLOB columns |
+| `test_add_drop_column_instant` | Non-param | Backup during concurrent instant column add/drop |
+| `test_add_drop_column_algorithms` | Non-param | Backup during concurrent column add/drop with various algorithms |
+| `test_run_all_statements` | Non-param | Runs all DDL operations concurrently during backup |
+| `test_streaming_backup` | Non-param | Streaming backup (xbstream); includes tar format on 5.7 |
+| `test_compress_stream_backup` | Non-param | lz4/zstd compression with streaming; skipped on 5.7 |
+| `test_encrypt_compress_stream_backup` | Non-param | AES256 encryption + lz4/zstd compression + streaming; skipped on 5.7 |
+| `test_compress_backup` | Non-param | lz4/zstd compression without streaming; skipped on 5.7 |
+| `test_encryption_8_0` | Param | `[keyring_file_plugin]`, `[keyring_vault_plugin]`, `[keyring_vault_component]`, `[keyring_file_component]`, `[keyring_kmip_component]`, `[keyring_kms_component]` — each runs multiple sub-tests (basic, all-options, transition-key, generate-transition-key, lz4/zstd streaming, DDL) |
+| `test_encryption_2_4` | Param | `[keyring_file_plugin]`, `[keyring_vault_plugin]` — PXB 2.4 / PS 5.7 encryption tests |
+| `test_cloud_inc_backup` | Non-param | Cloud incremental backup via xbcloud; requires `CLOUD_CONFIG` |
+| `test_inc_backup_innodb_params` | Non-param | Backup with custom InnoDB parameters |
+| `test_inc_backup_archive_log` | Non-param | Backup with redo log archiving; skipped on 5.7 |
+| `test_ssl_backup` | Non-param | Backup with SSL certificates, ssl-mode, ssl-cipher, and FIPS mode |

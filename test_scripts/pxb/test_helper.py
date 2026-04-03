@@ -843,7 +843,7 @@ class BackupTestHelper:
         # --- Stop server and move data directory ---
         print("Stopping mysql server and moving data directory")
         subprocess.run(
-            [os.path.join(self.mysqldir, "bin/mysqladmin"), f"-u{self.backup_user}", f"-S{self.socket_path}", "shutdown"],
+            [os.path.join(self.mysqldir, "bin/mysqladmin"), "-uroot", f"-S{self.socket_path}", "shutdown"],
             check=True,
         )
 

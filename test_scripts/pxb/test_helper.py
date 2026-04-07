@@ -361,9 +361,11 @@ class BackupTestHelper:
 
         self.start_server()
 
-        # Load MyRocks SQL if present
+        # Load MyRocks SQL only when RocksDB is needed; loading it unconditionally
+        # installs ha_rocksdb.so which causes xtrabackup to attempt RocksDB
+        # checkpoint creation even when no RocksDB data exists.
         myrocks_sql = os.path.join(self.qascripts, "MyRocks.sql")
-        if os.path.isfile(myrocks_sql):
+        if rocksdb and os.path.isfile(myrocks_sql):
             subprocess.run(
                 [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}"],
                 stdin=open(myrocks_sql),

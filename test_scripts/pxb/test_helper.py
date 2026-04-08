@@ -648,6 +648,7 @@ class BackupTestHelper:
                 pytest.fail(f"ERR: Full Backup failed. Please check the log at: {log_file}")
             else:
                 print(f"..Full backup was successfully created at: {full_target}.\n  Logs available at: {log_file}")
+            self.process_backup("", self.backup_params, full_target)
 
         time.sleep(1)
 
@@ -721,6 +722,7 @@ class BackupTestHelper:
                         pytest.fail(f"ERR: Incremental Backup failed. Please check the log at: {log_file}")
                 else:
                     print(f"..Inc backup was successfully created at: {inc_target}.\n  Logs available at: {log_file}")
+                self.process_backup("", self.backup_params, inc_target)
             inc_num = 2  # We took exactly one incremental (inc1)
         else:
             while self.is_load_running():
@@ -789,6 +791,7 @@ class BackupTestHelper:
                             pytest.fail(f"ERR: Incremental Backup failed. Please check the log at: {log_file}")
                     else:
                         print(f"..Inc backup was successfully created at: {inc_target}.\n  Logs available at: {log_file}")
+                    self.process_backup("", self.backup_params, inc_target)
 
                 inc_num += 1
                 time.sleep(10)

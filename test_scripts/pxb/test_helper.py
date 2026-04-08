@@ -990,7 +990,7 @@ class BackupTestHelper:
                 subprocess.run(["tar", "-xvf", tar_file, "-C", target_dir], capture_output=True, check=True)
                 os.remove(tar_file)
 
-        if "--encrypt" in backup_params and "--encrypt" not in "--encrypt-key":
+        if "--encrypt=" in backup_params:
             print("Decrypting backup files")
             xb_cmd = self._xtrabackup_cmd_prefix() + [
                 "--decrypt=AES256", f"--encrypt-key={self.encrypt_key}", f"--target-dir={target_dir}",

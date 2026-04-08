@@ -454,6 +454,10 @@ def _setup_encrypt_options(test_helper, encrypt_type):
             pxb_encrypt_options = f"--keyring_file_data={test_helper.mysqldir}/keyring"
         else:
             pxb_encrypt_options = f"--keyring_file_data={test_helper.mysqldir}/keyring --xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin"
+        server_options = (
+            f"--early-plugin-load=keyring_file.so --keyring_file_data={test_helper.mysqldir}/keyring "
+            + server_options
+        )
 
     elif encrypt_type == "keyring_vault_plugin":
         vault_config = test_helper.start_vault_server()

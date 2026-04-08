@@ -1099,8 +1099,38 @@ class BackupTestHelper:
         else:
             print("After restore, some tables may be corrupt, check table status is not OK")
 
+    def stop_vault_server(self) -> None:
+        """Kill any running HashiCorp Vault server process."""
+        result = subprocess.run(
+            ["pgrep", "-f", "vault server"],
+            capture_output=True, text=True, check=False,
+        )
+        pids = result.stdout.strip().split()
+        if pids:
+            print(f"Stopping vault server (PIDs: {', '.join(pids)})...")
+            for pid in pids:
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                except (ProcessLookupError, OSError, ValueError):
+                    pass
+            for _ in range(10):
+                time.sleep(1)
+                check = subprocess.run(
+                    ["pgrep", "-f", "vault server"],
+                    capture_output=True, text=True, check=False,
+                )
+                if not check.stdout.strip():
+                    break
+            else:
+                for pid in pids:
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except (ProcessLookupError, OSError, ValueError):
+                        pass
+
     def start_vault_server(self) -> Dict[str, str]:
         """Start Vault server using vault_test_setup.sh and return vault config dict."""
+        self.stop_vault_server()
         vault_setup = os.path.join(self.qascripts, "vault_test_setup.sh")
         if not os.path.isfile(vault_setup):
             pytest.fail(f"vault_test_setup.sh not found at {vault_setup}")
@@ -2573,7 +2603,8 @@ class BackupTestHelper:
                 for name in self.kmip_helper.kmip_container_names:
                     self.kmip_helper.cleanup_existing_container(name)
 
-        # Cleanup vault directory
+        # Stop vault server and cleanup vault directory
+        self.stop_vault_server()
         vault_dir = os.path.join(HOME, "vault")
         if os.path.exists(vault_dir) and HOME:
             print("Cleaning up vault directory...")

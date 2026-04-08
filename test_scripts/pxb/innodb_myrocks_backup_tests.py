@@ -557,16 +557,19 @@ def _run_encryption_8_0_tests(test_helper, encrypt_type):
     orig_lock_ddl = test_helper.lock_ddl
     test_helper.lock_ddl = "on"
     test_helper.backup_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --core-file --lock-ddl={test_helper.lock_ddl}"
-    if pxb_comp:
+    if "plugin" in encrypt_type:
+        if test_helper.install_type == "package":
+            test_helper.prepare_params = f"--transition-key={test_helper.encrypt_key} --core-file"
+        else:
+            test_helper.prepare_params = f"--xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --transition-key={test_helper.encrypt_key} --core-file"
+        plugin_name = "keyring_file.so" if "file" in encrypt_type else "keyring_vault.so"
+        test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key --early-plugin-load={plugin_name} --core-file"
+    elif pxb_comp:
         test_helper.prepare_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} {pxb_comp} --core-file"
         test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key {pxb_comp} --core-file"
     else:
         test_helper.prepare_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --core-file"
-        if "plugin" in encrypt_type:
-            plugin_name = "keyring_file.so" if "file" in encrypt_type else "keyring_vault.so"
-            test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key --early-plugin-load={plugin_name} --core-file"
-        else:
-            test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key {pxb_comp} --core-file"
+        test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key --core-file"
     test_helper.take_backup(single_incremental=True)
     test_helper.lock_ddl = orig_lock_ddl
 

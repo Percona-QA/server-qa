@@ -335,10 +335,32 @@ class BackupTestHelper:
         subprocess.run(cmd, capture_output=True, check=check)
         return None
 
+    def stop_server(self):
+        """Gracefully shut down any running MySQL server, then force-kill if needed."""
+        if self._is_server_alive():
+            subprocess.run(
+                [os.path.join(self.mysqldir, "bin/mysqladmin"), "-uroot",
+                 f"-S{self.socket_path}", "shutdown"],
+                capture_output=True, check=False,
+            )
+            for _ in range(30):
+                time.sleep(1)
+                if not self._is_server_alive():
+                    break
+
+        if self.mysql_pid:
+            try:
+                os.kill(self.mysql_pid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
+                pass
+            self.mysql_pid = None
+
     def initialize_db(self, rocksdb: bool = False):
         """Initialize and start MySQL database. When rocksdb=True, also set up RocksDB engine and test_rocksdb database."""
         if not os.path.exists(self.logdir):
             os.makedirs(self.logdir)
+
+        self.stop_server()
 
         if os.path.exists(self.datadir):
             shutil.rmtree(self.datadir)

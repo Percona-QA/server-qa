@@ -977,10 +977,11 @@ class BackupTestHelper:
                 stream_file = os.path.join(target_dir, "inc_backup.xbstream")
             if os.path.isfile(stream_file):
                 print(f"Extracting xbstream from {stream_file}")
-                subprocess.run(
-                    [os.path.join(self.xtrabackup_dir, "xbstream"), "-xvC", target_dir, "-f", stream_file],
-                    capture_output=True, check=True,
-                )
+                with open(stream_file, "rb") as sf:
+                    subprocess.run(
+                        [os.path.join(self.xtrabackup_dir, "xbstream"), "-xvC", target_dir],
+                        stdin=sf, capture_output=True, check=True,
+                    )
                 os.remove(stream_file)
         elif backup_type == "tar":
             tar_file = os.path.join(target_dir, "full_backup.tar")

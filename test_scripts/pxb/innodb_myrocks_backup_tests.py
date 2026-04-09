@@ -266,6 +266,14 @@ def test_blob_column(test_helper):
     test_helper.take_backup(single_incremental=True, databases=databases)
 
 
+@pytest.mark.skip(reason="Disabled due to Bug https://jira.percona.com/browse/PS-8950")
+def test_grant_tables(test_helper):
+    """Backup and Restore during creation and dropping of a user."""
+    databases = _init_for_ddl(test_helper)
+    test_helper.run_ddl_in_background(test_helper.ddl_grant_tables)
+    test_helper.take_backup(single_incremental=True, databases=databases)
+
+
 def test_add_drop_column_instant(test_helper):
     """Backup and Restore during column add and drop using instant algorithm."""
     if test_helper.version_normalized < 80000:

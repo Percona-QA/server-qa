@@ -335,24 +335,76 @@ class BackupTestHelper:
         subprocess.run(cmd, capture_output=True, check=check)
         return None
 
-    def stop_server(self):
-        """Gracefully shut down any running MySQL server, then force-kill if needed."""
+    def stop_server(self, timeout: int = 300):
+        """Gracefully shut down any running MySQL server, then force-kill if needed.
+
+        Uses a bounded --shutdown-timeout to avoid hanging for the default
+        3600s when the server crashes during shutdown (e.g. InnoDB assertion
+        failures).  If mysqladmin fails, falls back to SIGTERM/SIGKILL.
+        """
+        # #region agent log
+        import json as _json
+        _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug-f2a631.log")
+        def _dbg(loc, msg, data=None):
+            try:
+                with open(_log_path, "a") as _f:
+                    _f.write(_json.dumps({"sessionId":"f2a631","location":loc,"message":msg,"data":data or {},"timestamp":int(time.time()*1000),"hypothesisId":"A"}) + "\n")
+            except Exception:
+                pass
+        # #endregion agent log
+
+        if not self._is_server_alive() and not self.mysql_pid:
+            # #region agent log
+            _dbg("test_helper.py:stop_server", "Server not alive and no pid", {})
+            # #endregion agent log
+            return
+
         if self._is_server_alive():
-            subprocess.run(
+            # #region agent log
+            _dbg("test_helper.py:stop_server", "Attempting mysqladmin shutdown", {"pid": self.mysql_pid, "timeout": timeout})
+            # #endregion agent log
+            result = subprocess.run(
                 [os.path.join(self.mysqldir, "bin/mysqladmin"), "-uroot",
-                 f"-S{self.socket_path}", "shutdown"],
-                capture_output=True, check=False,
+                 f"-S{self.socket_path}", f"--shutdown-timeout={timeout}", "shutdown"],
+                capture_output=True, text=True, check=False,
             )
-            for _ in range(30):
-                time.sleep(1)
-                if not self._is_server_alive():
-                    break
+            if result.returncode == 0:
+                # #region agent log
+                _dbg("test_helper.py:stop_server", "Clean shutdown succeeded", {"returncode": 0})
+                # #endregion agent log
+                self.mysql_pid = None
+                return
+
+            stderr_msg = (result.stderr or "").strip()
+            # #region agent log
+            _dbg("test_helper.py:stop_server", "mysqladmin returned non-zero", {"returncode": result.returncode, "stderr": stderr_msg[:500]})
+            # #endregion agent log
+            print(f"Warning: mysqladmin shutdown returned exit code {result.returncode}")
+            if stderr_msg:
+                print(f"  stderr: {stderr_msg[:200]}")
 
         if self.mysql_pid:
             try:
-                os.kill(self.mysql_pid, signal.SIGKILL)
+                os.kill(self.mysql_pid, 0)
+                # #region agent log
+                _dbg("test_helper.py:stop_server", "Server still alive after mysqladmin, sending SIGTERM", {"pid": self.mysql_pid})
+                # #endregion agent log
+                print(f"  Server process {self.mysql_pid} still running, sending SIGTERM")
+                os.kill(self.mysql_pid, signal.SIGTERM)
+                for _ in range(30):
+                    time.sleep(1)
+                    try:
+                        os.kill(self.mysql_pid, 0)
+                    except OSError:
+                        break
+                else:
+                    os.kill(self.mysql_pid, signal.SIGKILL)
+                    time.sleep(2)
             except (ProcessLookupError, OSError):
-                pass
+                # #region agent log
+                _dbg("test_helper.py:stop_server", "Server process already dead", {"pid": self.mysql_pid})
+                # #endregion agent log
+                print(f"  Server process {self.mysql_pid} already terminated (likely crashed during shutdown)")
             self.mysql_pid = None
 
     def initialize_db(self, rocksdb: bool = False):
@@ -869,10 +921,7 @@ class BackupTestHelper:
 
         # --- Stop server and move data directory ---
         print("Stopping mysql server and moving data directory")
-        subprocess.run(
-            [os.path.join(self.mysqldir, "bin/mysqladmin"), "-uroot", f"-S{self.socket_path}", "shutdown"],
-            check=True,
-        )
+        self.stop_server()
 
         data_orig = os.path.join(self.backup_dir, f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         if os.path.exists(data_orig):
@@ -1769,15 +1818,7 @@ class BackupTestHelper:
         orig_data = self.count_rows()
 
         print("Stopping mysql server and moving data directory")
-        subprocess.run(
-            [
-                os.path.join(self.mysqldir, "bin/mysqladmin"),
-                "-uroot",
-                f"-S{self.socket_path}",
-                "shutdown",
-            ],
-            check=True,
-        )
+        self.stop_server()
         data_orig = os.path.join(
             os.path.dirname(self.datadir),
             f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}",

@@ -878,10 +878,7 @@ def test_ssl_backup(test_helper):
     ssl_opts = f"--ssl-ca={datadir}/ca.pem --ssl-cert={datadir}/server-cert.pem --ssl-key={datadir}/server-key.pem"
 
     # Restart with SSL
-    subprocess.run(
-        [os.path.join(test_helper.mysqldir, "bin/mysqladmin"), "-uroot", f"-S{test_helper.socket_path}", "shutdown"],
-        check=False,
-    )
+    test_helper.stop_server()
     test_helper.mysqld_options += f" {ssl_opts}"
     test_helper.start_server()
 

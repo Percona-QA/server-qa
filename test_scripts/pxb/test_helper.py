@@ -62,6 +62,283 @@ BACKUP_USER = os.environ.get("BACKUP_USER", "root")
 ENCRYPT_KEY = os.environ.get("ENCRYPT_KEY", "mHU3Zs5sRcSB7zBAJP1BInPP5lgShKly")
 RANDOM_TYPE = os.environ.get("RANDOM_TYPE", "uniform")
 
+class MySQLServer:
+    """A single mysqld instance (primary or replica).
+
+    Owns per-instance state (datadir, socket_path, port, server_id, mysqld_options,
+    pid, ...) and the per-instance lifecycle (initialize_datadir, start, stop,
+    destroy, mysql, check_tables).  BackupTestHelper holds one primary and a list
+    of replicas as instances of this class.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        datadir: str,
+        socket_path: str,
+        port: int,
+        basedir: str,
+        error_log: str,
+        logdir: str,
+        server_id: Optional[int] = None,
+        mysqld_options: str = "",
+        use_rr: bool = False,
+        start_timeout: int = MYSQL_START_TIMEOUT,
+        report_host: Optional[str] = None,
+        tmpdir: Optional[str] = None,
+        extra_start_args: Optional[List[str]] = None,
+    ):
+        self.name = name
+        self.datadir = datadir
+        self.socket_path = socket_path
+        self.port = port
+        self.basedir = basedir
+        self.mysqldir = basedir  # Alias used when composing bin/mysql paths
+        self.error_log = error_log
+        self.logdir = logdir
+        self.server_id = server_id
+        self.mysqld_options = mysqld_options
+        self.use_rr = use_rr
+        self.start_timeout = start_timeout
+        self.report_host = report_host
+        self.tmpdir = tmpdir
+        self.extra_start_args: List[str] = list(extra_start_args or [])
+        self.pid: Optional[int] = None
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def initialize_datadir(self) -> None:
+        """Wipe and (re)create ``datadir`` via ``mysqld --initialize-insecure``."""
+        if os.path.exists(self.datadir):
+            shutil.rmtree(self.datadir)
+
+        os.makedirs(self.logdir, exist_ok=True)
+        print(f"=>Creating data directory for '{self.name}'")
+        log_file = os.path.join(self.logdir, f"{self.name}_install.log")
+        with open(log_file, "w") as f:
+            subprocess.run(
+                [
+                    os.path.join(self.basedir, "bin/mysqld"),
+                    "--no-defaults",
+                    f"--datadir={self.datadir}",
+                    "--initialize-insecure",
+                ],
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                check=True,
+            )
+        print(f"..Data directory '{self.datadir}' created")
+
+    def start(self, extra_args: Optional[List[str]] = None) -> None:
+        """Launch this mysqld instance and wait until it answers ``mysqladmin ping``."""
+        print(f"=>Starting MySQL server '{self.name}' on port {self.port}")
+        mysqld_path = os.path.join(self.basedir, "bin/mysqld")
+        cmd: List[str] = ["rr", mysqld_path] if self.use_rr else [mysqld_path]
+        cmd += [
+            "--no-defaults",
+            "--core-file",
+            f"--basedir={self.basedir}",
+            f"--datadir={self.datadir}",
+        ]
+        if self.tmpdir:
+            cmd.append(f"--tmpdir={self.tmpdir}")
+        cmd += self.mysqld_options.split()
+        cmd += [
+            f"--port={self.port}",
+            f"--socket={self.socket_path}",
+            f"--plugin-dir={self.basedir}/lib/plugin",
+            f"--log-error={self.error_log}",
+        ]
+        if self.server_id is not None:
+            cmd.append(f"--server-id={self.server_id}")
+        if self.report_host is not None:
+            cmd.append(f"--report-host={self.report_host}")
+            cmd.append(f"--report-port={self.port}")
+        cmd += list(self.extra_start_args)
+        if extra_args:
+            cmd += list(extra_args)
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.pid = process.pid
+
+        mysqladmin_path = os.path.join(self.basedir, "bin/mysqladmin")
+        for x in range(self.start_timeout + 1):
+            time.sleep(1)
+            try:
+                result = subprocess.run(
+                    [mysqladmin_path, "-uroot", f"-S{self.socket_path}", "ping"],
+                    capture_output=True,
+                    check=False,
+                )
+                if result.returncode == 0:
+                    print(f"..Server '{self.name}' started successfully")
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+
+            if x == self.start_timeout:
+                pytest.fail(
+                    f"ERR: Server '{self.name}' could not be started. "
+                    f"Please check error log: {self.error_log}"
+                )
+
+    def stop(self, timeout: int = 300) -> None:
+        """Gracefully shut down this instance, falling back to SIGTERM/SIGKILL."""
+        if self.is_alive():
+            result = subprocess.run(
+                [
+                    os.path.join(self.basedir, "bin/mysqladmin"),
+                    "-uroot",
+                    f"-S{self.socket_path}",
+                    f"--shutdown-timeout={timeout}",
+                    "shutdown",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                print(f"..Server '{self.name}' shut down cleanly")
+                self.pid = None
+                return
+            stderr_msg = (result.stderr or "").strip()
+            print(f"Warning: mysqladmin shutdown on '{self.name}' returned exit code {result.returncode}")
+            if stderr_msg:
+                print(f"  stderr: {stderr_msg[:200]}")
+
+        if self.pid:
+            try:
+                os.kill(self.pid, 0)
+                print(f"  Server '{self.name}' pid={self.pid} still running, sending SIGTERM")
+                os.kill(self.pid, signal.SIGTERM)
+                for _ in range(30):
+                    time.sleep(1)
+                    try:
+                        os.kill(self.pid, 0)
+                    except OSError:
+                        print(f"  Server '{self.name}' terminated after SIGTERM")
+                        break
+                else:
+                    print(f"  Server '{self.name}' still running after SIGTERM, sending SIGKILL")
+                    os.kill(self.pid, signal.SIGKILL)
+                    time.sleep(2)
+            except (ProcessLookupError, OSError):
+                pass
+            self.pid = None
+
+    def destroy(self) -> None:
+        """Stop the server and remove its data directory (used by cleanup)."""
+        self.stop()
+        if os.path.exists(self.datadir):
+            print(f"=>Removing datadir for '{self.name}': {self.datadir}")
+            shutil.rmtree(self.datadir, ignore_errors=True)
+
+    def is_alive(self) -> bool:
+        """Return True iff ``mysqladmin ping`` succeeds against this instance."""
+        result = subprocess.run(
+            [
+                os.path.join(self.basedir, "bin/mysqladmin"),
+                "-uroot",
+                f"-S{self.socket_path}",
+                "ping",
+            ],
+            capture_output=True,
+            check=False,
+        )
+        return result.returncode == 0
+
+    # ------------------------------------------------------------------
+    # SQL / utility helpers
+    # ------------------------------------------------------------------
+
+    def mysql(
+        self,
+        query: str,
+        database: str = "",
+        capture: bool = False,
+        check: bool = True,
+        user: str = "root",
+    ) -> Optional[str]:
+        """Run a single query via the ``mysql`` CLI client."""
+        cmd = [os.path.join(self.basedir, "bin/mysql"), f"-u{user}", f"-S{self.socket_path}"]
+        if database:
+            cmd.append(database)
+        cmd.extend(["-e", query])
+        if capture:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=check)
+            return result.stdout.strip() if result.returncode == 0 else None
+        subprocess.run(cmd, capture_output=True, check=check)
+        return None
+
+    def check_tables(self, database: str = "test") -> None:
+        """Run ``CHECK TABLE`` on every table in ``database``; ``pytest.fail`` on corruption."""
+        print(f"Check the table status on '{self.name}' (db={database})")
+        check_err = 0
+
+        result = subprocess.run(
+            [
+                os.path.join(self.basedir, "bin/mysql"),
+                "-uroot",
+                f"-S{self.socket_path}",
+                "-Bse",
+                f"SHOW TABLES FROM {database};",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        tables = result.stdout.strip().split("\n")
+
+        for table in tables:
+            if not table:
+                continue
+            print(f"Checking table {table} ...")
+            result = subprocess.run(
+                [
+                    os.path.join(self.basedir, "bin/mysql"),
+                    "-uroot",
+                    f"-S{self.socket_path}",
+                    "-Bse",
+                    f"CHECK TABLE {database}.{table}",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            if result.returncode != 0:
+                print(f"ERR: CHECK TABLE {database}.{table} query failed")
+                if not self.is_alive():
+                    pytest.fail(
+                        f"ERR: Server '{self.name}' went down due to corruption in table {database}.{table}"
+                    )
+
+            table_status = result.stdout.strip()
+            if "OK" not in table_status:
+                print(f"ERR: CHECK TABLE {database}.{table} returned status '{table_status}'")
+                check_err = 1
+
+        if not self.is_alive():
+            pytest.fail(
+                f"ERR: Server '{self.name}' went down due to corruption, the restore was unsuccessful"
+            )
+
+        if check_err == 0:
+            print("All innodb tables status: OK")
+        else:
+            print("After restore, some tables may be corrupt, check table status is not OK")
+
+    def rewrite_option(self, pattern: str, replacement: str) -> None:
+        """Regex-replace a substring in :attr:`mysqld_options` (e.g. for per-replica keyring paths)."""
+        self.mysqld_options = re.sub(pattern, replacement, self.mysqld_options)
+
+
 class BackupTestHelper:
     """Helper class for backup tests."""
 
@@ -111,24 +388,48 @@ class BackupTestHelper:
                 .replace("[", "-")
                 .replace("]", "")
             )
-            self.datadir = datadir or os.path.join(TEST_BASE_DIR, f"data_{test_suffix}_{timestamp}")
+            primary_datadir = datadir or os.path.join(TEST_BASE_DIR, f"data_{test_suffix}_{timestamp}")
             self.backup_dir = backup_dir or os.path.join(TEST_BASE_DIR, f"dbbackup_{test_suffix}_{timestamp}")
             self.logdir = logdir or os.path.join(TEST_BASE_DIR, f"backuplogs_{test_suffix}_{timestamp}")
-            self.socket_path = os.path.join(TEST_BASE_DIR, f"socket_{test_suffix}.sock")
+            primary_socket = os.path.join(TEST_BASE_DIR, f"socket_{test_suffix}.sock")
         else:
             # Fallback to timestamp-only if no test name provided
-            self.datadir = datadir or os.path.join(TEST_BASE_DIR, f"data_{timestamp}")
+            primary_datadir = datadir or os.path.join(TEST_BASE_DIR, f"data_{timestamp}")
             self.backup_dir = backup_dir or os.path.join(TEST_BASE_DIR, f"dbbackup_{timestamp}")
             self.logdir = logdir or os.path.join(TEST_BASE_DIR, f"backuplogs_{timestamp}")
-            self.socket_path = os.path.join(TEST_BASE_DIR, "socket.sock")
+            primary_socket = os.path.join(TEST_BASE_DIR, "socket.sock")
+
+        # Primary MySQL server (shares basedir with MYSQLDIR).
+        # Flags below preserve the exact command line produced by the previous
+        # ``start_server`` implementation (max-connections, general-log,
+        # log-error-verbosity) so existing tests behave identically.
+        self.primary = MySQLServer(
+            name="primary",
+            datadir=primary_datadir,
+            socket_path=primary_socket,
+            port=21000,
+            basedir=self.mysqldir,
+            error_log=os.path.join(self.logdir, "error.log"),
+            logdir=self.logdir,
+            server_id=None,
+            mysqld_options="",
+            use_rr=USE_RR,
+            start_timeout=MYSQL_START_TIMEOUT,
+            report_host=None,
+            tmpdir=None,
+            extra_start_args=[
+                "--max-connections=1024",
+                "--general-log",
+                "--log-error-verbosity=3",
+            ],
+        )
+        self.replicas: List[MySQLServer] = []
 
         # Runtime variables
         self.server_type: Optional[str] = None
         self.version: Optional[str] = None
         self.version_normalized: Optional[int] = None
         self.pstress_binary: Optional[str] = None
-        self.mysql_pid: Optional[int] = None
-        self.mysqld_options: str = ""
         self.backup_params: str = ""
         self.prepare_params: str = ""
         self.restore_params: str = ""
@@ -142,6 +443,34 @@ class BackupTestHelper:
 
         # Initialize paths
         os.environ["PATH"] = f"{os.environ.get('PATH', '')}:{self.xtrabackup_dir}"
+
+    # ------------------------------------------------------------------
+    # Back-compat shims proxying to ``self.primary``
+    # ------------------------------------------------------------------
+
+    @property
+    def socket_path(self) -> str:
+        return self.primary.socket_path
+
+    @property
+    def datadir(self) -> str:
+        return self.primary.datadir
+
+    @property
+    def mysql_pid(self) -> Optional[int]:
+        return self.primary.pid
+
+    @mysql_pid.setter
+    def mysql_pid(self, value: Optional[int]) -> None:
+        self.primary.pid = value
+
+    @property
+    def mysqld_options(self) -> str:
+        return self.primary.mysqld_options
+
+    @mysqld_options.setter
+    def mysqld_options(self, value: str) -> None:
+        self.primary.mysqld_options = value
 
     def _xtrabackup_cmd_prefix(self) -> List[str]:
         """Return command prefix for xtrabackup; prepend 'rr' when USE_RR=1."""
@@ -277,163 +606,294 @@ class BackupTestHelper:
             return result
 
     def start_server(self):
-        """Start MySQL server."""
-        print("=>Starting MySQL server")
-        mysqld_path = os.path.join(self.mysqldir, "bin/mysqld")
-        cmd = (["rr", mysqld_path] if USE_RR else [mysqld_path]) + [
-            "--no-defaults",
-            f"--basedir={self.mysqldir}",
-            f"--datadir={self.datadir}",
-        ] + self.mysqld_options.split() + [
-            "--port=21000",
-            f"--socket={self.socket_path}",
-            f"--plugin-dir={self.mysqldir}/lib/plugin",
-            "--max-connections=1024",
-            f"--log-error={self.logdir}/error.log",
-            "--general-log",
-            "--log-error-verbosity=3",
-            "--core-file",
-        ]
-
-        process = self.run_command(cmd, check=False, background=True)
-        self.mysql_pid = process.pid
-
-        # Wait for server to start
-        for x in range(self.mysql_start_timeout + 1):
-            time.sleep(1)
-            try:
-                result = subprocess.run(
-                    [
-                        os.path.join(self.mysqldir, "bin/mysqladmin"),
-                        "-uroot",
-                        f"-S{self.socket_path}",
-                        "ping",
-                    ],
-                    capture_output=True,
-                    check=False,
-                )
-                if result.returncode == 0:
-                    print("..Server started successfully")
-                    return
-            except Exception:
-                pass
-
-            if x == self.mysql_start_timeout:
-                pytest.fail(
-                    f"ERR: Database could not be started. Please check error logs: {self.logdir}/error.log"
-                )
-
-    def run_mysql_query(self, query: str, database: str = "", check: bool = True, capture: bool = False) -> Optional[str]:
-        """Run a MySQL query via the mysql CLI client. Returns stdout if capture=True."""
-        cmd = [os.path.join(self.mysqldir, "bin/mysql"), f"-u{self.backup_user}", f"-S{self.socket_path}"]
-        if database:
-            cmd.append(database)
-        cmd.extend(["-e", query])
-        if capture:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=check)
-            return result.stdout.strip() if result.returncode == 0 else None
-        subprocess.run(cmd, capture_output=True, check=check)
-        return None
+        """Start MySQL primary server (thin delegator to ``self.primary.start``)."""
+        self.primary.start()
 
     def stop_server(self, timeout: int = 300):
-        """Gracefully shut down any running MySQL server, then force-kill if needed.
+        """Stop MySQL primary server (thin delegator to ``self.primary.stop``)."""
+        self.primary.stop(timeout=timeout)
 
-        Uses a bounded --shutdown-timeout to avoid hanging for the default
-        3600s when the server crashes during shutdown (e.g. InnoDB assertion
-        failures).  If mysqladmin fails, falls back to SIGTERM/SIGKILL.
+    def run_mysql_query(
+        self,
+        query: str,
+        database: str = "",
+        check: bool = True,
+        capture: bool = False,
+    ) -> Optional[str]:
+        """Run a MySQL query on the primary via the ``mysql`` CLI client."""
+        return self.primary.mysql(
+            query,
+            database=database,
+            capture=capture,
+            check=check,
+            user=self.backup_user,
+        )
+
+    # ------------------------------------------------------------------
+    # Replica factory + replication primitives
+    # ------------------------------------------------------------------
+
+    def _replica_paths(self, name: str) -> Tuple[str, str, str]:
+        """Return (datadir, socket_path, error_log) for a replica named ``name``.
+
+        The replica's paths are derived from the primary's ``datadir`` /
+        ``socket_path`` by appending ``_<name>`` / ``_<name>.sock`` so multiple
+        replicas can coexist with the primary inside :data:`TEST_BASE_DIR`.
         """
-        # #region agent log
-        import json as _json
-        _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug-f2a631.log")
-        def _dbg(loc, msg, data=None):
-            try:
-                with open(_log_path, "a") as _f:
-                    _f.write(_json.dumps({"sessionId":"f2a631","location":loc,"message":msg,"data":data or {},"timestamp":int(time.time()*1000),"hypothesisId":"A"}) + "\n")
-            except Exception:
-                pass
-        # #endregion agent log
+        primary_datadir = self.primary.datadir
+        primary_socket = self.primary.socket_path
+        datadir = f"{primary_datadir}_{name}"
+        socket_base, socket_ext = os.path.splitext(primary_socket)
+        if not socket_ext:
+            socket_ext = ".sock"
+        socket_path = f"{socket_base}_{name}{socket_ext}"
+        error_log = os.path.join(self.logdir, f"{name}.err")
+        return datadir, socket_path, error_log
 
-        if not self._is_server_alive() and not self.mysql_pid:
-            # #region agent log
-            _dbg("test_helper.py:stop_server", "Server not alive and no pid", {})
-            # #endregion agent log
-            return
+    def create_replica(
+        self,
+        name: str,
+        server_id: int,
+        port: int,
+        mysqld_options: str = "",
+        keyring_src: Optional[str] = None,
+        tmpdir: Optional[str] = None,
+    ) -> MySQLServer:
+        """Create and register a new :class:`MySQLServer` replica.
 
-        if self._is_server_alive():
-            # #region agent log
-            _dbg("test_helper.py:stop_server", "Attempting mysqladmin shutdown", {"pid": self.mysql_pid, "timeout": timeout})
-            # #endregion agent log
-            result = subprocess.run(
-                [os.path.join(self.mysqldir, "bin/mysqladmin"), "-uroot",
-                 f"-S{self.socket_path}", f"--shutdown-timeout={timeout}", "shutdown"],
-                capture_output=True, text=True, check=False,
+        The replica shares the primary's ``basedir`` (``MYSQLDIR``) and only
+        owns a distinct ``datadir`` / ``socket`` / ``port`` / ``server_id``.
+
+        When ``keyring_src`` is provided and exists, the keyring file is copied
+        into the replica's ``datadir`` and ``--keyring_file_data=`` in
+        ``mysqld_options`` is rewritten to point at the per-replica copy.
+        """
+        datadir, socket_path, error_log = self._replica_paths(name)
+        replica = MySQLServer(
+            name=name,
+            datadir=datadir,
+            socket_path=socket_path,
+            port=port,
+            basedir=self.mysqldir,
+            error_log=error_log,
+            logdir=self.logdir,
+            server_id=server_id,
+            mysqld_options=mysqld_options,
+            use_rr=USE_RR,
+            start_timeout=MYSQL_START_TIMEOUT,
+            report_host="127.0.0.1",
+            tmpdir=tmpdir,
+        )
+        if keyring_src and os.path.exists(keyring_src):
+            os.makedirs(datadir, exist_ok=True)
+            dst = os.path.join(datadir, os.path.basename(keyring_src))
+            shutil.copy(keyring_src, dst)
+            replica.rewrite_option(r"--keyring_file_data=\S+", f"--keyring_file_data={dst}")
+        self.replicas.append(replica)
+        return replica
+
+    def prepare_full_backup(self, prepare_params: str, log_date: str) -> None:
+        """Run ``xtrabackup --prepare`` on ``<backup_dir>/full``."""
+        print("=>Preparing full backup")
+        target = os.path.join(self.backup_dir, "full")
+        cmd = self._xtrabackup_cmd_prefix() + [
+            "--no-defaults",
+            "--prepare",
+            f"--target-dir={target}",
+        ] + prepare_params.split()
+        log_file = os.path.join(self.logdir, f"prepare_full_backup_{log_date}_log")
+        result = self.run_command(cmd, check=False, log_file=log_file)
+        if result.returncode != 0:
+            pytest.fail(f"ERR: xtrabackup --prepare failed. Please check the log at: {log_file}")
+        print(f"..Prepared full backup at: {target}")
+
+    def restore_backup_to(
+        self,
+        target_datadir: str,
+        restore_params: str,
+        log_date: str,
+    ) -> None:
+        """Run ``xtrabackup --copy-back`` from ``<backup_dir>/full`` into ``target_datadir``."""
+        print(f"=>Restoring full backup to {target_datadir}")
+        if os.path.exists(target_datadir):
+            shutil.rmtree(target_datadir)
+        os.makedirs(target_datadir, exist_ok=True)
+        cmd = self._xtrabackup_cmd_prefix() + [
+            "--no-defaults",
+            "--copy-back",
+            f"--target-dir={os.path.join(self.backup_dir, 'full')}",
+            f"--datadir={target_datadir}",
+        ] + restore_params.split()
+        log_file = os.path.join(self.logdir, f"restore_backup_{os.path.basename(target_datadir)}_{log_date}_log")
+        result = self.run_command(cmd, check=False, log_file=log_file)
+        if result.returncode != 0:
+            pytest.fail(f"ERR: xtrabackup --copy-back failed. Please check the log at: {log_file}")
+        print(f"..Restored datadir at: {target_datadir}")
+
+    def take_backup_from(
+        self,
+        source: MySQLServer,
+        extra_args: Optional[List[str]] = None,
+        log_date: Optional[str] = None,
+    ) -> None:
+        """Take a full backup from ``source`` (any :class:`MySQLServer`) into ``<backup_dir>/full``.
+
+        This is the multi-server counterpart of :meth:`take_full_backup`, used
+        for replica chaining (backup from replica1 → restore into replica2).
+        """
+        if log_date is None:
+            log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+        full_target = os.path.join(self.backup_dir, "full")
+        if os.path.exists(full_target):
+            shutil.rmtree(full_target)
+        os.makedirs(self.backup_dir, exist_ok=True)
+
+        print(f"=>Taking full backup from '{source.name}'")
+        cmd = self._xtrabackup_cmd_prefix() + [
+            "--no-defaults",
+            "--user=root",
+            "--password=",
+            "--backup",
+            f"--target-dir={full_target}",
+            f"-S{source.socket_path}",
+            f"--datadir={source.datadir}",
+        ] + self.backup_params.split() + ["--register-redo-log-consumer"]
+        if extra_args:
+            cmd += list(extra_args)
+        log_file = os.path.join(self.logdir, f"full_backup_from_{source.name}_{log_date}_log")
+        result = self.run_command(cmd, check=False, log_file=log_file)
+        if result.returncode != 0:
+            pytest.fail(
+                f"ERR: Full backup from '{source.name}' failed. "
+                f"Please check the log at: {log_file}"
             )
-            if result.returncode == 0:
-                # #region agent log
-                _dbg("test_helper.py:stop_server", "Clean shutdown succeeded", {"returncode": 0})
-                # #endregion agent log
-                self.mysql_pid = None
-                return
+        print(f"..Full backup from '{source.name}' successfully created at: {full_target}")
 
-            stderr_msg = (result.stderr or "").strip()
-            # #region agent log
-            _dbg("test_helper.py:stop_server", "mysqladmin returned non-zero", {"returncode": result.returncode, "stderr": stderr_msg[:500]})
-            # #endregion agent log
-            print(f"Warning: mysqladmin shutdown returned exit code {result.returncode}")
-            if stderr_msg:
-                print(f"  stderr: {stderr_msg[:200]}")
+    def configure_replication(
+        self,
+        replica: MySQLServer,
+        master: MySQLServer,
+        slave_info: bool = False,
+    ) -> None:
+        """Wire up ``replica`` to replicate from ``master`` using backup metadata.
 
-        if self.mysql_pid:
-            try:
-                os.kill(self.mysql_pid, 0)
-                # #region agent log
-                _dbg("test_helper.py:stop_server", "Server still alive after mysqladmin, sending SIGTERM", {"pid": self.mysql_pid})
-                # #endregion agent log
-                print(f"  Server process {self.mysql_pid} still running, sending SIGTERM")
-                os.kill(self.mysql_pid, signal.SIGTERM)
-                for _ in range(30):
-                    time.sleep(1)
-                    try:
-                        os.kill(self.mysql_pid, 0)
-                    except OSError:
-                        break
-                else:
-                    os.kill(self.mysql_pid, signal.SIGKILL)
-                    time.sleep(2)
-            except (ProcessLookupError, OSError):
-                # #region agent log
-                _dbg("test_helper.py:stop_server", "Server process already dead", {"pid": self.mysql_pid})
-                # #endregion agent log
-                print(f"  Server process {self.mysql_pid} already terminated (likely crashed during shutdown)")
-            self.mysql_pid = None
+        When ``slave_info`` is False, the restored backup's
+        ``xtrabackup_binlog_info`` (master bin-log coordinates) is used.  When
+        True, ``xtrabackup_slave_info`` (a prebuilt ``CHANGE MASTER TO`` or
+        ``CHANGE REPLICATION SOURCE TO`` statement) is used, as produced by
+        ``xtrabackup --slave-info``.
+
+        The function dispatches ``RESET MASTER|BINARY LOGS AND GTIDS`` and
+        ``RESET REPLICA|SLAVE`` as appropriate for the current server major
+        version so it works on 5.7 as well as 8.0 / 8.4+.
+        """
+        version_normalized = self.version_normalized or 0
+        use_replica_keyword = version_normalized >= 80400
+        use_slave_keyword = version_normalized < 80400
+
+        # RESET MASTER / BINARY LOGS AND GTIDS on the replica.
+        if version_normalized >= 80400:
+            replica.mysql("RESET BINARY LOGS AND GTIDS;")
+        else:
+            replica.mysql("RESET MASTER;")
+
+        # RESET REPLICA / RESET SLAVE on the replica.
+        if use_replica_keyword:
+            replica.mysql("RESET REPLICA ALL;")
+        else:
+            replica.mysql("RESET SLAVE ALL;")
+
+        if slave_info:
+            slave_info_file = os.path.join(replica.datadir, "xtrabackup_slave_info")
+            if not os.path.exists(slave_info_file):
+                pytest.fail(
+                    f"ERR: xtrabackup_slave_info not found in replica datadir: {slave_info_file}"
+                )
+            with open(slave_info_file, "r") as f:
+                change_master_stmt = f.read().strip().rstrip(";")
+            change_master_stmt = change_master_stmt.replace(
+                "CHANGE MASTER TO",
+                "CHANGE MASTER TO MASTER_HOST='127.0.0.1', "
+                f"MASTER_PORT={master.port}, MASTER_USER='root', "
+                "MASTER_PASSWORD='',",
+                1,
+            )
+            change_master_stmt = change_master_stmt.replace(
+                "CHANGE REPLICATION SOURCE TO",
+                "CHANGE REPLICATION SOURCE TO SOURCE_HOST='127.0.0.1', "
+                f"SOURCE_PORT={master.port}, SOURCE_USER='root', "
+                "SOURCE_PASSWORD='',",
+                1,
+            )
+            replica.mysql(change_master_stmt + ";")
+        else:
+            binlog_info_file = os.path.join(replica.datadir, "xtrabackup_binlog_info")
+            if not os.path.exists(binlog_info_file):
+                pytest.fail(
+                    f"ERR: xtrabackup_binlog_info not found in replica datadir: {binlog_info_file}"
+                )
+            with open(binlog_info_file, "r") as f:
+                parts = f.read().split()
+            if len(parts) < 2:
+                pytest.fail(
+                    f"ERR: Unexpected xtrabackup_binlog_info contents: {parts!r}"
+                )
+            binlog_file, binlog_pos = parts[0], parts[1]
+            if use_replica_keyword:
+                stmt = (
+                    f"CHANGE REPLICATION SOURCE TO SOURCE_HOST='127.0.0.1', "
+                    f"SOURCE_PORT={master.port}, SOURCE_USER='root', "
+                    f"SOURCE_PASSWORD='', SOURCE_LOG_FILE='{binlog_file}', "
+                    f"SOURCE_LOG_POS={binlog_pos};"
+                )
+            else:
+                stmt = (
+                    f"CHANGE MASTER TO MASTER_HOST='127.0.0.1', "
+                    f"MASTER_PORT={master.port}, MASTER_USER='root', "
+                    f"MASTER_PASSWORD='', MASTER_LOG_FILE='{binlog_file}', "
+                    f"MASTER_LOG_POS={binlog_pos};"
+                )
+            replica.mysql(stmt)
+
+        # START REPLICA / START SLAVE
+        if use_replica_keyword:
+            replica.mysql("START REPLICA;")
+        else:
+            replica.mysql("START SLAVE;")
+
+        # Give the IO/SQL threads a moment to come up, then verify.
+        time.sleep(2)
+        if use_slave_keyword:
+            status_query = "SHOW SLAVE STATUS\\G"
+            io_key = "Slave_IO_Running"
+            sql_key = "Slave_SQL_Running"
+        else:
+            status_query = "SHOW REPLICA STATUS\\G"
+            io_key = "Replica_IO_Running"
+            sql_key = "Replica_SQL_Running"
+
+        status_output = replica.mysql(status_query, capture=True) or ""
+        io_ok = any(
+            line.strip().startswith(f"{io_key}:") and line.strip().endswith("Yes")
+            for line in status_output.splitlines()
+        )
+        sql_ok = any(
+            line.strip().startswith(f"{sql_key}:") and line.strip().endswith("Yes")
+            for line in status_output.splitlines()
+        )
+        if not (io_ok and sql_ok):
+            pytest.fail(
+                f"ERR: Replication IO/SQL threads not running on '{replica.name}'.\n"
+                f"{status_output}"
+            )
+        print(f"..Replication started on '{replica.name}' from '{master.name}'")
 
     def initialize_db(self, rocksdb: bool = False):
         """Initialize and start MySQL database. When rocksdb=True, also set up RocksDB engine and test_rocksdb database."""
-        if not os.path.exists(self.logdir):
-            os.makedirs(self.logdir)
-
-        self.stop_server()
-
-        if os.path.exists(self.datadir):
-            shutil.rmtree(self.datadir)
-
-        print("=>Creating data directory")
-        log_file = os.path.join(self.logdir, "mysql_install_db.log")
-        with open(log_file, "w") as f:
-            subprocess.run(
-                [
-                    os.path.join(self.mysqldir, "bin/mysqld"),
-                    "--no-defaults",
-                    f"--datadir={self.datadir}",
-                    "--initialize-insecure",
-                ],
-                stdout=f,
-                stderr=subprocess.STDOUT,
-                check=True,
-            )
-        print("..Data directory created")
-
-        self.start_server()
+        os.makedirs(self.logdir, exist_ok=True)
+        self.primary.stop()
+        self.primary.initialize_datadir()
+        self.primary.start()
 
         # Load MyRocks SQL only when RocksDB is needed; loading it unconditionally
         # installs ha_rocksdb.so which causes xtrabackup to attempt RocksDB
@@ -921,7 +1381,10 @@ class BackupTestHelper:
 
         # --- Stop server and move data directory ---
         print("Stopping mysql server and moving data directory")
-        self.stop_server()
+        subprocess.run(
+            [os.path.join(self.mysqldir, "bin/mysqladmin"), "-uroot", f"-S{self.socket_path}", "shutdown"],
+            check=True,
+        )
 
         data_orig = os.path.join(self.backup_dir, f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         if os.path.exists(data_orig):
@@ -1311,12 +1774,8 @@ class BackupTestHelper:
         return thread
 
     def _is_server_alive(self) -> bool:
-        """Check if MySQL server is alive via mysqladmin ping."""
-        result = subprocess.run(
-            [os.path.join(self.mysqldir, "bin/mysqladmin"), "-uroot", f"-S{self.socket_path}", "ping"],
-            capture_output=True, check=False,
-        )
-        return result.returncode == 0
+        """Check if the primary MySQL server is alive via ``mysqladmin ping``."""
+        return self.primary.is_alive()
 
     def _run_sql(self, sql: str, check: bool = False) -> bool:
         """Run SQL statement; returns True on success."""
@@ -1818,7 +2277,15 @@ class BackupTestHelper:
         orig_data = self.count_rows()
 
         print("Stopping mysql server and moving data directory")
-        self.stop_server()
+        subprocess.run(
+            [
+                os.path.join(self.mysqldir, "bin/mysqladmin"),
+                "-uroot",
+                f"-S{self.socket_path}",
+                "shutdown",
+            ],
+            check=True,
+        )
         data_orig = os.path.join(
             os.path.dirname(self.datadir),
             f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
@@ -2478,85 +2945,56 @@ class BackupTestHelper:
 
         return "\n".join(output)
 
-    def check_tables(self):
-        """Check the tables in a database."""
-        print("Check the table status")
-        check_err = 0
+    def check_tables(
+        self,
+        socket_path: Optional[str] = None,
+        basedir: Optional[str] = None,
+        database: str = "test",
+    ):
+        """Check table integrity; by default targets the primary.
 
-        result = subprocess.run(
-            [
-                os.path.join(self.mysqldir, "bin/mysql"),
-                "-uroot",
-                f"-S{self.socket_path}",
-                "-Bse",
-                "SHOW TABLES FROM test;",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        tables = result.stdout.strip().split("\n")
-
-        for table in tables:
-            if not table:
-                continue
-            print(f"Checking table {table} ...")
-            result = subprocess.run(
-                [
-                    os.path.join(self.mysqldir, "bin/mysql"),
-                    "-uroot",
-                    f"-S{self.socket_path}",
-                    "-Bse",
-                    f"CHECK TABLE test.{table}",
-                ],
-                capture_output=True,
-                text=True,
-                check=False,
+        When ``socket_path`` is given, the check is dispatched to the matching
+        :class:`MySQLServer` (primary or one of the replicas).  ``basedir`` is
+        accepted for backward compatibility but is not required: each
+        ``MySQLServer`` already knows its own ``basedir``.
+        """
+        if socket_path is not None:
+            for server in (self.primary, *self.replicas):
+                if server.socket_path == socket_path:
+                    server.check_tables(database=database)
+                    return
+            # Fallback: unknown socket; build a temporary server-like shim.
+            shim = MySQLServer(
+                name="adhoc",
+                datadir="",
+                socket_path=socket_path,
+                port=0,
+                basedir=basedir or self.mysqldir,
+                error_log="",
+                logdir=self.logdir,
             )
-
-            if result.returncode != 0:
-                print(f"ERR: CHECK TABLE test.{table} query failed")
-                # Check if database went down
-                result = subprocess.run(
-                    [
-                        os.path.join(self.mysqldir, "bin/mysqladmin"),
-                        "ping",
-                        "--user=root",
-                        f"--socket={self.socket_path}",
-                    ],
-                    capture_output=True,
-                    check=False,
-                )
-                if result.returncode != 0:
-                    pytest.fail(f"ERR: The database has gone down due to corruption in table test.{table}")
-
-            table_status = result.stdout.strip()
-            if "OK" not in table_status:
-                print(f"ERR: CHECK TABLE test.{table} query displayed the table status as '{table_status}'")
-                check_err = 1
-
-        # Check if database went down
-        result = subprocess.run(
-            [
-                os.path.join(self.mysqldir, "bin/mysqladmin"),
-                "ping",
-                "--user=root",
-                f"--socket={self.socket_path}",
-            ],
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            pytest.fail("ERR: The database has gone down due to corruption, the restore was unsuccessful")
-
-        if check_err == 0:
-            print("All innodb tables status: OK")
-        else:
-            print("After restore, some tables may be corrupt, check table status is not OK")
+            shim.check_tables(database=database)
+            return
+        self.primary.check_tables(database=database)
 
     def cleanup(self):
         """Cleanup function."""
         print("\n################################## CleanUp #######################################")
+
+        # Destroy replicas first (stop mysqld + remove each datadir).
+        for replica in list(self.replicas):
+            try:
+                replica.destroy()
+            except Exception as exc:  # noqa: BLE001
+                print(f"  Ignoring error destroying replica '{replica.name}': {exc}")
+        self.replicas.clear()
+
+        # Destroy the primary (stop mysqld + remove its datadir).
+        try:
+            self.primary.destroy()
+        except Exception as exc:  # noqa: BLE001
+            print(f"  Ignoring error destroying primary: {exc}")
+
         print("Killing any previously running mysqld process")
 
         # Kill mysqld processes

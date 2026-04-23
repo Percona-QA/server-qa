@@ -24,6 +24,14 @@
     - [Run all tests](#run-all-tests-1)
   - [Test suites — innodb\_myrocks\_backup\_tests.py](#test-suites--innodb_myrocks_backup_testspy)
   - [Test reference — innodb\_myrocks\_backup\_tests.py](#test-reference--innodb_myrocks_backup_testspy)
+- [replication\_backup\_tests.py — Replication + backup tests](#replication_backup_testspy--replication--backup-tests)
+  - [Additional prerequisites](#additional-prerequisites)
+  - [How to run tests](#how-to-run-tests-2)
+    - [Run a single test](#run-a-single-test-1)
+    - [Run multiple tests](#run-multiple-tests-1)
+    - [Run a specific test suite](#run-a-specific-test-suite-2)
+    - [Run all tests](#run-all-tests-2)
+  - [Test reference — replication\_backup\_tests.py](#test-reference--replication_backup_testspy)
 
 ---
 
@@ -502,3 +510,152 @@ pytest innodb_myrocks_backup_tests.py --collect-only -q
 | `test_inc_backup_innodb_params` | Non-param | Backup with custom InnoDB parameters |
 | `test_inc_backup_archive_log` | Non-param | Backup with redo log archiving; skipped on 5.7 |
 | `test_ssl_backup` | Non-param | Backup with SSL certificates, ssl-mode, ssl-cipher, and FIPS mode |
+
+---
+
+## replication_backup_tests.py — Replication + backup tests
+
+Tests in `replication_backup_tests.py` verify backup-based replication bootstrap using Percona XtraBackup. Each test initialises a primary server with a given `mysqld_options` configuration (GTID / no-GTID, multi / single-threaded replica, encryption) and then runs **two sub-scenarios**:
+
+1. Create **`replica1`** from a backup taken on the primary.
+2. Create **`replica2`** from a backup taken on `replica1` (using `--slave-info`).
+
+After each replica starts, replication is configured, IO/SQL threads are asserted to be running, `CHECK TABLE` is run on the replica, and `pt-table-checksum` is run against the primary.
+
+This is a Python rewrite of `replication_backup_tests.sh`. Unlike the bash script, primary and replicas share `MYSQLDIR` as their mysqld `--basedir`; only `--datadir` / `--socket` / `--port` / `--server-id` differ per instance, so no tarball copying is required.
+
+Primary socket/datadir and the replica instances are managed by the `MySQLServer` class in `test_helper.py`; the helper exposes `helper.primary` and `helper.replicas: list[MySQLServer]` for lifecycle control.
+
+### Additional prerequisites
+
+In addition to the [common prerequisites](#common-prerequisites):
+
+- **sysbench** must be installed (used for load generation on the primary).
+- **percona-toolkit** must be installed (`pt-table-checksum` verifies primary/replica consistency).
+
+If either dependency is missing, the entire module is skipped at collection time.
+
+Recommended `TEST_BASE_DIR` override (keeps replication artefacts separate from other suites):
+
+```bash
+export TEST_BASE_DIR=$HOME/replication_backup_tests
+```
+
+The fixture creates per-test subdirectories under `TEST_BASE_DIR` for the primary datadir, each replica datadir, backups and logs.
+
+### How to run tests
+
+Use **pytest** with the test file. Useful options:
+
+- `-v` — verbose (recommended)
+- `-s` — show stdout/stderr (no capture)
+- `-k EXPR` — run tests whose name matches the expression
+
+---
+
+#### Run a single test
+
+All six tests are non-parametrized; run them by name with `-k`:
+
+```bash
+pytest replication_backup_tests.py -v -s -k test_replication_gtid_multithreaded
+```
+
+```bash
+pytest replication_backup_tests.py -v -s -k test_replication_nogtid_singlethreaded
+```
+
+```bash
+pytest replication_backup_tests.py -v -s -k test_replication_gtid_encryption
+```
+
+To see all collected tests without running them:
+
+```bash
+pytest replication_backup_tests.py --collect-only -q
+```
+
+---
+
+#### Run multiple tests
+
+Use `-k` with **or** to match several tests:
+
+```bash
+# Both GTID variants
+pytest replication_backup_tests.py -v -s -k "test_replication_gtid_multithreaded or test_replication_gtid_singlethreaded"
+
+# Both encryption variants
+pytest replication_backup_tests.py -v -s -k "test_replication_gtid_encryption or test_replication_nogtid_encryption"
+```
+
+---
+
+#### Run a specific test suite
+
+The script defines logical **suites** and maps them to test names. You can run a suite either with the script's CLI or by passing the equivalent `-k` expression to pytest.
+
+**Option A — script's built-in suites (run from `pxb`):**
+
+```bash
+python replication_backup_tests.py Gtid_tests
+python replication_backup_tests.py NoGtid_tests
+python replication_backup_tests.py Encryption_tests
+python replication_backup_tests.py All
+```
+
+Verbose (no capture):
+
+```bash
+python replication_backup_tests.py -v Gtid_tests
+```
+
+Multiple suites at once:
+
+```bash
+python replication_backup_tests.py Gtid_tests Encryption_tests
+```
+
+**Option B — equivalent pytest `-k` for each suite:**
+
+| Suite              | Pytest -k equivalent |
+|--------------------|----------------------|
+| `Gtid_tests`       | `test_replication_gtid_multithreaded or test_replication_gtid_singlethreaded` |
+| `NoGtid_tests`     | `test_replication_nogtid_multithreaded or test_replication_nogtid_singlethreaded` |
+| `Encryption_tests` | `test_replication_gtid_encryption or test_replication_nogtid_encryption` |
+| `All`              | *(omit `-k` — run all tests in the file)* |
+
+Example:
+
+```bash
+pytest replication_backup_tests.py -v -s -k "test_replication_gtid_multithreaded or test_replication_gtid_singlethreaded"
+```
+
+---
+
+#### Run all tests
+
+Run the whole file with pytest:
+
+```bash
+pytest replication_backup_tests.py -v -s
+```
+
+Or via the script CLI:
+
+```bash
+python replication_backup_tests.py All
+```
+
+---
+
+### Test reference — replication_backup_tests.py
+
+| Test | `mysqld_options` | Notes |
+|------|-------------------|-------|
+| `test_replication_gtid_multithreaded` | `GTID_OPTIONS --slave-parallel-workers=4` | GTID replication, multi-threaded applier |
+| `test_replication_gtid_singlethreaded` | `GTID_OPTIONS --slave-parallel-workers={1 on 8.0+ else 0}` | GTID replication, single-threaded applier |
+| `test_replication_nogtid_multithreaded` | `NO_GTID_OPTIONS --slave-parallel-workers=4` | Binlog file/pos replication, multi-threaded applier |
+| `test_replication_nogtid_singlethreaded` | `NO_GTID_OPTIONS --slave-parallel-workers=0` | Binlog file/pos replication, single-threaded applier |
+| `test_replication_gtid_encryption` | `GTID_OPTIONS` + keyring_file encryption | Uses `--keyring_file_data=<TEST_BASE_DIR>/.../keyring` and `--xtrabackup-plugin-dir`; 8.0+ uses `ENCRYPT_OPTIONS_8`, 5.7 uses `ENCRYPT_OPTIONS_57` |
+| `test_replication_nogtid_encryption` | `NO_GTID_OPTIONS` + keyring_file encryption | Same as above but without GTID |

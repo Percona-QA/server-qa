@@ -11,7 +11,7 @@ import subprocess
 import time
 import pytest
 
-from test_helper import BackupTestHelper, TEST_BASE_DIR, KMIP_CONFIGS
+from test_helper import BackupTestHelper, TEST_BASE_DIR, KMIP_CONFIGS, CORE_FILE_OPT
 
 
 @pytest.fixture(scope="function")
@@ -39,8 +39,8 @@ def _default_mysqld_options():
 def _init_for_ddl(test_helper):
     """Common initialization for DDL tests."""
     test_helper.mysqld_options = _default_mysqld_options()
-    test_helper.backup_params = f"--core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = "--core-file"
+    test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
     rocksdb_enabled = test_helper.rocksdb == "enabled"
     test_helper.initialize_db(rocksdb=rocksdb_enabled)
@@ -315,8 +315,8 @@ def test_run_all_statements(test_helper):
 def test_streaming_backup(test_helper):
     """Incremental Backup and Restore with streaming."""
     test_helper.mysqld_options = "--log-bin=binlog"
-    test_helper.backup_params = f"--core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = "--core-file"
+    test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
     test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
     test_helper.run_load("", time_sec=20)
@@ -334,12 +334,12 @@ def test_compress_stream_backup(test_helper):
     if test_helper.version_normalized < 80000:
         pytest.skip("lz4/zstd compression not supported in 5.7")
     test_helper.mysqld_options = "--log-bin=binlog"
-    test_helper.prepare_params = "--core-file"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
 
     for compress in ["lz4", "zstd"]:
         print(f"Testing {compress} compression with streaming")
-        test_helper.backup_params = f"--compress={compress} --compress-threads=10 --core-file --lock-ddl={test_helper.lock_ddl}"
+        test_helper.backup_params = f"--compress={compress} --compress-threads=10 {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         test_helper.run_load("", time_sec=20)
         test_helper.take_backup(backup_type="stream", single_incremental=True)
@@ -350,7 +350,7 @@ def test_encrypt_compress_stream_backup(test_helper):
     if test_helper.version_normalized < 80000:
         pytest.skip("lz4/zstd compression not supported in 5.7")
     test_helper.mysqld_options = "--log-bin=binlog"
-    test_helper.prepare_params = "--core-file"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
 
     for compress in ["lz4", "zstd"]:
@@ -358,7 +358,7 @@ def test_encrypt_compress_stream_backup(test_helper):
         test_helper.backup_params = (
             f"--encrypt=AES256 --encrypt-key={test_helper.encrypt_key} --encrypt-threads=10 "
             f"--encrypt-chunk-size=128K --compress={compress} --compress-threads=10 "
-            f"--core-file --lock-ddl={test_helper.lock_ddl}"
+            f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         )
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         test_helper.run_load("", time_sec=20)
@@ -370,7 +370,7 @@ def test_compress_backup(test_helper):
     if test_helper.version_normalized < 80000:
         pytest.skip("lz4/zstd compression not supported in 5.7")
     test_helper.mysqld_options = "--log-bin=binlog"
-    test_helper.prepare_params = "--core-file"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
 
     compress_configs = [
@@ -384,7 +384,7 @@ def test_compress_backup(test_helper):
     ]
     for cfg in compress_configs:
         print(f"Testing compression: {cfg}")
-        test_helper.backup_params = f"{cfg} --core-file --lock-ddl={test_helper.lock_ddl}"
+        test_helper.backup_params = f"{cfg} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         test_helper.run_load("", time_sec=20)
         test_helper.take_backup(single_incremental=True)
@@ -544,9 +544,9 @@ def _run_encryption_8_0_tests(test_helper, encrypt_type):
         test_helper.mysqld_options = init_opts
     else:
         test_helper.mysqld_options = "--default-table-encryption=ON"
-    test_helper.backup_params = f"{pxb_opts} --core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = f"{pxb_opts} {pxb_comp} --core-file" if pxb_comp else f"{pxb_opts} --core-file"
-    test_helper.restore_params = f"{pxb_opts} --core-file"
+    test_helper.backup_params = f"{pxb_opts} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{pxb_opts} {pxb_comp} {CORE_FILE_OPT}" if pxb_comp else f"{pxb_opts} {CORE_FILE_OPT}"
+    test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.initialize_db()
     test_helper.run_load("", time_sec=20)
     test_helper.take_backup(single_incremental=True)
@@ -557,9 +557,9 @@ def _run_encryption_8_0_tests(test_helper, encrypt_type):
         test_helper.mysqld_options = f"{server_opts} --binlog-encryption"
     else:
         test_helper.mysqld_options = f"{server_opts} --binlog-encryption"
-    test_helper.backup_params = f"{pxb_opts} --core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = f"{pxb_opts} {pxb_comp} --core-file" if pxb_comp else f"{pxb_opts} --core-file"
-    test_helper.restore_params = f"{pxb_opts} --core-file"
+    test_helper.backup_params = f"{pxb_opts} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{pxb_opts} {pxb_comp} {CORE_FILE_OPT}" if pxb_comp else f"{pxb_opts} {CORE_FILE_OPT}"
+    test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.initialize_db()
     test_helper.run_load("", time_sec=20)
     test_helper.take_backup(single_incremental=True)
@@ -568,20 +568,20 @@ def _run_encryption_8_0_tests(test_helper, encrypt_type):
     print(f"Test: {encrypt_type} with transition-key")
     orig_lock_ddl = test_helper.lock_ddl
     test_helper.lock_ddl = "on"
-    test_helper.backup_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --core-file --lock-ddl={test_helper.lock_ddl}"
+    test_helper.backup_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     if "plugin" in encrypt_type:
         if test_helper.install_type == "package":
-            test_helper.prepare_params = f"--transition-key={test_helper.encrypt_key} --core-file"
+            test_helper.prepare_params = f"--transition-key={test_helper.encrypt_key} {CORE_FILE_OPT}"
         else:
-            test_helper.prepare_params = f"--xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --transition-key={test_helper.encrypt_key} --core-file"
+            test_helper.prepare_params = f"--xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --transition-key={test_helper.encrypt_key} {CORE_FILE_OPT}"
         plugin_name = "keyring_file.so" if "file" in encrypt_type else "keyring_vault.so"
-        test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key --early-plugin-load={plugin_name} --core-file"
+        test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key --early-plugin-load={plugin_name} {CORE_FILE_OPT}"
     elif pxb_comp:
-        test_helper.prepare_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} {pxb_comp} --core-file"
-        test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key {pxb_comp} --core-file"
+        test_helper.prepare_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} {pxb_comp} {CORE_FILE_OPT}"
+        test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key {pxb_comp} {CORE_FILE_OPT}"
     else:
-        test_helper.prepare_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --core-file"
-        test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key --core-file"
+        test_helper.prepare_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} {CORE_FILE_OPT}"
+        test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key {CORE_FILE_OPT}"
     test_helper.take_backup(single_incremental=True)
     test_helper.lock_ddl = orig_lock_ddl
 
@@ -589,16 +589,16 @@ def _run_encryption_8_0_tests(test_helper, encrypt_type):
     print(f"Test: {encrypt_type} with generate-transition-key")
     orig_lock_ddl = test_helper.lock_ddl
     test_helper.lock_ddl = "on"
-    test_helper.backup_params = f"{pxb_opts} --generate-transition-key --core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = f"{pxb_opts} {pxb_comp} --core-file" if pxb_comp else f"{pxb_opts} --core-file"
+    test_helper.backup_params = f"{pxb_opts} --generate-transition-key {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{pxb_opts} {pxb_comp} {CORE_FILE_OPT}" if pxb_comp else f"{pxb_opts} {CORE_FILE_OPT}"
     if pxb_comp:
-        test_helper.restore_params = f"{pxb_opts} {pxb_comp} --generate-new-master-key --core-file"
+        test_helper.restore_params = f"{pxb_opts} {pxb_comp} --generate-new-master-key {CORE_FILE_OPT}"
     else:
         if "plugin" in encrypt_type:
             plugin_name = "keyring_file.so" if "file" in encrypt_type else "keyring_vault.so"
-            test_helper.restore_params = f"{pxb_opts} --generate-new-master-key --early-plugin-load={plugin_name} --core-file"
+            test_helper.restore_params = f"{pxb_opts} --generate-new-master-key --early-plugin-load={plugin_name} {CORE_FILE_OPT}"
         else:
-            test_helper.restore_params = f"{pxb_opts} --core-file"
+            test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.take_backup(single_incremental=True)
     test_helper.lock_ddl = orig_lock_ddl
 
@@ -606,31 +606,31 @@ def _run_encryption_8_0_tests(test_helper, encrypt_type):
     print(f"Test: {encrypt_type} with lz4 compression and streaming")
     test_helper.backup_params = (
         f"{pxb_opts} --encrypt=AES256 --encrypt-key={test_helper.encrypt_key} --encrypt-threads=10 "
-        f"--encrypt-chunk-size=128K --compress=lz4 --compress-threads=10 --core-file --lock-ddl={test_helper.lock_ddl}"
+        f"--encrypt-chunk-size=128K --compress=lz4 --compress-threads=10 {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     )
-    test_helper.prepare_params = f"{pxb_opts} {pxb_comp} --core-file" if pxb_comp else f"{pxb_opts} --core-file"
-    test_helper.restore_params = f"{pxb_opts} --core-file"
+    test_helper.prepare_params = f"{pxb_opts} {pxb_comp} {CORE_FILE_OPT}" if pxb_comp else f"{pxb_opts} {CORE_FILE_OPT}"
+    test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.take_backup(backup_type="stream", single_incremental=True)
 
     # Sub-test 6: zstd compression with streaming
     print(f"Test: {encrypt_type} with zstd compression and streaming")
     test_helper.backup_params = (
         f"{pxb_opts} --encrypt=AES256 --encrypt-key={test_helper.encrypt_key} --encrypt-threads=10 "
-        f"--encrypt-chunk-size=128K --compress=zstd --compress-threads=10 --core-file --lock-ddl={test_helper.lock_ddl}"
+        f"--encrypt-chunk-size=128K --compress=zstd --compress-threads=10 {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     )
-    test_helper.prepare_params = f"{pxb_opts} {pxb_comp} --core-file" if pxb_comp else f"{pxb_opts} --core-file"
-    test_helper.restore_params = f"{pxb_opts} --core-file"
+    test_helper.prepare_params = f"{pxb_opts} {pxb_comp} {CORE_FILE_OPT}" if pxb_comp else f"{pxb_opts} {CORE_FILE_OPT}"
+    test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.take_backup(backup_type="stream", single_incremental=True)
 
     # Sub-test 7+: DDL tests with encryption
     print(f"Test: DDL sub-tests with {encrypt_type}")
     if pxb_comp:
-        test_helper.backup_params = f"{pxb_opts} --lock-ddl --core-file"
-        test_helper.prepare_params = f"{pxb_opts} {pxb_comp} --core-file"
+        test_helper.backup_params = f"{pxb_opts} --lock-ddl {CORE_FILE_OPT}"
+        test_helper.prepare_params = f"{pxb_opts} {pxb_comp} {CORE_FILE_OPT}"
     else:
-        test_helper.backup_params = f"{pxb_opts} --lock-ddl --core-file"
-        test_helper.prepare_params = f"{pxb_opts} --core-file"
-    test_helper.restore_params = f"{pxb_opts} --core-file"
+        test_helper.backup_params = f"{pxb_opts} --lock-ddl {CORE_FILE_OPT}"
+        test_helper.prepare_params = f"{pxb_opts} {CORE_FILE_OPT}"
+    test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.mysqld_options = server_opts
 
     ddl_funcs = [
@@ -699,9 +699,9 @@ def _run_encryption_2_4_tests(test_helper, encrypt_type):
 
     # Basic encrypted backup
     test_helper.mysqld_options = server_opts
-    test_helper.backup_params = f"{pxb_opts} --core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = f"{pxb_opts} --core-file"
-    test_helper.restore_params = f"{pxb_opts} --core-file"
+    test_helper.backup_params = f"{pxb_opts} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{pxb_opts} {CORE_FILE_OPT}"
+    test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.initialize_db()
     test_helper.run_load("", time_sec=20)
     test_helper.take_backup(single_incremental=True)
@@ -709,36 +709,36 @@ def _run_encryption_2_4_tests(test_helper, encrypt_type):
     # Transition-key test
     orig_lock_ddl = test_helper.lock_ddl
     test_helper.lock_ddl = "on"
-    test_helper.backup_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --core-file --lock-ddl={test_helper.lock_ddl}"
+    test_helper.backup_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     if test_helper.install_type == "package":
-        test_helper.prepare_params = f"--transition-key={test_helper.encrypt_key} --core-file"
+        test_helper.prepare_params = f"--transition-key={test_helper.encrypt_key} {CORE_FILE_OPT}"
     else:
-        test_helper.prepare_params = f"--xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --transition-key={test_helper.encrypt_key} --core-file"
+        test_helper.prepare_params = f"--xtrabackup-plugin-dir={test_helper.xtrabackup_dir}/../lib/plugin --transition-key={test_helper.encrypt_key} {CORE_FILE_OPT}"
     plugin_name = "keyring_file.so" if "file" in encrypt_type else "keyring_vault.so"
-    test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key --early-plugin-load={plugin_name} --core-file"
+    test_helper.restore_params = f"{pxb_opts} --transition-key={test_helper.encrypt_key} --generate-new-master-key --early-plugin-load={plugin_name} {CORE_FILE_OPT}"
     test_helper.take_backup(single_incremental=True)
     test_helper.lock_ddl = orig_lock_ddl
 
     # Streaming with compression
     test_helper.backup_params = (
         f"{pxb_opts} --encrypt=AES256 --encrypt-key={test_helper.encrypt_key} --encrypt-threads=10 "
-        f"--encrypt-chunk-size=128K --compress --compress-threads=10 --core-file --lock-ddl={test_helper.lock_ddl}"
+        f"--encrypt-chunk-size=128K --compress --compress-threads=10 {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     )
-    test_helper.prepare_params = f"{pxb_opts} --core-file"
-    test_helper.restore_params = f"{pxb_opts} --core-file"
+    test_helper.prepare_params = f"{pxb_opts} {CORE_FILE_OPT}"
+    test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.take_backup(backup_type="stream", single_incremental=True)
 
     # DDL sub-tests
     if test_helper.server_type == "MS":
-        test_helper.backup_params = f"{pxb_opts} --lock-ddl-per-table --core-file"
+        test_helper.backup_params = f"{pxb_opts} --lock-ddl-per-table {CORE_FILE_OPT}"
     else:
-        test_helper.backup_params = f"{pxb_opts} --lock-ddl --core-file"
+        test_helper.backup_params = f"{pxb_opts} --lock-ddl {CORE_FILE_OPT}"
         if encrypt_type == "keyring_file_plugin":
             no_binlog_opts = f"--early-plugin-load=keyring_file.so --keyring_file_data={test_helper.mysqldir}/keyring --innodb-encrypt-tables=ON --encrypt-tmp-files --innodb-temp-tablespace-encrypt --innodb-encrypt-online-alter-logs=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32"
             test_helper.mysqld_options = no_binlog_opts
             test_helper.initialize_db()
-    test_helper.prepare_params = f"{pxb_opts} --core-file"
-    test_helper.restore_params = f"{pxb_opts} --core-file"
+    test_helper.prepare_params = f"{pxb_opts} {CORE_FILE_OPT}"
+    test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
 
     ddl_funcs = [
         test_helper.ddl_add_drop_index,
@@ -770,8 +770,8 @@ def test_cloud_inc_backup(test_helper):
     cloud_params = f"--defaults-file={test_helper.cloud_config} --verbose"
 
     test_helper.mysqld_options = _default_mysqld_options()
-    test_helper.backup_params = f"--parallel=10 --core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = "--core-file"
+    test_helper.backup_params = f"--parallel=10 {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
     test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
     test_helper.run_load("", time_sec=20)
@@ -782,7 +782,7 @@ def test_cloud_inc_backup(test_helper):
     print("Test: Cloud backup with encryption")
     test_helper.backup_params = (
         f"--encrypt=AES256 --encrypt-key={test_helper.encrypt_key} --encrypt-threads=10 "
-        f"--encrypt-chunk-size=128K --core-file --lock-ddl={test_helper.lock_ddl}"
+        f"--encrypt-chunk-size=128K {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     )
     test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True)
 
@@ -792,7 +792,7 @@ def test_cloud_inc_backup(test_helper):
             test_helper.backup_params = (
                 f"--encrypt=AES256 --encrypt-key={test_helper.encrypt_key} --encrypt-threads=10 "
                 f"--encrypt-chunk-size=128K --compress={compress} --compress-threads=10 "
-                f"--core-file --lock-ddl={test_helper.lock_ddl}"
+                f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
             )
             test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True)
 
@@ -806,24 +806,24 @@ def test_inc_backup_innodb_params(test_helper):
     if test_helper.version_normalized < 80000:
         pytest.skip("InnoDB params tests require 8.0+")
 
-    test_helper.backup_params = f"--core-file --lock-ddl={test_helper.lock_ddl}"
+    test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     test_helper.restore_params = ""
 
     configs = [
         {"mysqld": "--innodb-redo-log-capacity=209715200", "backup_extra": "--innodb-log-file-size=209715200",
-         "prepare_extra": "--innodb-log-file-size=209715200 --core-file"},
+         "prepare_extra": f"--innodb-log-file-size=209715200 {CORE_FILE_OPT}"},
         {"mysqld": "--innodb-redo-log-capacity=2147483648", "backup_extra": "--innodb-log-file-size=2147483648",
-         "prepare_extra": "--innodb-log-file-size=2147483648 --core-file"},
+         "prepare_extra": f"--innodb-log-file-size=2147483648 {CORE_FILE_OPT}"},
         {"mysqld": "--innodb-redo-log-capacity=8388608 --innodb-buffer-pool-size=2G",
          "backup_extra": "--innodb-log-file-size=8388608 --innodb-buffer-pool-size=2G",
-         "prepare_extra": "--innodb-log-file-size=8388608 --innodb-buffer-pool-size=2G --core-file"},
-        {"mysqld": "--skip-log-bin", "backup_extra": "", "prepare_extra": "--core-file"},
+         "prepare_extra": f"--innodb-log-file-size=8388608 --innodb-buffer-pool-size=2G {CORE_FILE_OPT}"},
+        {"mysqld": "--skip-log-bin", "backup_extra": "", "prepare_extra": f"{CORE_FILE_OPT}"},
     ]
 
     for cfg in configs:
         print(f"Test: InnoDB params: {cfg['mysqld']}")
         test_helper.mysqld_options = cfg["mysqld"]
-        test_helper.backup_params = f"{cfg['backup_extra']} --core-file --lock-ddl={test_helper.lock_ddl}" if cfg["backup_extra"] else f"--core-file --lock-ddl={test_helper.lock_ddl}"
+        test_helper.backup_params = f"{cfg['backup_extra']} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}" if cfg["backup_extra"] else f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.prepare_params = cfg["prepare_extra"]
         test_helper.initialize_db()
         test_helper.run_load("", time_sec=20)
@@ -838,8 +838,8 @@ def test_inc_backup_archive_log(test_helper):
     archive_dir = os.path.join(test_helper.mysqldir, "archive")
     os.makedirs(archive_dir, mode=0o744, exist_ok=True)
 
-    test_helper.backup_params = f"--core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = "--core-file"
+    test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
 
     test_helper.mysqld_options = (
@@ -855,7 +855,7 @@ def test_inc_backup_archive_log(test_helper):
         f"--binlog-transaction-compression-level-zstd=22 --innodb-extend-and-initialize=OFF "
         f"--innodb-log-writer-threads=OFF --innodb-redo-log-archive-dirs=archive:{archive_dir}"
     )
-    test_helper.prepare_params = "--innodb-log-file-size=536870912 --core-file"
+    test_helper.prepare_params = f"--innodb-log-file-size=536870912 {CORE_FILE_OPT}"
     test_helper.initialize_db()
     test_helper.run_load("", time_sec=20)
     test_helper.take_backup(single_incremental=True)
@@ -868,8 +868,8 @@ def test_inc_backup_archive_log(test_helper):
 def test_ssl_backup(test_helper):
     """Backup and Restore with SSL options."""
     test_helper.mysqld_options = _default_mysqld_options()
-    test_helper.backup_params = f"--core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = "--core-file"
+    test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
     test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
     databases = ["test", "test_rocksdb"] if test_helper.rocksdb == "enabled" else ["test"]
@@ -888,7 +888,7 @@ def test_ssl_backup(test_helper):
     test_helper.backup_user = "backup"
 
     print("Test: Backup with SSL certificates and keys")
-    test_helper.backup_params = f"{ssl_opts} --core-file --lock-ddl={test_helper.lock_ddl}"
+    test_helper.backup_params = f"{ssl_opts} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     test_helper.run_load("", time_sec=20)
     test_helper.take_backup(single_incremental=True, databases=databases)
 
@@ -898,7 +898,7 @@ def test_ssl_backup(test_helper):
         capture_output=True, text=True, check=False,
     )
     mysql_port = port_result.stdout.strip() if port_result.returncode == 0 else "21000"
-    test_helper.backup_params = f"{ssl_opts} --ssl-mode=REQUIRED --host=127.0.0.1 -P {mysql_port} --core-file --lock-ddl={test_helper.lock_ddl}"
+    test_helper.backup_params = f"{ssl_opts} --ssl-mode=REQUIRED --host=127.0.0.1 -P {mysql_port} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     test_helper.run_load("", time_sec=20)
     test_helper.take_backup(single_incremental=True, databases=databases)
 

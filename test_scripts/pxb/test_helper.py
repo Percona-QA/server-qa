@@ -35,6 +35,11 @@ QASCRIPTS = os.environ.get("QASCRIPTS", os.path.join(HOME, "server-qa"))
 # Optional: run xtrabackup under rr (record and replay). Set USE_RR=1 to enable.
 USE_RR = os.environ.get("USE_RR", "0") == "1"
 
+# Optional: enable core dumps for mysqld/xtrabackup. Set ENABLE_CORE_DUMP=1 to enable.
+# When disabled, the --core-file flag is omitted from all mysqld and xtrabackup commands.
+ENABLE_CORE_DUMP = os.environ.get("ENABLE_CORE_DUMP", "0") == "1"
+CORE_FILE_OPT = "--core-file" if ENABLE_CORE_DUMP else ""
+
 # KMIP Configurations
 KMIP_CONFIGS = {
     "pykmip": "addr=127.0.0.1,image=satyapercona/kmip:latest,port=5696,name=kmip_pykmip",
@@ -136,9 +141,10 @@ class MySQLServer:
         print(f"=>Starting MySQL server '{self.name}' on port {self.port}")
         mysqld_path = os.path.join(self.basedir, "bin/mysqld")
         cmd: List[str] = ["rr", mysqld_path] if self.use_rr else [mysqld_path]
+        cmd += ["--no-defaults"]
+        if ENABLE_CORE_DUMP:
+            cmd.append("--core-file")
         cmd += [
-            "--no-defaults",
-            "--core-file",
             f"--basedir={self.basedir}",
             f"--datadir={self.datadir}",
         ]
@@ -2412,10 +2418,10 @@ class BackupTestHelper:
         if page_tracking and self.version_normalized < 80000:
             pytest.skip("Page Tracking is not supported in MS/PS 5.7")
 
-        self.backup_params = f"--keyring_file_data={self.logdir}/keyring --xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={self.lock_ddl}"
+        self.backup_params = f"--keyring_file_data={self.logdir}/keyring --xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
         if page_tracking:
             self.backup_params += " --page-tracking"
-        self.prepare_params = f"--keyring_file_data={self.logdir}/keyring --xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin --core-file"
+        self.prepare_params = f"--keyring_file_data={self.logdir}/keyring --xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT}"
         self.restore_params = self.prepare_params
 
         if self.version_normalized >= 80000:
@@ -2469,7 +2475,7 @@ class BackupTestHelper:
         with open(config_file, "w", encoding="utf-8") as f:
             f.write(f'{{\n  "path": "{self.logdir}/keyring",\n  "read_only": false\n}}\n')
 
-        self.backup_params = f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={self.lock_ddl}"
+        self.backup_params = f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
         if page_tracking:
             self.backup_params += " --page-tracking"
         self.prepare_params = f"{self.backup_params} --component-keyring-config={config_file}"
@@ -2540,7 +2546,7 @@ class BackupTestHelper:
         if os.path.isfile(kmip_cnf_src):
             shutil.copy2(kmip_cnf_src, kmip_cnf_dst)
 
-        self.backup_params = f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin --core-file"
+        self.backup_params = f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT}"
         self.prepare_params = f"{self.backup_params} --component-keyring-config={kmip_cnf_dst}"
         self.restore_params = self.backup_params
 
@@ -2590,7 +2596,7 @@ class BackupTestHelper:
                 )
 
             self.backup_params = (
-                f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin --core-file --lock-ddl={self.lock_ddl}"
+                f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
             )
             if page_tracking:
                 self.backup_params += " --page-tracking"
@@ -2651,14 +2657,14 @@ class BackupTestHelper:
             if "MySQL Community Server" in result.stdout:
                 pytest.skip("RocksDB is unsupported in MS")
             self.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-            self.backup_params = f"--core-file --lock-ddl={self.lock_ddl}"
-            self.prepare_params = "--core-file"
+            self.backup_params = f"{CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
+            self.prepare_params = f"{CORE_FILE_OPT}"
             self.restore_params = ""
             load_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --no-encryption --engine=rocksdb"
         else:
             self.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-            self.backup_params = f"--core-file --lock-ddl={self.lock_ddl}"
-            self.prepare_params = "--core-file"
+            self.backup_params = f"{CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
+            self.prepare_params = f"{CORE_FILE_OPT}"
             self.restore_params = ""
             load_options = ""  # set after initialize_db() when server_type is known
 
@@ -2771,7 +2777,7 @@ class BackupTestHelper:
                     )
                 self.backup_params = (
                     f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin "
-                    f"--core-file --lock-ddl={self.lock_ddl}"
+                    f"{CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
                 )
                 if page_tracking:
                     self.backup_params += " --page-tracking"
@@ -2835,7 +2841,7 @@ class BackupTestHelper:
                     shutil.copy2(kmip_cnf_src, keyring_config_file)
                 self.backup_params = (
                     f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin "
-                    f"--core-file --lock-ddl={self.lock_ddl}"
+                    f"{CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
                 )
                 if page_tracking:
                     self.backup_params += " --page-tracking"

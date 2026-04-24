@@ -10,7 +10,7 @@ import subprocess
 import shutil
 import pytest
 
-from test_helper import BackupTestHelper, TEST_BASE_DIR, KMIP_CONFIGS
+from test_helper import BackupTestHelper, TEST_BASE_DIR, KMIP_CONFIGS, CORE_FILE_OPT
 
 
 # Pytest fixtures and test functions
@@ -42,8 +42,8 @@ def setup_logdir(test_helper):
 def test_normal_backup(test_helper):
     """Test normal incremental backup and restore."""
     test_helper.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-    test_helper.backup_params = f"--core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = "--core-file"
+    test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
 
     tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds {test_helper.seconds} --no-encryption --undo-tbs-sql 0"
@@ -67,8 +67,8 @@ def test_memory_estimation_backup(test_helper):
     test_helper.load_tool = "sysbench"
     try:
         test_helper.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-        test_helper.backup_params = f"--core-file --lock-ddl={test_helper.lock_ddl}"
-        test_helper.prepare_params = "--core-file --use-free-memory-pct=20"
+        test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+        test_helper.prepare_params = f"{CORE_FILE_OPT} --use-free-memory-pct=20"
         test_helper.restore_params = ""
 
         test_helper.initialize_db()
@@ -105,8 +105,8 @@ def test_rocksdb_backup(test_helper):
         pytest.skip("RocksDB is unsupported in MS")
 
     test_helper.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-    test_helper.backup_params = f"--core-file --lock-ddl={test_helper.lock_ddl}"
-    test_helper.prepare_params = "--core-file"
+    test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
 
     tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds {test_helper.seconds} --no-encryption --engine=rocksdb"
@@ -136,8 +136,8 @@ def test_page_tracking_backup(test_helper):
         pytest.skip("Page Tracking is not supported in MS/PS 5.7")
 
     test_helper.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
-    test_helper.backup_params = f"--core-file --lock-ddl={test_helper.lock_ddl} --page-tracking"
-    test_helper.prepare_params = "--core-file"
+    test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl} --page-tracking"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
 
     tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds {test_helper.seconds} --no-encryption --undo-tbs-sql 0"

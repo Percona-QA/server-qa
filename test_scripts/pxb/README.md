@@ -54,6 +54,14 @@
 
    If `DISABLE_CLEANUP` is not set or is not `1`, cleanup runs as usual.
 
+   **Optional:** Core dumps from `mysqld` and `xtrabackup` are disabled by default. To enable them (e.g. for debugging crashes), set:
+
+   ```bash
+   export ENABLE_CORE_DUMP=1
+   ```
+
+   When `ENABLE_CORE_DUMP` is unset or not `1`, the tests omit `--core-file` from all `mysqld` and `xtrabackup` commands. This applies to all Python test suites in this directory (`inc_backup_load_tests.py`, `innodb_myrocks_backup_tests.py`, `replication_backup_tests.py`).
+
 2. **Run from the `pxb` directory** so that `test_helper` and `kmip_helper` can be imported:
 
    ```bash

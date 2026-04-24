@@ -64,7 +64,7 @@ def _debug_log(location: str, message: str, data: dict, hypothesis_id: str = "")
             "location": location,
             "message": message,
             "data": data,
-            "runId": "initial",
+            "runId": os.environ.get("DEBUG_RUN_ID", "initial"),
             "hypothesisId": hypothesis_id,
         }
         with open(_DEBUG_LOG_PATH, "a") as _fh:

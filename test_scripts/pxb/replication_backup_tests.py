@@ -296,11 +296,23 @@ def _replicate_primary(
     helper.backup_params = stage2_backup_params
     helper.prepare_params = stage2_prepare_params
 
-    # Choose --slave-info [+ --safe-slave-backup] as in bash.
-    slave_workers = _slave_parallel_workers(primary)
+    # Choose --slave-info [+ --safe-slave-backup].
+    #
+    # Note: the original bash test gates --safe-slave-backup on
+    # slave_parallel_workers >= 2 (MTS only), but runtime evidence shows that
+    # even single-threaded non-GTID replicas suffer from a data/position race
+    # during the stage-2 backup: while the replica's SQL thread keeps applying
+    # events from the primary, xtrabackup's data copy picks up pages written by
+    # those events, yet xtrabackup_slave_info captures an earlier
+    # Exec_Master_Log_Pos. Replica2 then fails with
+    # "Duplicate entry ... Error_code: 1062" because it re-applies already-
+    # applied events.  --safe-slave-backup runs STOP REPLICA SQL_THREAD before
+    # the backup so the captured slave-info position matches the data.
+    # For GTID replicas, AUTO_POSITION=1 makes the exact file/pos irrelevant,
+    # so --safe-slave-backup is not needed there.
     use_gtid = "gtid-mode=ON" in mysqld_options
     extra = ["--slave-info"]
-    if not use_gtid and slave_workers >= 2:
+    if not use_gtid:
         extra.append("--safe-slave-backup")
 
     helper.take_backup_from(replica1, extra_args=extra, log_date=log_date)

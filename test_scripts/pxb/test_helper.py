@@ -41,10 +41,22 @@ ENABLE_CORE_DUMP = os.environ.get("ENABLE_CORE_DUMP", "0") == "1"
 CORE_FILE_OPT = "--core-file" if ENABLE_CORE_DUMP else ""
 
 # region agent log
+_DEBUG_LOG_PATH = os.environ.get(
+    "DEBUG_LOG_PATH",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug-69c05f.log"),
+)
+
+
 def _debug_log(location: str, message: str, data: dict, hypothesis_id: str = "") -> None:  # noqa: E302
-    """Temporary debug logger for replication_backup_tests Stage 2 investigation."""
-    import json as _json, time as _time
+    """Temporary debug logger for replication_backup_tests Stage 2 investigation.
+
+    Writes NDJSON entries to DEBUG_LOG_PATH (defaults to the test_helper.py
+    directory so the log works locally and on remote test hosts).
+    """
+    import json as _json
+    import time as _time
     try:
+        os.makedirs(os.path.dirname(_DEBUG_LOG_PATH), exist_ok=True)
         entry = {
             "sessionId": "69c05f",
             "id": f"log_{int(_time.time()*1000)}_{os.getpid()}",
@@ -55,10 +67,15 @@ def _debug_log(location: str, message: str, data: dict, hypothesis_id: str = "")
             "runId": "initial",
             "hypothesisId": hypothesis_id,
         }
-        with open("/Users/plavi/Development/percona/percona-qa/.cursor/debug-69c05f.log", "a") as _fh:
+        with open(_DEBUG_LOG_PATH, "a") as _fh:
             _fh.write(_json.dumps(entry, default=str) + "\n")
-    except Exception:
-        pass
+    except Exception as _e:  # noqa: BLE001
+        # Fall back to stderr so we can at least see the failure.
+        try:
+            import sys as _sys
+            print(f"[_debug_log error] {_e} path={_DEBUG_LOG_PATH}", file=_sys.stderr)
+        except Exception:
+            pass
 # endregion
 
 # KMIP Configurations

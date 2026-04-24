@@ -192,15 +192,6 @@ def _pt_table_checksum(helper: BackupTestHelper, source: MySQLServer) -> None:
         subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, check=False)
 
 
-def _slave_parallel_workers(server: MySQLServer) -> int:
-    """Return the current value of ``@@slave_parallel_workers`` on ``server``."""
-    out = server.mysql("SELECT @@slave_parallel_workers;", capture=True) or ""
-    # out is tabular; pick the last integer-looking token.
-    for token in re.findall(r"\d+", out):
-        return int(token)
-    return 0
-
-
 def _keyring_path(helper: BackupTestHelper) -> str:
     """Return the conventional path for a ``keyring_file`` keyring."""
     return os.path.join(helper.logdir, "keyring")

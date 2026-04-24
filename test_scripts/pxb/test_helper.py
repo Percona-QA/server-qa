@@ -810,10 +810,10 @@ class BackupTestHelper:
             replica.mysql("RESET SLAVE ALL;")
 
         if slave_info:
-            slave_info_file = os.path.join(replica.datadir, "xtrabackup_slave_info")
+            slave_info_file = os.path.join(self.backup_dir, "full", "xtrabackup_slave_info")
             if not os.path.exists(slave_info_file):
                 pytest.fail(
-                    f"ERR: xtrabackup_slave_info not found in replica datadir: {slave_info_file}"
+                    f"ERR: xtrabackup_slave_info not found in backup dir: {slave_info_file}"
                 )
             with open(slave_info_file, "r") as f:
                 change_master_stmt = f.read().strip().rstrip(";")
@@ -833,10 +833,10 @@ class BackupTestHelper:
             )
             replica.mysql(change_master_stmt + ";")
         else:
-            binlog_info_file = os.path.join(replica.datadir, "xtrabackup_binlog_info")
+            binlog_info_file = os.path.join(self.backup_dir, "full", "xtrabackup_binlog_info")
             if not os.path.exists(binlog_info_file):
                 pytest.fail(
-                    f"ERR: xtrabackup_binlog_info not found in replica datadir: {binlog_info_file}"
+                    f"ERR: xtrabackup_binlog_info not found in backup dir: {binlog_info_file}"
                 )
             with open(binlog_info_file, "r") as f:
                 parts = f.read().split()

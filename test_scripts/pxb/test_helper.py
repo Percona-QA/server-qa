@@ -40,6 +40,27 @@ USE_RR = os.environ.get("USE_RR", "0") == "1"
 ENABLE_CORE_DUMP = os.environ.get("ENABLE_CORE_DUMP", "0") == "1"
 CORE_FILE_OPT = "--core-file" if ENABLE_CORE_DUMP else ""
 
+# region agent log
+def _debug_log(location: str, message: str, data: dict, hypothesis_id: str = "") -> None:  # noqa: E302
+    """Temporary debug logger for replication_backup_tests Stage 2 investigation."""
+    import json as _json, time as _time
+    try:
+        entry = {
+            "sessionId": "69c05f",
+            "id": f"log_{int(_time.time()*1000)}_{os.getpid()}",
+            "timestamp": int(_time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data,
+            "runId": "initial",
+            "hypothesisId": hypothesis_id,
+        }
+        with open("/Users/plavi/Development/percona/percona-qa/.cursor/debug-69c05f.log", "a") as _fh:
+            _fh.write(_json.dumps(entry, default=str) + "\n")
+    except Exception:
+        pass
+# endregion
+
 # KMIP Configurations
 KMIP_CONFIGS = {
     "pykmip": "addr=127.0.0.1,image=satyapercona/kmip:latest,port=5696,name=kmip_pykmip",
@@ -766,6 +787,29 @@ class BackupTestHelper:
         ] + self.backup_params.split() + ["--register-redo-log-consumer"]
         if extra_args:
             cmd += list(extra_args)
+        # region agent log
+        try:
+            pre_rep_status = source.mysql("SHOW REPLICA STATUS\\G", capture=True) or ""
+            if not pre_rep_status.strip():
+                pre_rep_status = source.mysql("SHOW SLAVE STATUS\\G", capture=True) or ""
+            pre_master_status = source.mysql("SHOW MASTER STATUS\\G", capture=True) or ""
+        except Exception as _e:  # noqa: BLE001
+            pre_rep_status = f"<error: {_e}>"
+            pre_master_status = ""
+        _debug_log(
+            location="test_helper.py:take_backup_from:pre-backup",
+            message="Pre-backup command + source replica/master status",
+            data={
+                "source_name": source.name,
+                "cmd": cmd,
+                "extra_args": list(extra_args) if extra_args else [],
+                "backup_params": self.backup_params,
+                "pre_replica_status": pre_rep_status[:4000],
+                "pre_master_status": pre_master_status[:2000],
+            },
+            hypothesis_id="C,D",
+        )
+        # endregion
         log_file = os.path.join(self.logdir, f"full_backup_from_{source.name}_{log_date}_log")
         result = self.run_command(cmd, check=False, log_file=log_file)
         if result.returncode != 0:
@@ -774,6 +818,41 @@ class BackupTestHelper:
                 f"Please check the log at: {log_file}"
             )
         print(f"..Full backup from '{source.name}' successfully created at: {full_target}")
+        # region agent log
+        try:
+            slave_info_path = os.path.join(full_target, "xtrabackup_slave_info")
+            binlog_info_path = os.path.join(full_target, "xtrabackup_binlog_info")
+            slave_info_content = (
+                open(slave_info_path, "r").read() if os.path.exists(slave_info_path) else "<missing>"
+            )
+            binlog_info_content = (
+                open(binlog_info_path, "r").read() if os.path.exists(binlog_info_path) else "<missing>"
+            )
+            try:
+                files_in_target = sorted(os.listdir(full_target))[:50]
+            except Exception:  # noqa: BLE001
+                files_in_target = []
+            _debug_log(
+                location="test_helper.py:take_backup_from:post-backup",
+                message="Post-backup xtrabackup_slave_info / xtrabackup_binlog_info contents",
+                data={
+                    "source_name": source.name,
+                    "slave_info_path": slave_info_path,
+                    "slave_info_content": slave_info_content,
+                    "binlog_info_path": binlog_info_path,
+                    "binlog_info_content": binlog_info_content,
+                    "target_dir_listing_head": files_in_target,
+                },
+                hypothesis_id="A,B,E",
+            )
+        except Exception as _e:  # noqa: BLE001
+            _debug_log(
+                location="test_helper.py:take_backup_from:post-backup",
+                message=f"Error reading backup metadata: {_e}",
+                data={"source_name": source.name},
+                hypothesis_id="A,E",
+            )
+        # endregion
 
     def configure_replication(
         self,
@@ -809,6 +888,30 @@ class BackupTestHelper:
         else:
             replica.mysql("RESET SLAVE ALL;")
 
+        # region agent log
+        try:
+            status_after_reset = replica.mysql(
+                "SHOW REPLICA STATUS\\G" if not use_slave_keyword else "SHOW SLAVE STATUS\\G",
+                capture=True,
+            ) or ""
+            master_status_on_master = master.mysql("SHOW MASTER STATUS\\G", capture=True) or ""
+        except Exception as _e:  # noqa: BLE001
+            status_after_reset = f"<error: {_e}>"
+            master_status_on_master = ""
+        _debug_log(
+            location="test_helper.py:configure_replication:after-resets",
+            message="Replica state after RESET MASTER+RESET REPLICA; master's current binlog pos",
+            data={
+                "replica_name": replica.name,
+                "master_name": master.name,
+                "slave_info": slave_info,
+                "status_after_reset_head": status_after_reset[:2000],
+                "master_show_master_status": master_status_on_master[:2000],
+            },
+            hypothesis_id="D",
+        )
+        # endregion
+
         if slave_info:
             slave_info_file = os.path.join(self.backup_dir, "full", "xtrabackup_slave_info")
             if not os.path.exists(slave_info_file):
@@ -816,7 +919,29 @@ class BackupTestHelper:
                     f"ERR: xtrabackup_slave_info not found in backup dir: {slave_info_file}"
                 )
             with open(slave_info_file, "r") as f:
-                change_master_stmt = f.read().strip().rstrip(";")
+                raw_slave_info = f.read()
+            # region agent log
+            try:
+                _st = os.stat(slave_info_file)
+                _mtime = _st.st_mtime
+                _size = _st.st_size
+            except Exception:  # noqa: BLE001
+                _mtime = None
+                _size = None
+            _debug_log(
+                location="test_helper.py:configure_replication:read-slave-info",
+                message="Raw contents of xtrabackup_slave_info file used for CHANGE MASTER",
+                data={
+                    "replica_name": replica.name,
+                    "slave_info_file": slave_info_file,
+                    "file_mtime": _mtime,
+                    "file_size": _size,
+                    "raw_content": raw_slave_info,
+                },
+                hypothesis_id="A,B,E",
+            )
+            # endregion
+            change_master_stmt = raw_slave_info.strip().rstrip(";")
             change_master_stmt = change_master_stmt.replace(
                 "CHANGE MASTER TO",
                 "CHANGE MASTER TO MASTER_HOST='127.0.0.1', "
@@ -831,6 +956,19 @@ class BackupTestHelper:
                 "SOURCE_PASSWORD='',",
                 1,
             )
+            # region agent log
+            _debug_log(
+                location="test_helper.py:configure_replication:final-change-master",
+                message="Final CHANGE MASTER/SOURCE SQL being executed on replica",
+                data={
+                    "replica_name": replica.name,
+                    "master_name": master.name,
+                    "master_port": master.port,
+                    "final_stmt": change_master_stmt + ";",
+                },
+                hypothesis_id="B",
+            )
+            # endregion
             replica.mysql(change_master_stmt + ";")
         else:
             binlog_info_file = os.path.join(self.backup_dir, "full", "xtrabackup_binlog_info")
@@ -887,6 +1025,21 @@ class BackupTestHelper:
             line.strip().startswith(f"{sql_key}:") and line.strip().endswith("Yes")
             for line in status_output.splitlines()
         )
+        # region agent log
+        _debug_log(
+            location="test_helper.py:configure_replication:post-start",
+            message="Replica status after START REPLICA/SLAVE + 2s sleep",
+            data={
+                "replica_name": replica.name,
+                "master_name": master.name,
+                "slave_info": slave_info,
+                "io_ok": io_ok,
+                "sql_ok": sql_ok,
+                "status_output": status_output[:6000],
+            },
+            hypothesis_id="A,C",
+        )
+        # endregion
         if not (io_ok and sql_ok):
             pytest.fail(
                 f"ERR: Replication IO/SQL threads not running on '{replica.name}'.\n"

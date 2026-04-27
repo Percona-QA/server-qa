@@ -797,42 +797,6 @@ class BackupTestHelper:
         use_replica_keyword = version_normalized >= 80400
         use_slave_keyword = version_normalized < 80400
 
-        # #region agent log
-        import json as _json
-        _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug-f2a631.log")
-        def _dbg(loc, msg, data=None):
-            try:
-                with open(_log_path, "a") as _f:
-                    _f.write(_json.dumps({"sessionId":"f2a631","location":loc,"message":msg,"data":data or {},"timestamp":int(time.time()*1000),"hypothesisId":"REPL"}) + "\n")
-            except Exception:
-                pass
-        _binlog_info_path = os.path.join(self.backup_dir, "full", "xtrabackup_binlog_info")
-        _slave_info_path = os.path.join(self.backup_dir, "full", "xtrabackup_slave_info")
-        _binlog_info_contents = ""
-        _slave_info_contents = ""
-        try:
-            if os.path.exists(_binlog_info_path):
-                with open(_binlog_info_path, "r") as _f:
-                    _binlog_info_contents = _f.read()
-        except Exception:
-            pass
-        try:
-            if os.path.exists(_slave_info_path):
-                with open(_slave_info_path, "r") as _f:
-                    _slave_info_contents = _f.read()
-        except Exception:
-            pass
-        _dbg("test_helper.py:configure_replication", "Entering configure_replication", {
-            "replica": replica.name,
-            "master": master.name,
-            "slave_info": slave_info,
-            "version_normalized": version_normalized,
-            "xtrabackup_binlog_info": _binlog_info_contents,
-            "xtrabackup_slave_info": _slave_info_contents,
-            "mysqld_options": getattr(master, "mysqld_options", "") or self.mysqld_options,
-        })
-        # #endregion agent log
-
         # RESET MASTER / BINARY LOGS AND GTIDS on the replica.
         if version_normalized >= 80400:
             replica.mysql("RESET BINARY LOGS AND GTIDS;")
@@ -866,12 +830,6 @@ class BackupTestHelper:
                     f"got {len(binlog_parts)}): {binlog_parts!r}"
                 )
             gtid_executed_at_backup = binlog_parts[2]
-            # #region agent log
-            _dbg("test_helper.py:configure_replication", "GTID branch: setting gtid_purged + AUTO_POSITION=1", {
-                "gtid_executed_at_backup": gtid_executed_at_backup,
-                "slave_info": slave_info,
-            })
-            # #endregion agent log
             replica.mysql(f"SET GLOBAL gtid_purged='{gtid_executed_at_backup}';")
             if use_replica_keyword:
                 stmt = (
@@ -885,9 +843,6 @@ class BackupTestHelper:
                     f"MASTER_PORT={master.port}, MASTER_USER='root', "
                     f"MASTER_PASSWORD='', MASTER_AUTO_POSITION=1;"
                 )
-            # #region agent log
-            _dbg("test_helper.py:configure_replication", "GTID stmt", {"stmt": stmt})
-            # #endregion agent log
             replica.mysql(stmt)
         elif slave_info:
             # Non-GTID + slave_info=True: parse xtrabackup_slave_info, which
@@ -914,9 +869,6 @@ class BackupTestHelper:
                 "SOURCE_PASSWORD='',",
                 1,
             )
-            # #region agent log
-            _dbg("test_helper.py:configure_replication", "Non-GTID slave_info=True executing stmt", {"stmt": change_master_stmt + ";"})
-            # #endregion agent log
             replica.mysql(change_master_stmt + ";")
         else:
             # Non-GTID + slave_info=False: use xtrabackup_binlog_info file/pos.
@@ -939,9 +891,6 @@ class BackupTestHelper:
                     f"MASTER_PASSWORD='', MASTER_LOG_FILE='{binlog_file}', "
                     f"MASTER_LOG_POS={binlog_pos};"
                 )
-            # #region agent log
-            _dbg("test_helper.py:configure_replication", "Non-GTID slave_info=False executing stmt", {"stmt": stmt, "binlog_file": binlog_file, "binlog_pos": binlog_pos, "all_parts": binlog_parts})
-            # #endregion agent log
             replica.mysql(stmt)
 
         # START REPLICA / START SLAVE
@@ -953,22 +902,6 @@ class BackupTestHelper:
         # Give the IO/SQL threads a moment to come up, then verify.
         time.sleep(2)
 
-        # #region agent log
-        try:
-            _gtid_executed = replica.mysql("SELECT @@GLOBAL.gtid_executed;", capture=True) or ""
-            _gtid_purged = replica.mysql("SELECT @@GLOBAL.gtid_purged;", capture=True) or ""
-            _gtid_mode = replica.mysql("SELECT @@GLOBAL.gtid_mode;", capture=True) or ""
-        except Exception as _e:
-            _gtid_executed = f"<err: {_e}>"
-            _gtid_purged = ""
-            _gtid_mode = ""
-        _dbg("test_helper.py:configure_replication", "Post-START state", {
-            "replica": replica.name,
-            "gtid_executed": _gtid_executed,
-            "gtid_purged": _gtid_purged,
-            "gtid_mode": _gtid_mode,
-        })
-        # #endregion agent log
         if use_slave_keyword:
             status_query = "SHOW SLAVE STATUS\\G"
             io_key = "Slave_IO_Running"

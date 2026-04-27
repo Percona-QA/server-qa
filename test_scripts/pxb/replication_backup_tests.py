@@ -253,6 +253,34 @@ def _replicate_primary(
     # Restore into the replica1 datadir (tmpdir is then set to the datadir).
     helper.restore_backup_to(replica1.datadir, restore_params, log_date)
     replica1.tmpdir = replica1.datadir
+    # #region agent log
+    import json as _json_a
+    import time as _time_a
+    _log_path_a = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug-f2a631.log")
+    def _dbg_a(msg, data):
+        try:
+            with open(_log_path_a, "a") as _f:
+                _f.write(_json_a.dumps({"sessionId":"f2a631","location":"replication_backup_tests.py:_replicate_primary","message":msg,"data":data,"timestamp":int(_time_a.time()*1000),"hypothesisId":"KEY"}) + "\n")
+        except Exception:
+            pass
+    _kr_dst_a = os.path.join(replica1.datadir, os.path.basename(keyring_src)) if keyring_src else None
+    _kr_src_size_a = os.path.getsize(keyring_src) if keyring_src and os.path.exists(keyring_src) else -1
+    _kr_dst_size_a = os.path.getsize(_kr_dst_a) if _kr_dst_a and os.path.exists(_kr_dst_a) else -1
+    try:
+        _datadir_files_a = sorted(os.listdir(replica1.datadir))[:60]
+    except Exception as _e_a:
+        _datadir_files_a = [f"<err: {_e_a}>"]
+    _dbg_a("Pre-start state for replica1", {
+        "keyring_src": keyring_src,
+        "keyring_src_exists": bool(keyring_src) and os.path.exists(keyring_src),
+        "keyring_src_size": _kr_src_size_a,
+        "keyring_dst_path": _kr_dst_a,
+        "keyring_dst_exists": bool(_kr_dst_a) and os.path.exists(_kr_dst_a),
+        "keyring_dst_size": _kr_dst_size_a,
+        "replica1_mysqld_options": replica1.mysqld_options,
+        "replica1_datadir_files_first60": _datadir_files_a,
+    })
+    # #endregion agent log
     replica1.start()
     helper.configure_replication(replica1, primary, slave_info=False)
 

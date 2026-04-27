@@ -845,7 +845,54 @@ class BackupTestHelper:
         else:
             replica.mysql("RESET SLAVE ALL;")
 
-        if slave_info:
+        # Detect GTID mode from master's mysqld_options (set by the test).
+        master_options = getattr(master, "mysqld_options", "") or ""
+        gtid_enabled = "gtid-mode=ON" in master_options or "gtid_mode=ON" in master_options
+
+        # xtrabackup_binlog_info is always present and is the authoritative
+        # source for the GTID set captured at backup time (field 3).
+        binlog_info_file = os.path.join(self.backup_dir, "full", "xtrabackup_binlog_info")
+        binlog_parts: list = []
+        if os.path.exists(binlog_info_file):
+            with open(binlog_info_file, "r") as f:
+                binlog_parts = f.read().split()
+
+        if gtid_enabled:
+            # GTID-based replication: use AUTO_POSITION=1 + restored gtid_purged
+            # so already-applied transactions are skipped automatically.
+            if len(binlog_parts) < 3:
+                pytest.fail(
+                    f"ERR: xtrabackup_binlog_info missing GTID set (expected 3 fields, "
+                    f"got {len(binlog_parts)}): {binlog_parts!r}"
+                )
+            gtid_executed_at_backup = binlog_parts[2]
+            # #region agent log
+            _dbg("test_helper.py:configure_replication", "GTID branch: setting gtid_purged + AUTO_POSITION=1", {
+                "gtid_executed_at_backup": gtid_executed_at_backup,
+                "slave_info": slave_info,
+            })
+            # #endregion agent log
+            replica.mysql(f"SET GLOBAL gtid_purged='{gtid_executed_at_backup}';")
+            if use_replica_keyword:
+                stmt = (
+                    f"CHANGE REPLICATION SOURCE TO SOURCE_HOST='127.0.0.1', "
+                    f"SOURCE_PORT={master.port}, SOURCE_USER='root', "
+                    f"SOURCE_PASSWORD='', SOURCE_AUTO_POSITION=1;"
+                )
+            else:
+                stmt = (
+                    f"CHANGE MASTER TO MASTER_HOST='127.0.0.1', "
+                    f"MASTER_PORT={master.port}, MASTER_USER='root', "
+                    f"MASTER_PASSWORD='', MASTER_AUTO_POSITION=1;"
+                )
+            # #region agent log
+            _dbg("test_helper.py:configure_replication", "GTID stmt", {"stmt": stmt})
+            # #endregion agent log
+            replica.mysql(stmt)
+        elif slave_info:
+            # Non-GTID + slave_info=True: parse xtrabackup_slave_info, which
+            # contains a CHANGE MASTER TO / CHANGE REPLICATION SOURCE TO
+            # statement with binlog file/pos.
             slave_info_file = os.path.join(self.backup_dir, "full", "xtrabackup_slave_info")
             if not os.path.exists(slave_info_file):
                 pytest.fail(
@@ -868,22 +915,16 @@ class BackupTestHelper:
                 1,
             )
             # #region agent log
-            _dbg("test_helper.py:configure_replication", "slave_info=True executing stmt", {"stmt": change_master_stmt + ";"})
+            _dbg("test_helper.py:configure_replication", "Non-GTID slave_info=True executing stmt", {"stmt": change_master_stmt + ";"})
             # #endregion agent log
             replica.mysql(change_master_stmt + ";")
         else:
-            binlog_info_file = os.path.join(self.backup_dir, "full", "xtrabackup_binlog_info")
-            if not os.path.exists(binlog_info_file):
+            # Non-GTID + slave_info=False: use xtrabackup_binlog_info file/pos.
+            if len(binlog_parts) < 2:
                 pytest.fail(
-                    f"ERR: xtrabackup_binlog_info not found in backup dir: {binlog_info_file}"
+                    f"ERR: Unexpected xtrabackup_binlog_info contents: {binlog_parts!r}"
                 )
-            with open(binlog_info_file, "r") as f:
-                parts = f.read().split()
-            if len(parts) < 2:
-                pytest.fail(
-                    f"ERR: Unexpected xtrabackup_binlog_info contents: {parts!r}"
-                )
-            binlog_file, binlog_pos = parts[0], parts[1]
+            binlog_file, binlog_pos = binlog_parts[0], binlog_parts[1]
             if use_replica_keyword:
                 stmt = (
                     f"CHANGE REPLICATION SOURCE TO SOURCE_HOST='127.0.0.1', "
@@ -899,7 +940,7 @@ class BackupTestHelper:
                     f"MASTER_LOG_POS={binlog_pos};"
                 )
             # #region agent log
-            _dbg("test_helper.py:configure_replication", "slave_info=False executing stmt", {"stmt": stmt, "binlog_file": binlog_file, "binlog_pos": binlog_pos, "all_parts": parts})
+            _dbg("test_helper.py:configure_replication", "Non-GTID slave_info=False executing stmt", {"stmt": stmt, "binlog_file": binlog_file, "binlog_pos": binlog_pos, "all_parts": binlog_parts})
             # #endregion agent log
             replica.mysql(stmt)
 

@@ -253,6 +253,14 @@ def _replicate_primary(
     # Restore into the replica1 datadir (tmpdir is then set to the datadir).
     helper.restore_backup_to(replica1.datadir, restore_params, log_date)
     replica1.tmpdir = replica1.datadir
+    # restore_backup_to wipes the datadir, so the keyring copy that
+    # create_replica placed inside it is gone.  Re-copy here so mysqld can
+    # find the master keys referenced by --keyring_file_data.
+    if keyring_src and os.path.exists(keyring_src):
+        _kr_dst = os.path.join(replica1.datadir, os.path.basename(keyring_src))
+        if not os.path.exists(_kr_dst):
+            import shutil as _shutil1
+            _shutil1.copy(keyring_src, _kr_dst)
     # #region agent log
     import json as _json_a
     import time as _time_a
@@ -353,6 +361,12 @@ def _replicate_primary(
     )
     helper.restore_backup_to(replica2.datadir, restore_params, log_date)
     replica2.tmpdir = replica2.datadir
+    # restore_backup_to wiped the datadir; re-copy keyring (see replica1 above).
+    if replica2_keyring_src and os.path.exists(replica2_keyring_src):
+        _kr_dst2 = os.path.join(replica2.datadir, os.path.basename(replica2_keyring_src))
+        if not os.path.exists(_kr_dst2):
+            import shutil as _shutil2
+            _shutil2.copy(replica2_keyring_src, _kr_dst2)
     replica2.start(extra_args=["--skip-slave-start"])
     helper.configure_replication(replica2, primary, slave_info=True)
 

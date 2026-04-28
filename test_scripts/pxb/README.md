@@ -32,6 +32,15 @@
     - [Run a specific test suite](#run-a-specific-test-suite-2)
     - [Run all tests](#run-all-tests-2)
   - [Test reference — replication\_backup\_tests.py](#test-reference--replication_backup_testspy)
+- [upgrade\_backup\_tests.py — Upgrade backup tests](#upgrade_backup_testspy--upgrade-backup-tests)
+  - [Additional prerequisites](#additional-prerequisites-1)
+  - [Additional environment variables](#additional-environment-variables-2)
+  - [How to run tests](#how-to-run-tests-3)
+    - [Run a single test](#run-a-single-test-2)
+    - [Run multiple tests](#run-multiple-tests-2)
+    - [Run a specific test suite](#run-a-specific-test-suite-3)
+    - [Run all tests](#run-all-tests-3)
+  - [Test reference — upgrade\_backup\_tests.py](#test-reference--upgrade_backup_testspy)
 
 ---
 
@@ -667,3 +676,152 @@ python replication_backup_tests.py All
 | `test_replication_nogtid_singlethreaded` | `NO_GTID_OPTIONS --slave-parallel-workers=0` | Binlog file/pos replication, single-threaded applier |
 | `test_replication_gtid_encryption` | `GTID_OPTIONS` + keyring_file encryption | Uses `--keyring_file_data=<TEST_BASE_DIR>/.../keyring` and `--xtrabackup-plugin-dir`; 8.0+ uses `ENCRYPT_OPTIONS_8`, 5.7 uses `ENCRYPT_OPTIONS_57` |
 | `test_replication_nogtid_encryption` | `NO_GTID_OPTIONS` + keyring_file encryption | Same as above but without GTID |
+
+---
+
+## upgrade_backup_tests.py — Upgrade backup tests
+
+Tests in `upgrade_backup_tests.py` verify backup/prepare/restore compatibility between two PXB versions: a *previous* xtrabackup build and a *current* xtrabackup build. Each test runs the following sub-flows from `upgrade_backup_tests.sh`:
+
+1. Take a full (or full + incremental) backup with one PXB version.
+2. Prepare and restore with the other PXB version.
+3. Restart the server, optionally apply binlog from the original datadir, run `CHECK TABLE`, and compare row counts before / after restore.
+
+This is a Python rewrite of `upgrade_backup_tests.sh`. It re-uses `BackupTestHelper` from `test_helper.py` (`initialize_db`, `take_full_backup`, `take_incremental_backup`, `prepare_full_backup`, `restore_backup_to`, `count_rows`, `check_tables`, `check_dependencies`).
+
+### Additional prerequisites
+
+In addition to the [common prerequisites](#common-prerequisites):
+
+- **sysbench** must be installed (used for the background load).
+- **percona-toolkit** must be installed (`pt-table-checksum` is invoked by `check_pt_checksum`).
+- Two PXB tarballs must be installed locally — one *previous* version and one *current* version.
+
+### Additional environment variables
+
+```bash
+export TEST_BASE_DIR=$HOME/upgrade_backup_tests
+export XTRABACKUP_DIR=$HOME/percona-xtrabackup-current/bin
+export PREVIOUS_XTRABACKUP_DIR=$HOME/percona-xtrabackup-previous/bin
+export MYSQLDIR=$HOME/Percona-Server-8.0.x-Linux.x86_64.glibc2.35
+export QASCRIPTS=$HOME/server-qa
+```
+
+Optional:
+
+```bash
+export ROCKSDB=enabled    # default: disabled. When enabled, also creates and loads the
+                          # test_rocksdb database (only valid on PS 8.0+)
+```
+
+`PREVIOUS_XTRABACKUP_DIR` is only consumed by this suite — it points at the older PXB `bin` directory used to take the source backups before they are prepared/restored with the current PXB pointed to by `XTRABACKUP_DIR`.
+
+### How to run tests
+
+Use **pytest** with the test file. Useful options:
+
+- `-v` — verbose (recommended)
+- `-s` — show stdout/stderr (no capture)
+- `-k EXPR` — run tests whose name matches the expression
+
+---
+
+#### Run a single test
+
+All three tests are non-parametrized; run them by name with `-k`:
+
+```bash
+pytest upgrade_backup_tests.py -v -s -k test_upgrade_full_backup
+```
+
+```bash
+pytest upgrade_backup_tests.py -v -s -k test_upgrade_inc_backup
+```
+
+```bash
+pytest upgrade_backup_tests.py -v -s -k test_upgrade_backup_encrypt
+```
+
+To see all collected tests without running them:
+
+```bash
+pytest upgrade_backup_tests.py --collect-only -q
+```
+
+---
+
+#### Run multiple tests
+
+Use `-k` with **or** to match several tests:
+
+```bash
+pytest upgrade_backup_tests.py -v -s -k "test_upgrade_full_backup or test_upgrade_inc_backup"
+```
+
+---
+
+#### Run a specific test suite
+
+The script defines logical **suites** mapped to individual tests. You can run a suite either with the script's CLI or by passing the equivalent `-k` expression to pytest.
+
+**Option A — script's built-in suites (run from `pxb`):**
+
+```bash
+python upgrade_backup_tests.py Full_backup
+python upgrade_backup_tests.py Inc_backup
+python upgrade_backup_tests.py Encryption
+python upgrade_backup_tests.py All
+```
+
+Verbose (no capture):
+
+```bash
+python upgrade_backup_tests.py -v Full_backup
+```
+
+Multiple suites at once:
+
+```bash
+python upgrade_backup_tests.py Full_backup Inc_backup
+```
+
+**Option B — equivalent pytest `-k` for each suite:**
+
+| Suite          | Pytest -k equivalent             |
+|----------------|----------------------------------|
+| `Full_backup`  | `test_upgrade_full_backup`       |
+| `Inc_backup`   | `test_upgrade_inc_backup`        |
+| `Encryption`   | `test_upgrade_backup_encrypt`    |
+| `All`          | *(omit `-k` — run all tests)*    |
+
+Example:
+
+```bash
+pytest upgrade_backup_tests.py -v -s -k "test_upgrade_full_backup or test_upgrade_inc_backup"
+```
+
+---
+
+#### Run all tests
+
+Run the whole file with pytest:
+
+```bash
+pytest upgrade_backup_tests.py -v -s
+```
+
+Or via the script CLI:
+
+```bash
+python upgrade_backup_tests.py All
+```
+
+---
+
+### Test reference — upgrade_backup_tests.py
+
+| Test | Sub-scenarios run sequentially | Notes |
+|------|--------------------------------|-------|
+| `test_upgrade_full_backup` | 1. full backup with previous PXB → prepare/restore with current PXB | Plain `--log-bin=binlog` server options; sysbench load runs in background |
+| `test_upgrade_inc_backup`  | 1. full + inc with previous PXB → prepare/restore with current PXB; 2. full with previous PXB + inc with current PXB → prepare/restore with current PXB | Two scenarios run sequentially against the same primary; sysbench load on each |
+| `test_upgrade_backup_encrypt` | 1. full prev → prepare/restore current; 2. full + inc prev → prepare/restore current; 3. full prev + inc current → prepare/restore current | Auto-detects server type (PS / MS / 5.7) and applies matching keyring + encryption options; uses `--keyring_file_data=<MYSQLDIR>/keyring` and per-binary `--xtrabackup-plugin-dir` for both PXB binaries |

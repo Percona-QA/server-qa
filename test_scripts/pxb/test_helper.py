@@ -134,27 +134,6 @@ class MySQLServer:
         ]
         if self.mysqld_options:
             bootstrap_cmd += self.mysqld_options.split()
-        # #region agent log
-        try:
-            import json as _dbg_json
-            with open("/Users/plavi/Development/percona/percona-qa/.cursor/debug-7ccd62.log", "a") as _dbg_f:
-                _dbg_f.write(_dbg_json.dumps({
-                    "sessionId": "7ccd62",
-                    "runId": "post-fix",
-                    "hypothesisId": "A",
-                    "location": "test_helper.py:initialize_datadir",
-                    "message": "bootstrap mysqld cmd",
-                    "data": {
-                        "name": self.name,
-                        "cmd": bootstrap_cmd,
-                        "self_mysqld_options": self.mysqld_options,
-                        "extra_start_args": list(self.extra_start_args),
-                    },
-                    "timestamp": int(time.time() * 1000),
-                }) + "\n")
-        except Exception:
-            pass
-        # #endregion
         with open(log_file, "w") as f:
             subprocess.run(
                 bootstrap_cmd,
@@ -193,27 +172,6 @@ class MySQLServer:
         cmd += list(self.extra_start_args)
         if extra_args:
             cmd += list(extra_args)
-
-        # #region agent log
-        try:
-            import json as _dbg_json
-            with open("/Users/plavi/Development/percona/percona-qa/.cursor/debug-7ccd62.log", "a") as _dbg_f:
-                _dbg_f.write(_dbg_json.dumps({
-                    "sessionId": "7ccd62",
-                    "runId": "post-fix",
-                    "hypothesisId": "A",
-                    "location": "test_helper.py:start",
-                    "message": "start mysqld cmd",
-                    "data": {
-                        "name": self.name,
-                        "cmd": cmd,
-                        "mysqld_options": self.mysqld_options,
-                    },
-                    "timestamp": int(time.time() * 1000),
-                }) + "\n")
-        except Exception:
-            pass
-        # #endregion
 
         process = subprocess.Popen(
             cmd,

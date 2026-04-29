@@ -122,14 +122,35 @@ class MySQLServer:
         os.makedirs(self.logdir, exist_ok=True)
         print(f"=>Creating data directory for '{self.name}'")
         log_file = os.path.join(self.logdir, f"{self.name}_install.log")
+        bootstrap_cmd = [
+            os.path.join(self.basedir, "bin/mysqld"),
+            "--no-defaults",
+            f"--datadir={self.datadir}",
+            "--initialize-insecure",
+        ]
+        # #region agent log
+        try:
+            import json as _dbg_json
+            with open("/Users/plavi/Development/percona/percona-qa/.cursor/debug-7ccd62.log", "a") as _dbg_f:
+                _dbg_f.write(_dbg_json.dumps({
+                    "sessionId": "7ccd62",
+                    "hypothesisId": "A",
+                    "location": "test_helper.py:initialize_datadir",
+                    "message": "bootstrap mysqld cmd",
+                    "data": {
+                        "name": self.name,
+                        "cmd": bootstrap_cmd,
+                        "self_mysqld_options": self.mysqld_options,
+                        "extra_start_args": list(self.extra_start_args),
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
         with open(log_file, "w") as f:
             subprocess.run(
-                [
-                    os.path.join(self.basedir, "bin/mysqld"),
-                    "--no-defaults",
-                    f"--datadir={self.datadir}",
-                    "--initialize-insecure",
-                ],
+                bootstrap_cmd,
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 check=True,
@@ -165,6 +186,26 @@ class MySQLServer:
         cmd += list(self.extra_start_args)
         if extra_args:
             cmd += list(extra_args)
+
+        # #region agent log
+        try:
+            import json as _dbg_json
+            with open("/Users/plavi/Development/percona/percona-qa/.cursor/debug-7ccd62.log", "a") as _dbg_f:
+                _dbg_f.write(_dbg_json.dumps({
+                    "sessionId": "7ccd62",
+                    "hypothesisId": "A",
+                    "location": "test_helper.py:start",
+                    "message": "start mysqld cmd",
+                    "data": {
+                        "name": self.name,
+                        "cmd": cmd,
+                        "mysqld_options": self.mysqld_options,
+                    },
+                    "timestamp": int(time.time() * 1000),
+                }) + "\n")
+        except Exception:
+            pass
+        # #endregion
 
         process = subprocess.Popen(
             cmd,

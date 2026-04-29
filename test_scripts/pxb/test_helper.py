@@ -122,18 +122,25 @@ class MySQLServer:
         os.makedirs(self.logdir, exist_ok=True)
         print(f"=>Creating data directory for '{self.name}'")
         log_file = os.path.join(self.logdir, f"{self.name}_install.log")
+        # Bootstrap with the same mysqld_options the server will start with, so
+        # options that must be set at initialization time (e.g.
+        # --innodb_sys_tablespace_encrypt, keyring early-plugin-load) are honored.
+        # Mirrors the bash `./all_no_cl "${MYSQLD_OPTIONS}"` behavior.
         bootstrap_cmd = [
             os.path.join(self.basedir, "bin/mysqld"),
             "--no-defaults",
             f"--datadir={self.datadir}",
             "--initialize-insecure",
         ]
+        if self.mysqld_options:
+            bootstrap_cmd += self.mysqld_options.split()
         # #region agent log
         try:
             import json as _dbg_json
             with open("/Users/plavi/Development/percona/percona-qa/.cursor/debug-7ccd62.log", "a") as _dbg_f:
                 _dbg_f.write(_dbg_json.dumps({
                     "sessionId": "7ccd62",
+                    "runId": "post-fix",
                     "hypothesisId": "A",
                     "location": "test_helper.py:initialize_datadir",
                     "message": "bootstrap mysqld cmd",
@@ -193,6 +200,7 @@ class MySQLServer:
             with open("/Users/plavi/Development/percona/percona-qa/.cursor/debug-7ccd62.log", "a") as _dbg_f:
                 _dbg_f.write(_dbg_json.dumps({
                     "sessionId": "7ccd62",
+                    "runId": "post-fix",
                     "hypothesisId": "A",
                     "location": "test_helper.py:start",
                     "message": "start mysqld cmd",

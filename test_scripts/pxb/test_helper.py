@@ -3150,8 +3150,3 @@ class BackupTestHelper:
                 subprocess.run(["sudo", "rm", "-rf", vault_dir], check=False)
             except Exception:
                 pass
-
-
-    # Additional test methods would go here - they are implemented as pytest test functions below
-    # to maintain pytest structure
-

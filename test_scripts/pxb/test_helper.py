@@ -965,39 +965,20 @@ class BackupTestHelper:
             check=True,
         )
 
-        # Determine server type
-        result = subprocess.run(
-            [
-                os.path.join(self.mysqldir, "bin/mysql"),
-                "-uroot",
-                f"-S{self.socket_path}",
-                "-Ne",
-                "SELECT COUNT(*) FROM information_schema.engines WHERE engine='InnoDB' AND comment LIKE 'Percona%';",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        output = result.stdout.strip()
-
         self.server_version, self.server_version_normalized = self.get_mysql_version()
-
-        if output == "1":
-            self.server_type = "PS"
+        server_type = self.get_mysql_type()
+        if server_type == "PS":
             print(f"Test is running against: {self.server_type}-{self.server_version}")
             if self.load_tool == "pstress":
                 self.pstress_binary = "pstress-ps"
                 if not os.path.exists(os.path.join(self.load_tool_dir, "pstress-ps")):
                     pytest.fail("pstress-ps not found. Please compile pstress with Percona Server!")
-        elif output == "0":
-            self.server_type = "MS"
+        elif server_type == "MS":
             print(f"Test is running against: {self.server_type}-{self.server_version}")
             if self.load_tool == "pstress":
                 self.pstress_binary = "pstress-ms"
                 if not os.path.exists(os.path.join(self.load_tool_dir, "pstress-ms")):
                     pytest.fail("pstress-ms not found. Please compile pstress with Percona Server!")
-        else:
-            pytest.fail("Invalid server version!")
 
         # Create data using sysbench
         if self.load_tool == "sysbench" or rocksdb:

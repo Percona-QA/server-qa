@@ -46,25 +46,6 @@ from test_helper import (  # noqa: E402
 )
 
 # ---------------------------------------------------------------------------
-# Module-level dependency check (ports bash ``check_dependencies``)
-# ---------------------------------------------------------------------------
-
-_MISSING_DEPS = []
-if subprocess.run(["which", "sysbench"], capture_output=True, check=False).returncode != 0:
-    _MISSING_DEPS.append("sysbench")
-if subprocess.run(
-    ["which", "pt-table-checksum"], capture_output=True, check=False
-).returncode != 0:
-    _MISSING_DEPS.append("pt-table-checksum")
-
-if _MISSING_DEPS:
-    pytest.skip(
-        f"Missing required dependencies: {', '.join(_MISSING_DEPS)}. "
-        "Install sysbench + percona-toolkit to run replication_backup_tests.",
-        allow_module_level=True,
-    )
-
-# ---------------------------------------------------------------------------
 # Option constants
 # ---------------------------------------------------------------------------
 
@@ -114,6 +95,7 @@ def test_helper(request):
     helper = BackupTestHelper(test_name=test_name)
     helper.version, helper.version_normalized = helper.get_mysql_version()
     helper.check_pt_checksum()
+    helper.check_dependencies()
     yield helper
     if os.environ.get("DISABLE_CLEANUP") != "1":
         helper.cleanup()

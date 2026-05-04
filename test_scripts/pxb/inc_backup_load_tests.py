@@ -20,7 +20,7 @@ def test_helper(request):
     # Get the test name from the request
     test_name = request.node.name if hasattr(request, 'node') else None
     helper = BackupTestHelper(test_name=test_name)
-    helper.version, helper.version_normalized = helper.get_mysql_version()
+    helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
     helper.check_pt_checksum()
     yield helper
     if os.environ.get("DISABLE_CLEANUP") != "1":
@@ -58,9 +58,9 @@ def test_normal_backup(test_helper):
 
 def test_memory_estimation_backup(test_helper):
     """Test incremental backup and restore with memory estimation (sysbench only)."""
-    if not test_helper.version or not test_helper.version_normalized:
-        test_helper.version, test_helper.version_normalized = test_helper.get_mysql_version()
-    if test_helper.version_normalized < 80000:
+    if not test_helper.server_version or not test_helper.server_version_normalized:
+        test_helper.server_version, test_helper.server_version_normalized = test_helper.get_mysql_version()
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("Memory estimation is not supported in PXB 2.4 (5.7), skipping tests")
 
     original_tool = test_helper.load_tool
@@ -94,12 +94,12 @@ def test_keyring_component_backup(test_helper, page_tracking):
 def test_rocksdb_backup(test_helper):
     """Test backup with RocksDB."""
     # Ensure version and server type are detected (same pattern as version-only checks)
-    if not test_helper.version or not test_helper.version_normalized:
-        test_helper.version, test_helper.version_normalized = test_helper.get_mysql_version()
+    if not test_helper.server_version or not test_helper.server_version_normalized:
+        test_helper.server_version, test_helper.server_version_normalized = test_helper.get_mysql_version()
     if not test_helper.server_type:
         test_helper.get_mysql_type()
 
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("Rocksdb backup is not supported in MS/PS 5.7")
     if test_helper.server_type == "MS":
         pytest.skip("RocksDB is unsupported in MS")
@@ -129,10 +129,10 @@ def test_rocksdb_backup(test_helper):
 def test_page_tracking_backup(test_helper):
     """Test backup with page tracking."""
     # Ensure version is detected (same pattern as other version checks)
-    if not test_helper.version or not test_helper.version_normalized:
-        test_helper.version, test_helper.version_normalized = test_helper.get_mysql_version()
+    if not test_helper.server_version or not test_helper.server_version_normalized:
+        test_helper.server_version, test_helper.server_version_normalized = test_helper.get_mysql_version()
 
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("Page Tracking is not supported in MS/PS 5.7")
 
     test_helper.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"

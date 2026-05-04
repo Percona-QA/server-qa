@@ -19,7 +19,7 @@ def test_helper(request):
     """Create a test helper instance for each test."""
     test_name = request.node.name if hasattr(request, "node") else None
     helper = BackupTestHelper(test_name=test_name)
-    helper.version, helper.version_normalized = helper.get_mysql_version()
+    helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
     yield helper
     if os.environ.get("DISABLE_CLEANUP") != "1":
         helper.cleanup()
@@ -69,7 +69,7 @@ def test_add_drop_index(test_helper):
     """Backup and Restore during add and drop index."""
     databases = _init_for_ddl(test_helper)
     test_helper.run_ddl_in_background(test_helper.ddl_add_drop_index)
-    if test_helper.version_normalized < 80000 and test_helper.server_type == "MS":
+    if test_helper.server_version_normalized < 80000 and test_helper.server_type == "MS":
         test_helper.backup_params = "--lock-ddl-per-table"
     test_helper.take_backup(single_incremental=True, databases=databases)
 
@@ -85,7 +85,7 @@ def test_add_drop_full_text_index(test_helper):
     """Backup and Restore during add and drop full text index."""
     databases = _init_for_ddl(test_helper)
     test_helper.run_ddl_in_background(test_helper.ddl_add_drop_full_text_index)
-    if test_helper.version_normalized < 80000 and test_helper.server_type == "MS":
+    if test_helper.server_version_normalized < 80000 and test_helper.server_type == "MS":
         test_helper.backup_params = "--lock-ddl-per-table"
     test_helper.take_backup(single_incremental=True, databases=databases)
 
@@ -99,7 +99,7 @@ def test_change_index_type(test_helper):
 
 def test_spatial_data_index(test_helper):
     """Backup and Restore during add and drop spatial index."""
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("Spatial index tests not supported in 5.7")
     databases = _init_for_ddl(test_helper)
     test_helper._run_sql("CREATE TABLE IF NOT EXISTS test.geom (g GEOMETRY NOT NULL SRID 0);")
@@ -111,7 +111,7 @@ def test_add_drop_tablespace(test_helper):
     """Backup and Restore during add and drop tablespace."""
     databases = _init_for_ddl(test_helper)
     test_helper.run_ddl_in_background(test_helper.ddl_add_drop_tablespace)
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         if test_helper.server_type == "MS":
             test_helper.backup_params = "--lock-ddl-per-table"
         else:
@@ -130,7 +130,7 @@ def test_change_row_format(test_helper):
     """Backup and Restore during change in row format."""
     databases = _init_for_ddl(test_helper)
     test_helper.run_ddl_in_background(test_helper.ddl_change_row_format)
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         if test_helper.server_type == "MS":
             test_helper.backup_params = "--lock-ddl-per-table"
         else:
@@ -201,7 +201,7 @@ def test_update_truncate_table(test_helper):
     """Backup and Restore during update and truncate of a table."""
     databases = _init_for_ddl(test_helper)
     test_helper.run_ddl_in_background(test_helper.ddl_update_truncate_table)
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         if test_helper.server_type == "MS":
             test_helper.backup_params = "--lock-ddl-per-table"
         else:
@@ -211,7 +211,7 @@ def test_update_truncate_table(test_helper):
 
 def test_create_drop_database(test_helper):
     """Backup and Restore during create and drop of a database."""
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("Create/drop database during backup not supported in 5.7")
     databases = _init_for_ddl(test_helper)
     test_helper.run_ddl_in_background(test_helper.ddl_create_drop_database)
@@ -222,7 +222,7 @@ def test_partitioned_tables(test_helper):
     """Backup and Restore during creation of partitioned tables."""
     databases = _init_for_ddl(test_helper)
     test_helper.run_ddl_in_background(test_helper.ddl_partitioned_tables)
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         if test_helper.server_type == "MS":
             test_helper.backup_params = "--lock-ddl-per-table"
         else:
@@ -246,7 +246,7 @@ def test_compression_dictionary(test_helper):
 
 def test_invisible_column(test_helper):
     """Backup and Restore during add and drop of an invisible column."""
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("Invisible columns not supported in 5.7")
     databases = _init_for_ddl(test_helper)
     test_helper.run_ddl_in_background(test_helper.ddl_add_drop_invisible_column)
@@ -258,7 +258,7 @@ def test_blob_column(test_helper):
     """Backup and Restore during add and drop of a blob column."""
     databases = _init_for_ddl(test_helper)
     test_helper.run_ddl_in_background(test_helper.ddl_add_drop_blob_column)
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         if test_helper.server_type == "MS":
             test_helper.backup_params = "--lock-ddl-per-table"
         else:
@@ -276,7 +276,7 @@ def test_grant_tables(test_helper):
 
 def test_add_drop_column_instant(test_helper):
     """Backup and Restore during column add and drop using instant algorithm."""
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("INSTANT algorithm not supported in 5.7")
     databases = _init_for_ddl(test_helper)
     test_helper.run_ddl_in_background(test_helper.ddl_add_drop_column_instant)
@@ -300,7 +300,7 @@ def test_run_all_statements(test_helper):
     test_helper.run_ddl_in_background(test_helper.ddl_change_compression)
     test_helper.run_ddl_in_background(test_helper.ddl_change_row_format)
     test_helper.run_ddl_in_background(test_helper.ddl_update_truncate_table)
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         if test_helper.server_type == "MS":
             test_helper.backup_params = "--lock-ddl-per-table"
         else:
@@ -322,7 +322,7 @@ def test_streaming_backup(test_helper):
     test_helper.run_load("", time_sec=20)
     test_helper.take_backup(backup_type="stream", single_incremental=True)
 
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         print("Test: Incremental Backup and Restore with streaming format as tar")
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         test_helper.run_load("", time_sec=20)
@@ -331,7 +331,7 @@ def test_streaming_backup(test_helper):
 
 def test_compress_stream_backup(test_helper):
     """Incremental Backup and Restore with lz4/zstd compression and streaming."""
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("lz4/zstd compression not supported in 5.7")
     test_helper.mysqld_options = "--log-bin=binlog"
     test_helper.prepare_params = f"{CORE_FILE_OPT}"
@@ -347,7 +347,7 @@ def test_compress_stream_backup(test_helper):
 
 def test_encrypt_compress_stream_backup(test_helper):
     """Incremental Backup and Restore with encryption, compression, and streaming."""
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("lz4/zstd compression not supported in 5.7")
     test_helper.mysqld_options = "--log-bin=binlog"
     test_helper.prepare_params = f"{CORE_FILE_OPT}"
@@ -367,7 +367,7 @@ def test_encrypt_compress_stream_backup(test_helper):
 
 def test_compress_backup(test_helper):
     """Incremental Backup and Restore with compression (no streaming)."""
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("lz4/zstd compression not supported in 5.7")
     test_helper.mysqld_options = "--log-bin=binlog"
     test_helper.prepare_params = f"{CORE_FILE_OPT}"
@@ -404,20 +404,20 @@ def test_compress_backup(test_helper):
 ])
 def test_encryption_8_0(test_helper, encrypt_type):
     """Encryption test suite for PXB 8.0+ / PS 8.0+."""
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("Encryption 8.0 tests require 8.0+")
 
-    if "plugin" in encrypt_type and test_helper.version_normalized >= 80400:
-        pytest.skip(f"Keyring plugins not supported in 8.4+ (detected {test_helper.version})")
+    if "plugin" in encrypt_type and test_helper.server_version_normalized >= 80400:
+        pytest.skip(f"Keyring plugins not supported in 8.4+ (detected {test_helper.server_version})")
 
     if encrypt_type == "keyring_vault_plugin":
         if test_helper.server_type == "MS":
             pytest.skip("MS 8.0 does not support keyring_vault_plugin")
-        if test_helper.version_normalized >= 80100:
+        if test_helper.server_version_normalized >= 80100:
             pytest.skip("keyring_vault_plugin not supported in 8.1+")
 
     if encrypt_type == "keyring_vault_component":
-        if test_helper.version_normalized < 80100:
+        if test_helper.server_version_normalized < 80100:
             pytest.skip("keyring_vault_component not supported before 8.1")
 
     if encrypt_type == "keyring_kmip_component":
@@ -664,7 +664,7 @@ def _run_encryption_8_0_tests(test_helper, encrypt_type):
 @pytest.mark.parametrize("encrypt_type", ["keyring_file_plugin", "keyring_vault_plugin"])
 def test_encryption_2_4(test_helper, encrypt_type):
     """Encryption test suite for PXB 2.4 / PS 5.7."""
-    if test_helper.version_normalized >= 80000:
+    if test_helper.server_version_normalized >= 80000:
         pytest.skip("2.4 encryption tests are for 5.7 only")
 
     if encrypt_type == "keyring_vault_plugin" and test_helper.server_type == "MS":
@@ -786,7 +786,7 @@ def test_cloud_inc_backup(test_helper):
     )
     test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True)
 
-    if test_helper.version_normalized >= 80000:
+    if test_helper.server_version_normalized >= 80000:
         for compress in ["lz4", "zstd"]:
             print(f"Test: Cloud backup with {compress} compression and encryption")
             test_helper.backup_params = (
@@ -803,7 +803,7 @@ def test_cloud_inc_backup(test_helper):
 
 def test_inc_backup_innodb_params(test_helper):
     """Backup and Restore with different InnoDB parameter values."""
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("InnoDB params tests require 8.0+")
 
     test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
@@ -832,7 +832,7 @@ def test_inc_backup_innodb_params(test_helper):
 
 def test_inc_backup_archive_log(test_helper):
     """Backup and Restore with redo archive log."""
-    if test_helper.version_normalized < 80000:
+    if test_helper.server_version_normalized < 80000:
         pytest.skip("Redo archive log tests require 8.0+")
 
     archive_dir = os.path.join(test_helper.mysqldir, "archive")

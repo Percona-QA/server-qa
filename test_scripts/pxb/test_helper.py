@@ -440,8 +440,8 @@ class BackupTestHelper:
 
         # Runtime variables
         self.server_type: Optional[str] = None
-        self.version: Optional[str] = None
-        self.version_normalized: Optional[int] = None
+        self.server_version: Optional[str] = None
+        self.server_version_normalized: Optional[int] = None
         self.pstress_binary: Optional[str] = None
         self.backup_params: str = ""
         self.prepare_params: str = ""
@@ -563,15 +563,15 @@ class BackupTestHelper:
                 pt_ver_norm = self.normalize_version(pt_ver)
 
                 if (
-                    self.version_normalized >= 80000
-                    and self.version_normalized < 80400
+                    self.server_version_normalized >= 80000
+                    and self.server_version_normalized < 80400
                     and pt_ver_norm < self.normalize_version("3.0.9")
                 ):
                     pytest.fail(
                         f"ERROR: MySQL 8.0 requires pt-table-checksum 3.0.9 or later (but found {pt_ver})"
                     )
                 elif (
-                    self.version_normalized >= 80400
+                    self.server_version_normalized >= 80400
                     and pt_ver_norm < self.normalize_version("3.7.0")
                 ):
                     pytest.fail(
@@ -810,7 +810,7 @@ class BackupTestHelper:
         ``RESET REPLICA|SLAVE`` as appropriate for the current server major
         version so it works on 5.7 as well as 8.0 / 8.4+.
         """
-        version_normalized = self.version_normalized or 0
+        version_normalized = self.server_version_normalized or 0
         use_replica_keyword = version_normalized >= 80400
         use_slave_keyword = version_normalized < 80400
 
@@ -984,18 +984,18 @@ class BackupTestHelper:
         )
         output = result.stdout.strip()
 
-        self.version, self.version_normalized = self.get_mysql_version()
+        self.server_version, self.server_version_normalized = self.get_mysql_version()
 
         if output == "1":
             self.server_type = "PS"
-            print(f"Test is running against: {self.server_type}-{self.version}")
+            print(f"Test is running against: {self.server_type}-{self.server_version}")
             if self.load_tool == "pstress":
                 self.pstress_binary = "pstress-ps"
                 if not os.path.exists(os.path.join(self.load_tool_dir, "pstress-ps")):
                     pytest.fail("pstress-ps not found. Please compile pstress with Percona Server!")
         elif output == "0":
             self.server_type = "MS"
-            print(f"Test is running against: {self.server_type}-{self.version}")
+            print(f"Test is running against: {self.server_type}-{self.server_version}")
             if self.load_tool == "pstress":
                 self.pstress_binary = "pstress-ms"
                 if not os.path.exists(os.path.join(self.load_tool_dir, "pstress-ms")):
@@ -2456,16 +2456,16 @@ class BackupTestHelper:
         Run backup with keyring_file plugin (encryption).
         Keyring plugin is not supported in 8.4+. page_tracking: if True, add --page-tracking to backup params.
         """
-        if not self.version or not self.version_normalized:
-            self.version, self.version_normalized = self.get_mysql_version()
+        if not self.server_version or not self.server_version_normalized:
+            self.server_version, self.server_version_normalized = self.get_mysql_version()
         if not self.server_type:
             self.get_mysql_type()
 
-        if self.version_normalized >= 80400:
+        if self.server_version_normalized >= 80400:
             pytest.skip(
-                f"Keyring plugin not supported in 8.4+ (detected version: {self.version}, normalized: {self.version_normalized})"
+                f"Keyring plugin not supported in 8.4+ (detected version: {self.server_version}, normalized: {self.server_version_normalized})"
             )
-        if page_tracking and self.version_normalized < 80000:
+        if page_tracking and self.server_version_normalized < 80000:
             pytest.skip("Page Tracking is not supported in MS/PS 5.7")
 
         self.backup_params = f"--keyring_file_data={self.logdir}/keyring --xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
@@ -2474,7 +2474,7 @@ class BackupTestHelper:
         self.prepare_params = f"--keyring_file_data={self.logdir}/keyring --xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT}"
         self.restore_params = self.prepare_params
 
-        if self.version_normalized >= 80000:
+        if self.server_version_normalized >= 80000:
             if self.server_type == "MS":
                 self.mysqld_options = f"--early-plugin-load=keyring_file.so --keyring_file_data={self.logdir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
                 tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --undo-tbs-sql 0 --no-column-compression"
@@ -2510,9 +2510,9 @@ class BackupTestHelper:
         Run backup with keyring_file component (encryption).
         page_tracking: if True, add --page-tracking to backup params.
         """
-        if not self.version or not self.version_normalized:
-            self.version, self.version_normalized = self.get_mysql_version()
-        if self.version_normalized < 80000:
+        if not self.server_version or not self.server_version_normalized:
+            self.server_version, self.server_version_normalized = self.get_mysql_version()
+        if self.server_version_normalized < 80000:
             pytest.skip("Component not supported in 5.7")
         if not self.server_type:
             self.get_mysql_type()
@@ -2559,12 +2559,12 @@ class BackupTestHelper:
         Run backup with keyring_kmip component for the given vault type.
         Starts the KMIP server for vault_type, creates manifest and config, then runs backup flow.
         """
-        if not self.version or not self.version_normalized:
-            self.version, self.version_normalized = self.get_mysql_version()
+        if not self.server_version or not self.server_version_normalized:
+            self.server_version, self.server_version_normalized = self.get_mysql_version()
         if not self.server_type:
             self.get_mysql_type()
 
-        if self.version_normalized < 80000:
+        if self.server_version_normalized < 80000:
             pytest.skip("KMIP component is not supported in MS/PS 5.7")
         if self.server_type == "MS":
             pytest.skip("MS 8.0 does not support keyring kmip for encryption, skipping keyring kmip tests")
@@ -2614,12 +2614,12 @@ class BackupTestHelper:
         Requires KMS_KEYID, KMS_SECRET_KEY, KMS_AUTH_KEY, KMS_REGION environment variables.
         page_tracking: if True, add --page-tracking to backup params and install component_mysqlbackup.
         """
-        if not self.version or not self.version_normalized:
-            self.version, self.version_normalized = self.get_mysql_version()
+        if not self.server_version or not self.server_version_normalized:
+            self.server_version, self.server_version_normalized = self.get_mysql_version()
         if not self.server_type:
             self.get_mysql_type()
 
-        if self.version_normalized < 80000:
+        if self.server_version_normalized < 80000:
             pytest.skip("KMS component is not supported in MS/PS 5.7")
         if self.server_type == "MS":
             pytest.skip("MS 8.0 does not support keyring kms for encryption, skipping keyring kms tests")
@@ -2791,12 +2791,12 @@ class BackupTestHelper:
         if self.load_tool != "pstress":
             pytest.skip("Crash tests require load_tool=pstress")
 
-        if not self.version or not self.version_normalized:
-            self.version, self.version_normalized = self.get_mysql_version()
+        if not self.server_version or not self.server_version_normalized:
+            self.server_version, self.server_version_normalized = self.get_mysql_version()
         if not self.server_type:
             self.get_mysql_type()
 
-        if self.version_normalized < 80000:
+        if self.server_version_normalized < 80000:
             pytest.skip("Encrypted crash tests require 8.0+ (component keyring)")
 
         # Seconds for encrypted crash test (shell uses 50)
@@ -2915,7 +2915,7 @@ class BackupTestHelper:
 
             self.initialize_db()
 
-            if page_tracking and self.version_normalized >= 80000:
+            if page_tracking and self.server_version_normalized >= 80000:
                 print("Running test with page tracking enabled")
                 subprocess.run(
                     [

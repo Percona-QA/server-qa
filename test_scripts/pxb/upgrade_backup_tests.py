@@ -70,7 +70,7 @@ def test_helper(request):
     helper = BackupTestHelper(test_name=test_name)
     # All upgrade tests use sysbench-style data load (mirrors the bash script).
     helper.load_tool = "sysbench"
-    helper.version, helper.version_normalized = helper.get_mysql_version()
+    helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
     helper.check_pt_checksum()
     helper.check_dependencies()
     yield helper
@@ -288,7 +288,7 @@ def _build_encrypt_options(helper: BackupTestHelper) -> str:
     string drives MS 8.0 vs PS 8.0 vs the 5.7 fallback path.
     """
     keyring = os.path.join(helper.mysqldir, "keyring")
-    version_str = helper.version or ""
+    version_str = helper.server_version or ""
 
     is_8x = "8.0" in version_str
     is_ms = helper.server_type == "MS"

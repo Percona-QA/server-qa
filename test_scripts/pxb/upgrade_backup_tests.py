@@ -71,7 +71,6 @@ def test_helper(request):
     # All upgrade tests use sysbench-style data load (mirrors the bash script).
     helper.load_tool = "sysbench"
     helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
-    helper.check_pt_checksum()
     helper.check_dependencies()
     yield helper
     if os.environ.get("DISABLE_CLEANUP") != "1":

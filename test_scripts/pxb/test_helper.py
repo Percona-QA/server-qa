@@ -581,14 +581,10 @@ class BackupTestHelper:
             print(f"Warning: Could not check pt-table-checksum version: {e}")
 
     def check_dependencies(self):
-        """Verify sysbench and pt-table-checksum are installed; pytest.fail otherwise."""
-        missing = []
+        """Verify sysbench + pt-table-checksum are installed and pt version is compatible."""
         if not shutil.which("sysbench"):
-            missing.append("sysbench")
-        if not shutil.which("pt-table-checksum"):
-            missing.append("pt-table-checksum")
-        if missing:
-            pytest.fail(f"Missing required dependencies: {', '.join(missing)}")
+            pytest.fail("Missing required dependency: sysbench")
+        self.check_pt_checksum()
 
     def run_command(
         self,

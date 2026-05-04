@@ -94,7 +94,6 @@ def test_helper(request):
     test_name = request.node.name if hasattr(request, "node") else None
     helper = BackupTestHelper(test_name=test_name)
     helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
-    helper.check_pt_checksum()
     helper.check_dependencies()
     yield helper
     if os.environ.get("DISABLE_CLEANUP") != "1":

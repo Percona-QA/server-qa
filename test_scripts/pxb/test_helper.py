@@ -48,6 +48,19 @@ KMIP_CONFIGS = {
     # "ciphertrust": "addr=127.0.0.1,port=5696,name=kmip_ciphertrust,setup_script=setup_kmip_api.py",
 }
 
+# #region agent log a4c319
+def _debug_log_a4c319(payload):
+    """Best-effort NDJSON debug logger; silently no-ops if log path unwritable (e.g. on remote host)."""
+    try:
+        import json as _json
+        import time as _t
+        _path = "/Users/plavi/Development/percona/percona-qa/.cursor/debug-a4c319.log"
+        with open(_path, "a") as _lf:
+            _lf.write(_json.dumps({"sessionId": "a4c319", "timestamp": int(_t.time() * 1000), **payload}) + "\n")
+    except Exception:
+        pass
+# #endregion
+
 # Set tool variables
 LOAD_TOOL = os.environ.get("LOAD_TOOL", "pstress")  # Set value as pstress/sysbench
 LOAD_TOOL_DIR = os.environ.get("LOAD_TOOL_DIR", os.path.join(HOME, "pstress_9.1/src"))  # pstress dir
@@ -1543,14 +1556,75 @@ class BackupTestHelper:
             xb_cmd = self._xtrabackup_cmd_prefix() + [
                 "--decrypt=AES256", f"--encrypt-key={self.encrypt_key}", f"--target-dir={target_dir}",
             ]
-            subprocess.run(xb_cmd, capture_output=True, check=True)
+            # #region agent log a4c319
+            try:
+                _dec = subprocess.run(xb_cmd, capture_output=True, check=True)
+                _dec_stderr = (_dec.stderr or b"").decode(errors="replace")
+                if _dec_stderr.strip():
+                    print(f"[debug a4c319] decrypt stderr (success):\n{_dec_stderr}")
+            except subprocess.CalledProcessError as _exc:
+                print(f"[debug a4c319] decrypt FAILED rc={_exc.returncode}")
+                print(f"[debug a4c319] decrypt cmd: {xb_cmd}")
+                print(f"[debug a4c319] decrypt STDOUT (full):\n{(_exc.stdout or b'').decode(errors='replace')}")
+                print(f"[debug a4c319] decrypt STDERR (full):\n{(_exc.stderr or b'').decode(errors='replace')}")
+                _debug_log_a4c319({"runId": "pre-fix", "hypothesisId": "H3", "location": "test_helper.py:1546", "message": "decrypt failed", "data": {"rc": _exc.returncode, "cmd": xb_cmd, "stderr": (_exc.stderr or b'').decode(errors='replace'), "stdout": (_exc.stdout or b'').decode(errors='replace')}})
+                raise
+            # #endregion
             for enc_file in glob.glob(os.path.join(target_dir, "**/*.xbcrypt"), recursive=True):
                 os.remove(enc_file)
 
         if "--compress" in backup_params:
             print("Decompressing backup files")
             xb_cmd = self._xtrabackup_cmd_prefix() + ["--decompress", f"--target-dir={target_dir}"]
-            subprocess.run(xb_cmd, capture_output=True, check=True)
+            # #region agent log a4c319
+            import shutil as _sh
+            _lz4 = _sh.which("lz4")
+            _zstd = _sh.which("zstd")
+            _qp = _sh.which("qpress")
+            print(f"[debug a4c319] decompress probe: lz4={_lz4} zstd={_zstd} qpress={_qp}")
+            _lz4_ver = ""
+            if _lz4:
+                try:
+                    _v = subprocess.run([_lz4, "--version"], capture_output=True, text=True, check=False)
+                    _lz4_ver = (_v.stdout or _v.stderr or "").strip()
+                    print(f"[debug a4c319] lz4 --version: {_lz4_ver!r} rc={_v.returncode}")
+                except Exception as _e:
+                    print(f"[debug a4c319] lz4 --version raised: {_e!r}")
+            _residue: list = []
+            for _root, _dirs, _files in os.walk(target_dir):
+                for _f in _files:
+                    if _f.endswith((".lz4", ".zst", ".qp", ".xbcrypt")):
+                        _full = os.path.join(_root, _f)
+                        try:
+                            _residue.append((_full, os.path.getsize(_full)))
+                        except OSError:
+                            _residue.append((_full, -1))
+            print(f"[debug a4c319] target_dir compressed/encrypted residue count={len(_residue)}; first 20: {_residue[:20]}")
+            print(f"[debug a4c319] decompress cmd: {xb_cmd}")
+            try:
+                subprocess.run(xb_cmd, capture_output=True, check=True)
+            except subprocess.CalledProcessError as _exc:
+                _stderr_full = (_exc.stderr or b"").decode(errors="replace")
+                _stdout_full = (_exc.stdout or b"").decode(errors="replace")
+                print(f"[debug a4c319] decompress FAILED rc={_exc.returncode}")
+                print(f"[debug a4c319] decompress STDOUT (full):\n{_stdout_full}")
+                print(f"[debug a4c319] decompress STDERR (full):\n{_stderr_full}")
+                try:
+                    _dump = "/tmp/pxb_debug_a4c319.log"
+                    with open(_dump, "a") as _df:
+                        _df.write(f"==== decompress failure {datetime.now().isoformat()} ====\n")
+                        _df.write(f"cmd: {xb_cmd}\n")
+                        _df.write(f"rc: {_exc.returncode}\n")
+                        _df.write(f"lz4 path: {_lz4}\nlz4 version: {_lz4_ver}\n")
+                        _df.write(f"zstd path: {_zstd}\nqpress path: {_qp}\n")
+                        _df.write(f"residue count: {len(_residue)}\nresidue first 20: {_residue[:20]}\n")
+                        _df.write(f"--- STDOUT ---\n{_stdout_full}\n--- STDERR ---\n{_stderr_full}\n\n")
+                    print(f"[debug a4c319] full failure context written to {_dump}")
+                except Exception as _e:
+                    print(f"[debug a4c319] could not write /tmp dump: {_e!r}")
+                _debug_log_a4c319({"runId": "pre-fix", "hypothesisId": "H1+H2+H3+H4+H5", "location": "test_helper.py:1553", "message": "decompress failed", "data": {"rc": _exc.returncode, "cmd": xb_cmd, "lz4": _lz4, "lz4_version": _lz4_ver, "zstd": _zstd, "qpress": _qp, "residue_count": len(_residue), "residue_first20": _residue[:20], "stderr": _stderr_full, "stdout": _stdout_full}})
+                raise
+            # #endregion
             for qp_file in glob.glob(os.path.join(target_dir, "**/*.qp"), recursive=True):
                 os.remove(qp_file)
             for lz4_file in glob.glob(os.path.join(target_dir, "**/*.lz4"), recursive=True):

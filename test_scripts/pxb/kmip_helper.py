@@ -561,8 +561,79 @@ class KMIPHelper:
             return False
 
         self.kmip_config["cert_dir"] = cert_dir
+
+        # Fortanix DSM's REST API and KMIP front-end are eventually consistent:
+        # cert auth set via PATCH may not be honored on the KMIP gateway for a few
+        # seconds, especially under parallel CI load. Probe with the new client cert
+        # until a TLS handshake succeeds (or we hit the timeout) so mysqld doesn't
+        # try to bootstrap against a still-unaware KMIP endpoint.
+        timeout = int(os.environ.get("FORTANIX_KMIP_READY_TIMEOUT", "60"))
+        if not self._wait_for_fortanix_kmip_ready(addr, port, cert_dir, timeout=timeout):
+            print(f"Warning: Fortanix KMIP readiness could not be confirmed within {timeout}s; "
+                  f"proceeding anyway (mysqld may fail to initialize the keyring).")
+
         print(f"Fortanix server setup successfully on address {addr} and port {port}")
         return True
+
+    @staticmethod
+    def _wait_for_fortanix_kmip_ready(addr: str, port: str, cert_dir: str, timeout: int = 60) -> bool:
+        """Poll the Fortanix KMIP endpoint with the freshly-issued client cert until
+        the TLS mutual-auth handshake succeeds.
+
+        Returns True if a handshake completed, False on timeout. Best-effort: a False
+        return is logged as a warning so callers can proceed and let the real
+        component surface a precise error.
+        """
+        import ssl
+
+        client_cert = os.path.join(cert_dir, "client_certificate.pem")
+        client_key = os.path.join(cert_dir, "client_key.pem")
+        server_ca = os.path.join(cert_dir, "root_certificate.pem")
+        if not (os.path.isfile(client_cert) and os.path.isfile(client_key)):
+            return False
+
+        try:
+            port_int = int(port)
+        except (TypeError, ValueError):
+            return False
+
+        print(f"Waiting for Fortanix KMIP at {addr}:{port_int} to accept the new client cert...")
+        deadline = time.monotonic() + max(timeout, 1)
+        delay = 1.0
+        attempts = 0
+        last_error: Optional[BaseException] = None
+        started = time.monotonic()
+
+        while time.monotonic() < deadline:
+            attempts += 1
+            try:
+                ctx = ssl.create_default_context()
+                ctx.load_cert_chain(certfile=client_cert, keyfile=client_key)
+                if os.path.isfile(server_ca):
+                    try:
+                        ctx.load_verify_locations(cafile=server_ca)
+                    except ssl.SSLError:
+                        pass
+                # The Fortanix KMIP IP doesn't necessarily match the DSM hostname cert,
+                # and our goal here is to verify *client* cert acceptance, not server identity.
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+
+                with socket.create_connection((addr, port_int), timeout=5) as raw:
+                    with ctx.wrap_socket(raw, server_hostname=addr):
+                        elapsed = int(time.monotonic() - started)
+                        print(f"..Fortanix KMIP accepted the new cert (after {elapsed}s, {attempts} attempt(s))")
+                        return True
+            except (ssl.SSLError, socket.timeout, ConnectionError, OSError) as exc:
+                last_error = exc
+
+            time.sleep(delay)
+            delay = min(delay * 1.5, 5.0)
+
+        elapsed = int(time.monotonic() - started)
+        err_repr = f"{type(last_error).__name__}: {last_error}" if last_error else "no successful handshake"
+        print(f"..Fortanix KMIP readiness probe gave up after {elapsed}s, {attempts} attempt(s) ({err_repr})")
+        return False
 
     def cleanup_fortanix(self) -> bool:
         """Best-effort: delete the Fortanix app this run created.

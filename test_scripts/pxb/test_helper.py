@@ -3192,6 +3192,12 @@ class BackupTestHelper:
                 for name in self.kmip_helper.kmip_container_names:
                     self.kmip_helper.cleanup_existing_container(name)
 
+            # Drop the per-run Fortanix app so unique-named apps don't accumulate.
+            try:
+                self.kmip_helper.cleanup_fortanix()
+            except Exception as exc:  # noqa: BLE001
+                print(f"  Ignoring Fortanix app cleanup error: {exc}")
+
         # Stop vault server and cleanup vault directory
         self.stop_vault_server()
         vault_dir = os.path.join(HOME, "vault")

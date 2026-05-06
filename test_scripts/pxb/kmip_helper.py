@@ -7,12 +7,16 @@ This library provides functions for managing KMIP servers (PyKMIP, HashiCorp, et
 Required: Docker must be installed and running
 """
 
+import json
 import os
+import platform
+import re
 import sys
 import subprocess
 import time
 import socket
 import shutil
+import uuid
 from typing import Dict, List, Optional
 
 
@@ -428,6 +432,44 @@ class KMIPHelper:
         print(f"Hashicorp server started successfully on address {addr} and port {port}")
         return True
 
+    @staticmethod
+    def _sanitize_app_name(name: str) -> str:
+        """Make a Fortanix-friendly identifier: [A-Za-z0-9_-], <= 64 chars."""
+        cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-_") or "TestingMySQL"
+        return cleaned[:64]
+
+    def _resolve_fortanix_app_name(self) -> str:
+        """Pick a unique-per-run Fortanix app name so parallel jobs don't clobber each other.
+
+        Resolution order:
+          1. FORTANIX_APP_NAME env var (explicit override).
+          2. CI fingerprint: JOB_NAME + BUILD_NUMBER + distro + arch (stable per build).
+          3. Local fallback: hostname + user + short uuid.
+        """
+        explicit = os.environ.get("FORTANIX_APP_NAME", "").strip()
+        if explicit:
+            return self._sanitize_app_name(explicit)
+
+        job = os.environ.get("JOB_NAME", "").replace("/", "_")
+        build = os.environ.get("BUILD_NUMBER", "")
+        distro = ""
+        if hasattr(platform, "freedesktop_os_release"):
+            try:
+                distro = platform.freedesktop_os_release().get("ID", "")
+            except OSError:
+                pass
+        distro = distro or platform.system().lower()
+        arch = platform.machine() or "x"
+
+        if job and build:
+            candidate = f"TestingMySQL-{job}-{build}-{distro}-{arch}"
+        else:
+            host = (platform.node().split(".")[0] or "host")
+            user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"
+            candidate = f"TestingMySQL-{host}-{user}-{uuid.uuid4().hex[:8]}"
+
+        return self._sanitize_app_name(candidate)
+
     def setup_fortanix(self) -> bool:
         """Setup Fortanix KMIP (remote server). Requires FORTANIX_EMAIL and FORTANIX_PASSWORD."""
         kmip_type = "fortanix"
@@ -451,6 +493,13 @@ class KMIPHelper:
             shutil.rmtree(cert_dir, ignore_errors=True)
         os.makedirs(cert_dir, mode=0o700, exist_ok=True)
 
+        # Per-run app name so parallel CI jobs (different OS/build) don't delete each
+        # other's Fortanix app. Group name stays at the script default ("TestingMySQL").
+        app_name = self._resolve_fortanix_app_name()
+        self.kmip_config["app_name"] = app_name
+        self.kmip_config["dsm_url"] = os.environ.get("FORTANIX_DSM_URL", "https://eu.smartkey.io").rstrip("/")
+        print(f"Using Fortanix app name: {app_name}")
+
         # Prefer local script (same directory as this module), else download from GitHub
         script_dir = os.path.dirname(os.path.abspath(__file__))
         script_path = os.path.join(script_dir, setup_script)
@@ -466,7 +515,13 @@ class KMIPHelper:
                     self.last_error = "Downloaded Fortanix setup script is empty"
                     return False
                 result = subprocess.run(
-                    [sys.executable, "-", f"--cert-dir={cert_dir}", f"--email={email}", f"--password={password}"],
+                    [
+                        sys.executable, "-",
+                        f"--cert-dir={cert_dir}",
+                        f"--email={email}",
+                        f"--password={password}",
+                        f"--app-name={app_name}",
+                    ],
                     input=script_content,
                     text=True,
                     capture_output=True,
@@ -479,7 +534,13 @@ class KMIPHelper:
                 return False
         else:
             result = subprocess.run(
-                [sys.executable, script_path, f"--cert-dir={cert_dir}", f"--email={email}", f"--password={password}"],
+                [
+                    sys.executable, script_path,
+                    f"--cert-dir={cert_dir}",
+                    f"--email={email}",
+                    f"--password={password}",
+                    f"--app-name={app_name}",
+                ],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -502,6 +563,64 @@ class KMIPHelper:
         self.kmip_config["cert_dir"] = cert_dir
         print(f"Fortanix server setup successfully on address {addr} and port {port}")
         return True
+
+    def cleanup_fortanix(self) -> bool:
+        """Best-effort: delete the Fortanix app this run created.
+
+        Uses FORTANIX_EMAIL/FORTANIX_PASSWORD to authenticate and deletes the app
+        whose name was stored on self.kmip_config["app_name"] during setup_fortanix.
+        Idempotent and never raises - cleanup must not mask real test results.
+        """
+        app_name = self.kmip_config.get("app_name") if self.kmip_config else None
+        if not app_name:
+            return True
+
+        email = os.environ.get("FORTANIX_EMAIL", "").strip()
+        password = os.environ.get("FORTANIX_PASSWORD", "").strip()
+        if not email or not password:
+            return True
+
+        dsm_url = (self.kmip_config.get("dsm_url")
+                   or os.environ.get("FORTANIX_DSM_URL", "https://eu.smartkey.io")).rstrip("/")
+
+        try:
+            import urllib.request
+            import urllib.error
+
+            def _request(method: str, path: str, token: Optional[str] = None,
+                         payload: Optional[dict] = None) -> Optional[dict]:
+                headers = {"Content-Type": "application/json"}
+                if token:
+                    headers["Authorization"] = f"Bearer {token}"
+                data = json.dumps(payload).encode("utf-8") if payload is not None else None
+                req = urllib.request.Request(f"{dsm_url}{path}", data=data, headers=headers, method=method)
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = resp.read()
+                    return json.loads(body.decode("utf-8")) if body else {}
+
+            auth = _request("POST", "/sys/v1/session/auth",
+                            payload={"method": "password", "email": email, "password": password})
+            token = (auth or {}).get("access_token")
+            if not token:
+                return True
+
+            accounts = _request("GET", "/sys/v1/accounts", token=token) or []
+            if accounts:
+                _request("POST", "/sys/v1/session/select_account",
+                         token=token, payload={"acct_id": accounts[0]["acct_id"]})
+
+            apps = _request("GET", "/sys/v1/apps", token=token) or []
+            target = next((a for a in apps if a.get("name") == app_name), None)
+            if target and target.get("app_id"):
+                try:
+                    _request("DELETE", f"/sys/v1/apps/{target['app_id']}", token=token)
+                    print(f"Cleaned up Fortanix app: {app_name}")
+                except Exception as exc:
+                    print(f"  Ignoring Fortanix cleanup error for app '{app_name}': {exc}")
+            return True
+        except Exception as exc:
+            print(f"  Ignoring Fortanix cleanup error: {exc}")
+            return True
 
     def setup_cipher_api(self) -> bool:
         """Placeholder for CipherTrust setup."""

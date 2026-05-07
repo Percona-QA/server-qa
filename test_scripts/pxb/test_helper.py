@@ -29,6 +29,12 @@ HOME = os.path.expanduser("~")
 # Override via MYSQL_START_TIMEOUT env var; default raised to 180 to absorb the
 # ~60s Fortanix KMIP cold-start that the keyring component pays on a brand-new app.
 MYSQL_START_TIMEOUT = int(os.environ.get("MYSQL_START_TIMEOUT", "180"))
+# Each xtrabackup invocation opens its own KMIP/TLS session and pays a fresh
+# Fortanix cold-start; occasional invocations exceed xtrabackup's internal ~60s
+# tolerance and fail with MY-013714 + 'Encryption can't find master key'.
+# run_command() retries those (and only those) failures automatically.
+XTRABACKUP_KEYRING_RETRY = int(os.environ.get("XTRABACKUP_KEYRING_RETRY", "2"))
+XTRABACKUP_KEYRING_RETRY_DELAY = int(os.environ.get("XTRABACKUP_KEYRING_RETRY_DELAY", "5"))
 TEST_BASE_DIR = os.environ.get("TEST_BASE_DIR", os.path.join(HOME, "inc_backup_load_tests"))
 XTRABACKUP_DIR = os.environ.get("XTRABACKUP_DIR", os.path.join(HOME, "pxb-9.1/bld_9.1/install/bin"))
 MYSQLDIR = os.environ.get("MYSQLDIR", os.path.join(HOME, "mysql-9.1/bld_9.1/install"))
@@ -596,7 +602,18 @@ class BackupTestHelper:
         log_file: Optional[str] = None,
         background: bool = False,
     ) -> subprocess.Popen:
-        """Run a shell command."""
+        """Run a shell command.
+
+        For xtrabackup invocations, retries automatically on the Fortanix KMIP
+        cold-start failure signature (MY-013714 + 'Encryption can't find master
+        key' in the captured output). Each xtrabackup process opens its own
+        KMIP/TLS session and pays a per-process cold-start; ~1 in N invocations
+        exceed xtrabackup's internal ~60s tolerance and fail. Tunable via:
+          - XTRABACKUP_KEYRING_RETRY        (default 2 - up to 3 attempts total)
+          - XTRABACKUP_KEYRING_RETRY_DELAY  (default 5 - seconds between attempts)
+        Retries only fire when the exact pair of substrings is present, so
+        genuine xtrabackup failures fall through unchanged.
+        """
         if log_file:
             with open(log_file, "a") as f:
                 f.write(f"Command: {' '.join(cmd)}\n")
@@ -609,12 +626,23 @@ class BackupTestHelper:
                 stderr=subprocess.STDOUT,
             )
             return process
-        else:
+
+        is_xtrabackup = any(
+            os.path.basename(str(part)) == "xtrabackup" for part in cmd[:2]
+        )
+        max_retries = (
+            XTRABACKUP_KEYRING_RETRY if is_xtrabackup and capture_output else 0
+        )
+
+        attempt = 0
+        while True:
+            # Run with check=False internally so we can decide on retry;
+            # the user's `check` is honored once the loop terminates.
             result = subprocess.run(
                 cmd,
                 capture_output=capture_output,
                 text=True,
-                check=check,
+                check=False,
             )
             if log_file and capture_output:
                 with open(log_file, "a", encoding="utf-8") as f:
@@ -624,7 +652,37 @@ class BackupTestHelper:
                         if result.stdout:
                             f.write("\n--- stderr ---\n")
                         f.write(result.stderr)
-            return result
+
+            if result.returncode == 0 or attempt >= max_retries:
+                break
+
+            combined = (result.stdout or "") + "\n" + (result.stderr or "")
+            cold_start = (
+                "MY-013714" in combined
+                and "Encryption can't find master key" in combined
+            )
+            if not cold_start:
+                break
+
+            attempt += 1
+            notice = (
+                f"=== xtrabackup retry {attempt}/{max_retries} "
+                f"(Fortanix KMIP cold-start detected; sleeping "
+                f"{XTRABACKUP_KEYRING_RETRY_DELAY}s before retry) ==="
+            )
+            print(notice)
+            if log_file:
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(f"\n{notice}\n")
+                    f.write(f"Command: {' '.join(cmd)}\n")
+                    f.write(f"Time: {datetime.now()}\n")
+            time.sleep(XTRABACKUP_KEYRING_RETRY_DELAY)
+
+        if check and result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=result.stdout, stderr=result.stderr
+            )
+        return result
 
     def start_server(self):
         """Start MySQL primary server (thin delegator to ``self.primary.start``)."""

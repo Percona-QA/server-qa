@@ -105,6 +105,7 @@ def test_helper(request):
     test_name = request.node.name if hasattr(request, "node") else None
     helper = BackupTestHelper(test_name=test_name)
     helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
+    helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
     helper.check_dependencies()
     yield helper
     if os.environ.get("DISABLE_CLEANUP") != "1":
@@ -120,30 +121,6 @@ def setup_logdir(test_helper):  # pylint: disable=redefined-outer-name
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-def _xb_is_80(xtrabackup_dir: str) -> bool:
-    """Return True when the installed xtrabackup is 8.0+."""
-    try:
-        result = subprocess.run(
-            [os.path.join(xtrabackup_dir, "xtrabackup"), "--version"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    out = (result.stdout or "") + (result.stderr or "")
-    return "8.0" in out or "9.0" in out or "9.1" in out
-
-
-def _server_is_84_plus(helper: BackupTestHelper) -> bool:
-    """Return True when the target mysqld is PS/MS 8.4 or newer.
-
-    ``keyring_file.so`` was removed in 8.4; encrypted tests must switch to
-    the ``component_keyring_file`` component on these versions.
-    """
-    return (helper.server_version_normalized or 0) >= 80400
-
 
 def _sysbench_load(
     helper: BackupTestHelper,
@@ -215,7 +192,7 @@ def _encrypt_params(helper: BackupTestHelper) -> Tuple[str, str, str, str]:
     """
     keyring = _keyring_path(helper)
     plugin_dir = os.path.join(helper.xtrabackup_dir, "..", "lib", "plugin")
-    if _server_is_84_plus(helper):
+    if (helper.server_version_normalized or 0) >= 80400:
         helper.create_keyring_manifest("component_keyring_file")
         cnf = helper.create_keyring_config(
             "keyring_file_component", keyring_path=keyring
@@ -393,7 +370,7 @@ def test_replication_gtid_multithreaded(test_helper):  # pylint: disable=redefin
 
 def test_replication_gtid_singlethreaded(test_helper):  # pylint: disable=redefined-outer-name
     """Replication with GTID options + single-threaded replica."""
-    workers = "1" if _xb_is_80(test_helper.xtrabackup_dir) else "0"
+    workers = "1" if test_helper.server_version_normalized >= 80000 else "0"
     opts = f"{GTID_OPTIONS} --slave-parallel-workers={workers}"
     test_helper.mysqld_options = opts
     test_helper.initialize_db()
@@ -424,10 +401,10 @@ def test_replication_gtid_encryption(test_helper):  # pylint: disable=redefined-
     longer ships).
     """
     backup_params, prepare_params, restore_params, keyring_src = _encrypt_params(test_helper)
-    use_component = _server_is_84_plus(test_helper)
+    use_component = test_helper.server_version_normalized >= 80400
     encrypt_opts = (
         _encrypt_options_8(keyring_src, use_component=use_component)
-        if _xb_is_80(test_helper.xtrabackup_dir)
+        if test_helper.server_version_normalized >= 80000
         else _encrypt_options_57(keyring_src)
     )
     opts = f"{GTID_OPTIONS} {encrypt_opts}"
@@ -451,10 +428,10 @@ def test_replication_nogtid_encryption(test_helper):  # pylint: disable=redefine
     longer ships).
     """
     backup_params, prepare_params, restore_params, keyring_src = _encrypt_params(test_helper)
-    use_component = _server_is_84_plus(test_helper)
+    use_component = test_helper.server_version_normalized >= 80400
     encrypt_opts = (
         _encrypt_options_8(keyring_src, use_component=use_component)
-        if _xb_is_80(test_helper.xtrabackup_dir)
+        if test_helper.server_version_normalized >= 80000
         else _encrypt_options_57(keyring_src)
     )
     opts = f"{NO_GTID_OPTIONS} {encrypt_opts}"

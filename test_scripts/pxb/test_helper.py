@@ -450,6 +450,8 @@ class BackupTestHelper:
         self.server_type: Optional[str] = None
         self.server_version: Optional[str] = None
         self.server_version_normalized: Optional[int] = None
+        self.xtrabackup_version: Optional[str] = None
+        self.xtrabackup_version_normalized: Optional[int] = None
         self.pstress_binary: Optional[str] = None
         self.backup_params: str = ""
         self.prepare_params: str = ""
@@ -545,6 +547,31 @@ class BackupTestHelper:
                 return ver, normalized
         except Exception as e:
             print(f"Error getting MySQL version: {e}")
+        return "0.0.0", 0
+
+    def get_xtrabackup_version(self) -> Tuple[str, int]:
+        """Get xtrabackup version and normalized version.
+
+        Parses the first version token in ``xtrabackup --version`` output, e.g.
+        ``xtrabackup version 8.4.0-1 based on MySQL server 8.4.0 ...`` ->
+        ``('8.4.0', 80400)``. The regex anchors on ``xtrabackup version`` so the
+        trailing ``based on MySQL server X.Y.Z`` segment cannot be picked up by
+        accident.
+        """
+        try:
+            result = subprocess.run(
+                [os.path.join(self.xtrabackup_dir, "xtrabackup"), "--version"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            out = (result.stdout or "") + (result.stderr or "")
+            m = re.search(r"xtrabackup\s+version\s+(\d+\.\d+\.\d+)", out, re.IGNORECASE)
+            if m:
+                ver = m.group(1)
+                return ver, self.normalize_version(ver)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"Error getting xtrabackup version: {exc}")
         return "0.0.0", 0
 
     def get_mysql_type(self) -> str:

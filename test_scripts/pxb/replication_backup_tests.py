@@ -57,11 +57,22 @@ GTID_OPTIONS = (
 NO_GTID_OPTIONS = "--log-bin=binlog --log-slave-updates"
 
 
-def _encrypt_options_8(keyring_path: str) -> str:
-    """Encryption-enabling mysqld options for MySQL/PS 8.0+."""
+def _encrypt_options_8(keyring_path: str, *, use_component: bool = False) -> str:
+    """Encryption-enabling mysqld options for MySQL/PS 8.0+.
+
+    When ``use_component`` is True (PS/MS 8.4+, where ``keyring_file.so`` no
+    longer ships), the legacy ``--early-plugin-load=keyring_file.so`` and
+    ``--keyring_file_data=`` tokens are omitted; the keyring is provided to
+    mysqld via the ``component_keyring_file`` component (loaded from
+    ``<basedir>/bin/mysqld.my`` and configured by
+    ``<basedir>/lib/plugin/component_keyring_file.cnf``).
+    """
+    plugin_prefix = (
+        "" if use_component
+        else f"--early-plugin-load=keyring_file.so --keyring_file_data={keyring_path} "
+    )
     return (
-        "--early-plugin-load=keyring_file.so "
-        f"--keyring_file_data={keyring_path} "
+        f"{plugin_prefix}"
         "--innodb-undo-log-encrypt --innodb-redo-log-encrypt "
         "--default-table-encryption=ON --log-slave-updates --gtid-mode=ON "
         "--enforce-gtid-consistency --binlog-format=row "
@@ -125,6 +136,15 @@ def _xb_is_80(xtrabackup_dir: str) -> bool:
     return "8.0" in out or "9.0" in out or "9.1" in out
 
 
+def _server_is_84_plus(helper: BackupTestHelper) -> bool:
+    """Return True when the target mysqld is PS/MS 8.4 or newer.
+
+    ``keyring_file.so`` was removed in 8.4; encrypted tests must switch to
+    the ``component_keyring_file`` component on these versions.
+    """
+    return (helper.server_version_normalized or 0) >= 80400
+
+
 def _sysbench_load(
     helper: BackupTestHelper,
     server: MySQLServer,
@@ -178,12 +198,39 @@ def _keyring_path(helper: BackupTestHelper) -> str:
     return os.path.join(helper.logdir, "keyring")
 
 
-def _encrypt_params(helper: BackupTestHelper) -> Tuple[str, str]:
-    """Return ``(backup_params, keyring_src)`` for encrypted tests."""
+def _encrypt_params(helper: BackupTestHelper) -> Tuple[str, str, str, str]:
+    """Return ``(backup_params, prepare_params, restore_params, keyring_src)``.
+
+    On PS/MS 8.0–8.3 (and 5.7) the legacy ``keyring_file`` plugin path is used,
+    and all three xtrabackup phases share the same
+    ``--keyring_file_data=... --xtrabackup-plugin-dir=...`` string.
+
+    On PS/MS 8.4+ the legacy plugin no longer ships, so the
+    ``component_keyring_file`` component is set up via
+    :meth:`BackupTestHelper.create_keyring_manifest` /
+    :meth:`BackupTestHelper.create_keyring_config`. ``--keyring_file_data=`` is
+    dropped from backup/restore (xtrabackup reads master keys via the running
+    server during ``--backup``; ``--copy-back`` is plain), and ``--prepare``
+    receives ``--component-keyring-config=<cnf>`` instead.
+    """
     keyring = _keyring_path(helper)
     plugin_dir = os.path.join(helper.xtrabackup_dir, "..", "lib", "plugin")
-    params = f"--keyring_file_data={keyring} --xtrabackup-plugin-dir={plugin_dir}"
-    return params, keyring
+    if _server_is_84_plus(helper):
+        helper.create_keyring_manifest("component_keyring_file")
+        cnf = helper.create_keyring_config(
+            "keyring_file_component", keyring_path=keyring
+        )
+        backup = f"--xtrabackup-plugin-dir={plugin_dir}"
+        prepare = f"{backup} --component-keyring-config={cnf}"
+        restore = backup
+    else:
+        backup = (
+            f"--keyring_file_data={keyring} "
+            f"--xtrabackup-plugin-dir={plugin_dir}"
+        )
+        prepare = backup
+        restore = backup
+    return backup, prepare, restore, keyring
 
 
 # ---------------------------------------------------------------------------
@@ -370,10 +417,16 @@ def test_replication_nogtid_singlethreaded(test_helper):  # pylint: disable=rede
 
 
 def test_replication_gtid_encryption(test_helper):  # pylint: disable=redefined-outer-name
-    """Replication with GTID options + keyring_file encryption."""
-    backup_params, keyring_src = _encrypt_params(test_helper)
+    """Replication with GTID options + keyring_file encryption.
+
+    Uses the legacy ``keyring_file`` plugin on 8.0-8.3 / 5.7 and the
+    ``component_keyring_file`` component on 8.4+ (where the legacy plugin no
+    longer ships).
+    """
+    backup_params, prepare_params, restore_params, keyring_src = _encrypt_params(test_helper)
+    use_component = _server_is_84_plus(test_helper)
     encrypt_opts = (
-        _encrypt_options_8(keyring_src)
+        _encrypt_options_8(keyring_src, use_component=use_component)
         if _xb_is_80(test_helper.xtrabackup_dir)
         else _encrypt_options_57(keyring_src)
     )
@@ -384,17 +437,23 @@ def test_replication_gtid_encryption(test_helper):  # pylint: disable=redefined-
         test_helper,
         mysqld_options=opts,
         backup_params=backup_params,
-        prepare_params=backup_params,
-        restore_params=backup_params,
+        prepare_params=prepare_params,
+        restore_params=restore_params,
         keyring_src=keyring_src,
     )
 
 
 def test_replication_nogtid_encryption(test_helper):  # pylint: disable=redefined-outer-name
-    """Replication without GTID options + keyring_file encryption."""
-    backup_params, keyring_src = _encrypt_params(test_helper)
+    """Replication without GTID options + keyring_file encryption.
+
+    Uses the legacy ``keyring_file`` plugin on 8.0-8.3 / 5.7 and the
+    ``component_keyring_file`` component on 8.4+ (where the legacy plugin no
+    longer ships).
+    """
+    backup_params, prepare_params, restore_params, keyring_src = _encrypt_params(test_helper)
+    use_component = _server_is_84_plus(test_helper)
     encrypt_opts = (
-        _encrypt_options_8(keyring_src)
+        _encrypt_options_8(keyring_src, use_component=use_component)
         if _xb_is_80(test_helper.xtrabackup_dir)
         else _encrypt_options_57(keyring_src)
     )
@@ -405,8 +464,8 @@ def test_replication_nogtid_encryption(test_helper):  # pylint: disable=redefine
         test_helper,
         mysqld_options=opts,
         backup_params=backup_params,
-        prepare_params=backup_params,
-        restore_params=backup_params,
+        prepare_params=prepare_params,
+        restore_params=restore_params,
         keyring_src=keyring_src,
     )
 

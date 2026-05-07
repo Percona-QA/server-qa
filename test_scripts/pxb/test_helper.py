@@ -2554,13 +2554,11 @@ class BackupTestHelper:
         if not self.server_type:
             self.get_mysql_type()
 
-        manifest_file = os.path.join(self.mysqldir, "bin/mysqld.my")
-        with open(manifest_file, "w", encoding="utf-8") as f:
-            f.write('{\n  "components": "file://component_keyring_file"\n}\n')
-
-        config_file = os.path.join(self.mysqldir, "lib/plugin/component_keyring_file.cnf")
-        with open(config_file, "w", encoding="utf-8") as f:
-            f.write(f'{{\n  "path": "{self.logdir}/keyring",\n  "read_only": false\n}}\n')
+        self.create_keyring_manifest("component_keyring_file")
+        config_file = self.create_keyring_config(
+            "keyring_file_component",
+            keyring_path=os.path.join(self.logdir, "keyring"),
+        )
 
         self.backup_params = f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
         if page_tracking:
@@ -2623,15 +2621,11 @@ class BackupTestHelper:
             detail = getattr(self.kmip_helper, "last_error", None) or "unknown"
             pytest.fail(f"Failed to start KMIP server for vault_type={vault_type}. {detail}")
 
-        manifest_file = os.path.join(self.mysqldir, "bin/mysqld.my")
-        with open(manifest_file, "w", encoding="utf-8") as f:
-            f.write('{\n  "components": "file://component_keyring_kmip"\n}\n')
-
-        cert_dir = self.kmip_helper.kmip_config["cert_dir"]
-        kmip_cnf_src = os.path.join(cert_dir, "component_keyring_kmip.cnf")
-        kmip_cnf_dst = os.path.join(self.mysqldir, "lib/plugin/component_keyring_kmip.cnf")
-        if os.path.isfile(kmip_cnf_src):
-            shutil.copy2(kmip_cnf_src, kmip_cnf_dst)
+        self.create_keyring_manifest("component_keyring_kmip")
+        kmip_cnf_dst = self.create_keyring_config(
+            "keyring_kmip_component",
+            cert_dir=self.kmip_helper.kmip_config["cert_dir"],
+        )
 
         self.backup_params = f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT}"
         self.prepare_params = f"{self.backup_params} --component-keyring-config={kmip_cnf_dst}"
@@ -2667,20 +2661,13 @@ class BackupTestHelper:
                 "KMS tests require KMS_KEYID, KMS_SECRET_KEY, KMS_AUTH_KEY and KMS_REGION environment variables"
             )
 
-        manifest_file = os.path.join(self.mysqldir, "bin/mysqld.my")
-        config_file = os.path.join(self.mysqldir, "lib/plugin/component_keyring_kms.cnf")
         keyring_path = os.path.join(self.logdir, "keyring_kms")
 
         try:
-            with open(manifest_file, "w", encoding="utf-8") as f:
-                f.write('{\n  "components": "file://component_keyring_kms"\n}\n')
-
-            with open(config_file, "w", encoding="utf-8") as f:
-                f.write(
-                    f'{{\n  "path": "{keyring_path}", "region": "{self.kms_region}", '
-                    f'"kms_key": "{self.kms_id}", "auth_key": "{self.kms_auth_key}", '
-                    f'"secret_access_key": "{self.kms_secret_key}", "read_only": false\n}}\n'
-                )
+            self.create_keyring_manifest("component_keyring_kms")
+            config_file = self.create_keyring_config(
+                "keyring_kms_component", keyring_path=keyring_path
+            )
 
             self.backup_params = (
                 f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
@@ -2717,10 +2704,7 @@ class BackupTestHelper:
             self.take_backup()
             self.check_tables()
         finally:
-            if os.path.exists(manifest_file):
-                os.remove(manifest_file)
-            if os.path.exists(config_file):
-                os.remove(config_file)
+            self.cleanup_keyring_configs()
 
     def run_crash_tests_pstress(self, storage_engine: str, page_tracking: bool) -> None:
         """
@@ -2845,23 +2829,16 @@ class BackupTestHelper:
         if self.server_type == "MS":
             load_options_base += " --no-column-compression --no-temp-tables"
         keyring_config_file: Optional[str] = None
-        manifest_file = os.path.join(self.mysqldir, "bin/mysqld.my")
 
         try:
             if vault_type is None:
                 # keyring_file
                 print("Testing keyring_file (encrypted crash)...")
-                if not os.path.exists(os.path.join(self.mysqldir, "lib/plugin")):
-                    os.makedirs(os.path.join(self.mysqldir, "lib/plugin"), exist_ok=True)
-                with open(manifest_file, "w", encoding="utf-8") as f:
-                    f.write('{\n  "components": "file://component_keyring_file"\n}\n')
-                keyring_config_file = os.path.join(
-                    self.mysqldir, "lib/plugin/component_keyring_file.cnf"
+                self.create_keyring_manifest("component_keyring_file")
+                keyring_config_file = self.create_keyring_config(
+                    "keyring_file_component",
+                    keyring_path=os.path.join(self.logdir, "keyring"),
                 )
-                with open(keyring_config_file, "w", encoding="utf-8") as f:
-                    f.write(
-                        f'{{\n  "path": "{self.logdir}/keyring",\n  "read_only": false\n}}\n'
-                    )
                 self.backup_params = (
                     f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin "
                     f"{CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
@@ -2917,15 +2894,11 @@ class BackupTestHelper:
                     pytest.fail(
                         f"Failed to start KMIP server for vault_type={vault_type}. {detail}"
                     )
-                with open(manifest_file, "w", encoding="utf-8") as f:
-                    f.write('{\n  "components": "file://component_keyring_kmip"\n}\n')
-                cert_dir = self.kmip_helper.kmip_config["cert_dir"]
-                kmip_cnf_src = os.path.join(cert_dir, "component_keyring_kmip.cnf")
-                keyring_config_file = os.path.join(
-                    self.mysqldir, "lib/plugin/component_keyring_kmip.cnf"
+                self.create_keyring_manifest("component_keyring_kmip")
+                keyring_config_file = self.create_keyring_config(
+                    "keyring_kmip_component",
+                    cert_dir=self.kmip_helper.kmip_config["cert_dir"],
                 )
-                if os.path.isfile(kmip_cnf_src):
-                    shutil.copy2(kmip_cnf_src, keyring_config_file)
                 self.backup_params = (
                     f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin "
                     f"{CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
@@ -2967,23 +2940,7 @@ class BackupTestHelper:
 
             self._run_crash_flow(load_options_base, log_date)
         finally:
-            # Remove keyring config so later tests can run without encryption
-            if os.path.isfile(manifest_file):
-                try:
-                    os.remove(manifest_file)
-                except OSError:
-                    pass
-            if keyring_config_file and os.path.isfile(keyring_config_file):
-                try:
-                    os.remove(keyring_config_file)
-                except OSError:
-                    pass
-            kmip_cnf = os.path.join(self.mysqldir, "lib/plugin/component_keyring_kmip.cnf")
-            if os.path.isfile(kmip_cnf):
-                try:
-                    os.remove(kmip_cnf)
-                except OSError:
-                    pass
+            self.cleanup_keyring_configs()
 
     def count_rows(self, database: str = "test") -> str:
         """Count rows and checksums of all tables in a database."""
@@ -3129,20 +3086,10 @@ class BackupTestHelper:
         except OSError:
             pass
 
-        if os.path.exists(os.path.join(self.mysqldir, "bin/mysqld.my")):
-            print("=>Found older manifest file in mysql bin directory")
-            os.remove(os.path.join(self.mysqldir, "bin/mysqld.my"))
-            print("..Deleted")
-
-        if os.path.exists(os.path.join(self.mysqldir, "lib/plugin/component_keyring_file.cnf")):
-            print("=>Found older keyring_component config file in lib/plugin directory")
-            os.remove(os.path.join(self.mysqldir, "lib/plugin/component_keyring_file.cnf"))
-            print("..Deleted")
-
-        if os.path.exists(os.path.join(self.mysqldir, "lib/plugin/component_keyring_kms.cnf")):
-            print("=>Found older keyring_kms config file in lib/plugin directory")
-            os.remove(os.path.join(self.mysqldir, "lib/plugin/component_keyring_kms.cnf"))
-            print("..Deleted")
+        # Sweep any leftover component-keyring manifest + config files. Covers
+        # all four cnf variants (file/vault/kmip/kms), strictly more thorough
+        # than the previous file/kms-only inline sweep here.
+        self.cleanup_keyring_configs()
 
         if os.path.exists(os.path.join(self.logdir, "keyfile")):
             print("=>Found older keyring_component keyfile in lib/plugin directory")

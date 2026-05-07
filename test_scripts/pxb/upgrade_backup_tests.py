@@ -71,6 +71,7 @@ def test_helper(request):
     # All upgrade tests use sysbench-style data load (mirrors the bash script).
     helper.load_tool = "sysbench"
     helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
+    helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
     helper.check_dependencies()
     yield helper
     if os.environ.get("DISABLE_CLEANUP") != "1":
@@ -280,19 +281,39 @@ def _prepare_restore_backup(
 
 
 def _build_encrypt_options(helper: BackupTestHelper) -> str:
-    """Return mysqld options for encrypted upgrade tests, matching the bash logic.
+    """Return mysqld options for encrypted upgrade tests.
 
-    Branch selection mirrors ``test_upgrade_backup_encrypt`` in the bash
-    script: presence of "8.0" and "MySQL Community Server" in the version
-    string drives MS 8.0 vs PS 8.0 vs the 5.7 fallback path.
+    Branch selection is version-aware via ``helper.server_version_normalized``:
+
+    - ``>= 80400``: PS/MS 8.4+ uses the ``component_keyring_file`` component
+      (loaded via ``<basedir>/bin/mysqld.my`` + ``component_keyring_file.cnf``
+      written by :meth:`BackupTestHelper.create_keyring_manifest` /
+      :meth:`BackupTestHelper.create_keyring_config`). The legacy
+      ``--early-plugin-load=keyring_file.so --keyring_file_data=`` tokens are
+      omitted because ``keyring_file.so`` no longer ships in 8.4+.
+    - ``>= 80000``: PS/MS 8.0-8.3 keeps the legacy plugin path, with separate
+      MS vs PS option sets.
+    - ``< 80000``: PS/MS 5.7 fallback, also legacy plugin path.
     """
     keyring = os.path.join(helper.mysqldir, "keyring")
-    version_str = helper.server_version or ""
-
-    is_8x = "8.0" in version_str
+    version_normalized = helper.server_version_normalized or 0
     is_ms = helper.server_type == "MS"
 
-    if is_8x and is_ms:
+    if version_normalized >= 80400:
+        helper.create_keyring_manifest("component_keyring_file")
+        helper.create_keyring_config("keyring_file_component", keyring_path=keyring)
+        return (
+            "--innodb-undo-log-encrypt --innodb-redo-log-encrypt "
+            "--default-table-encryption=ON "
+            "--innodb_encrypt_online_alter_logs=ON "
+            "--innodb_temp_tablespace_encrypt=ON --log-slave-updates "
+            "--gtid-mode=ON --enforce-gtid-consistency --binlog-format=row "
+            "--master_verify_checksum=ON --binlog_checksum=CRC32 "
+            "--encrypt-tmp-files "
+            "--binlog-rotate-encryption-master-key-at-startup "
+            "--table-encryption-privilege-check=ON"
+        )
+    if version_normalized >= 80000 and is_ms:
         # MS 8.0
         return (
             "--early-plugin-load=keyring_file.so "
@@ -304,7 +325,7 @@ def _build_encrypt_options(helper: BackupTestHelper) -> str:
             "--binlog-rotate-encryption-master-key-at-startup "
             "--table-encryption-privilege-check=ON"
         )
-    if is_8x:
+    if version_normalized >= 80000:
         # PS 8.0
         return (
             "--early-plugin-load=keyring_file.so "
@@ -319,7 +340,7 @@ def _build_encrypt_options(helper: BackupTestHelper) -> str:
             "--binlog-rotate-encryption-master-key-at-startup "
             "--table-encryption-privilege-check=ON"
         )
-    # PS/MS 5.7 fallback (also reached by 8.4+; matches the bash logic)
+    # PS/MS 5.7 fallback
     return (
         "--log-bin=binlog --early-plugin-load=keyring_file.so "
         f"--keyring_file_data={keyring} --log-slave-updates --gtid-mode=ON "
@@ -459,18 +480,34 @@ def test_upgrade_backup_encrypt(test_helper):  # pylint: disable=redefined-outer
 
     server_options = _build_encrypt_options(helper)
     keyring = os.path.join(helper.mysqldir, "keyring")
-    prev_plugin_params = (
-        f"--keyring_file_data={keyring} "
-        f"--xtrabackup-plugin-dir={PREVIOUS_XTRABACKUP_DIR}/../lib/plugin"
-    )
-    curr_plugin_params = (
-        f"--keyring_file_data={keyring} "
-        f"--xtrabackup-plugin-dir={helper.xtrabackup_dir}/../lib/plugin"
-    )
+    use_component = (helper.server_version_normalized or 0) >= 80400
+    prev_plugin_dir = f"{PREVIOUS_XTRABACKUP_DIR}/../lib/plugin"
+    curr_plugin_dir = f"{helper.xtrabackup_dir}/../lib/plugin"
+
+    if use_component:
+        # 8.4+: keyring_file plugin is gone. mysqld loads keyring via
+        # component_keyring_file (set up by _build_encrypt_options above);
+        # PXB --backup gets master keys from the running server over SQL, so
+        # neither PXB binary needs --keyring_file_data=. Only --prepare
+        # (always run by the current PXB here) needs --component-keyring-config.
+        cnf = os.path.join(helper.mysqldir, "lib/plugin/component_keyring_file.cnf")
+        prev_backup_params = f"--xtrabackup-plugin-dir={prev_plugin_dir}"
+        curr_backup_params = f"--xtrabackup-plugin-dir={curr_plugin_dir}"
+        curr_prepare_params = f"{curr_backup_params} --component-keyring-config={cnf}"
+        curr_restore_params = curr_backup_params
+    else:
+        prev_backup_params = (
+            f"--keyring_file_data={keyring} --xtrabackup-plugin-dir={prev_plugin_dir}"
+        )
+        curr_backup_params = (
+            f"--keyring_file_data={keyring} --xtrabackup-plugin-dir={curr_plugin_dir}"
+        )
+        curr_prepare_params = curr_backup_params
+        curr_restore_params = curr_backup_params
 
     helper.mysqld_options = server_options
-    helper.prepare_params = curr_plugin_params
-    helper.restore_params = curr_plugin_params
+    helper.prepare_params = curr_prepare_params
+    helper.restore_params = curr_restore_params
 
     print("\n==> Full backup and restore with encryption")
     print("Test: Full backup using previous xtrabackup version and "
@@ -483,14 +520,14 @@ def test_upgrade_backup_encrypt(test_helper):  # pylint: disable=redefined-outer
 
     log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
     _reset_backup_dir(helper)
-    helper.backup_params = prev_plugin_params
+    helper.backup_params = prev_backup_params
     with _use_xtrabackup(helper, PREVIOUS_XTRABACKUP_DIR):
         helper.take_full_backup(log_date)
 
     _prepare_restore_backup(
         helper,
-        prepare_params=curr_plugin_params,
-        restore_params=curr_plugin_params,
+        prepare_params=curr_prepare_params,
+        restore_params=curr_restore_params,
         mysqld_options=server_options,
         backup_type="full",
         log_date=log_date,
@@ -507,7 +544,7 @@ def test_upgrade_backup_encrypt(test_helper):  # pylint: disable=redefined-outer
 
     log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
     _reset_backup_dir(helper)
-    helper.backup_params = prev_plugin_params
+    helper.backup_params = prev_backup_params
     with _use_xtrabackup(helper, PREVIOUS_XTRABACKUP_DIR):
         helper.take_full_backup(log_date)
         helper.take_incremental_backup(
@@ -516,8 +553,8 @@ def test_upgrade_backup_encrypt(test_helper):  # pylint: disable=redefined-outer
 
     _prepare_restore_backup(
         helper,
-        prepare_params=curr_plugin_params,
-        restore_params=curr_plugin_params,
+        prepare_params=curr_prepare_params,
+        restore_params=curr_restore_params,
         mysqld_options=server_options,
         backup_type="incremental",
         log_date=log_date,
@@ -533,18 +570,18 @@ def test_upgrade_backup_encrypt(test_helper):  # pylint: disable=redefined-outer
 
     log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
     _reset_backup_dir(helper)
-    helper.backup_params = prev_plugin_params
+    helper.backup_params = prev_backup_params
     with _use_xtrabackup(helper, PREVIOUS_XTRABACKUP_DIR):
         helper.take_full_backup(log_date)
-    helper.backup_params = curr_plugin_params
+    helper.backup_params = curr_backup_params
     helper.take_incremental_backup(
         1, os.path.join(helper.backup_dir, "full"), log_date
     )
 
     _prepare_restore_backup(
         helper,
-        prepare_params=curr_plugin_params,
-        restore_params=curr_plugin_params,
+        prepare_params=curr_prepare_params,
+        restore_params=curr_restore_params,
         mysqld_options=server_options,
         backup_type="incremental",
         log_date=log_date,

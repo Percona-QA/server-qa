@@ -26,7 +26,9 @@ except ImportError:
 
 # Set script variables
 HOME = os.path.expanduser("~")
-MYSQL_START_TIMEOUT = 60
+# Override via MYSQL_START_TIMEOUT env var; default raised to 180 to absorb the
+# ~60s Fortanix KMIP cold-start that the keyring component pays on a brand-new app.
+MYSQL_START_TIMEOUT = int(os.environ.get("MYSQL_START_TIMEOUT", "180"))
 TEST_BASE_DIR = os.environ.get("TEST_BASE_DIR", os.path.join(HOME, "inc_backup_load_tests"))
 XTRABACKUP_DIR = os.environ.get("XTRABACKUP_DIR", os.path.join(HOME, "pxb-9.1/bld_9.1/install/bin"))
 MYSQLDIR = os.environ.get("MYSQLDIR", os.path.join(HOME, "mysql-9.1/bld_9.1/install"))

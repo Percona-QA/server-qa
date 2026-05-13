@@ -439,11 +439,15 @@ class KMIPHelper:
         return cleaned[:64]
 
     def _resolve_fortanix_app_name(self) -> str:
-        """Pick a unique-per-run Fortanix app name so parallel jobs don't clobber each other.
+        """Pick a Fortanix app name that's safe for parallel distro runs but stable across builds.
 
         Resolution order:
           1. FORTANIX_APP_NAME env var (explicit override).
-          2. CI fingerprint: JOB_NAME + BUILD_NUMBER + distro + arch (stable per build).
+          2. CI fingerprint: JOB_NAME + distro + arch (stable across builds, unique per distro/arch).
+             BUILD_NUMBER is intentionally NOT included so the same app is reused across builds and
+             setup_app()'s delete-then-create path keeps the account at ~1 app per distro/arch
+             instead of accumulating one new app per build (which can trip Fortanix subscription
+             quotas, e.g. HTTP 402 from POST /sys/v1/apps).
           3. Local fallback: hostname + user + short uuid.
         """
         explicit = os.environ.get("FORTANIX_APP_NAME", "").strip()
@@ -451,7 +455,6 @@ class KMIPHelper:
             return self._sanitize_app_name(explicit)
 
         job = os.environ.get("JOB_NAME", "").replace("/", "_")
-        build = os.environ.get("BUILD_NUMBER", "")
         distro = ""
         if hasattr(platform, "freedesktop_os_release"):
             try:
@@ -461,8 +464,8 @@ class KMIPHelper:
         distro = distro or platform.system().lower()
         arch = platform.machine() or "x"
 
-        if job and build:
-            candidate = f"TestingMySQL-{job}-{build}-{distro}-{arch}"
+        if job:
+            candidate = f"TestingMySQL-{job}-{distro}-{arch}"
         else:
             host = (platform.node().split(".")[0] or "host")
             user = os.environ.get("USER") or os.environ.get("USERNAME") or "user"

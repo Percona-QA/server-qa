@@ -143,12 +143,29 @@ def test_copy_data_across_engine(test_helper):
     if test_helper.rocksdb != "enabled":
         pytest.skip("RocksDB disabled")
     databases = _init_for_ddl(test_helper)
+
+    # Wait for the background sysbench load to finish so test.sbtest1 is
+    # quiesced before we copy from it; otherwise CHECKSUM TABLE on the source
+    # and the copy would observe different snapshots.
+    while test_helper.is_load_running():
+        time.sleep(1)
+
+    # Build sbtestcopy with the same schema as the InnoDB source and only
+    # switch the storage engine to ROCKSDB. This guarantees CHECKSUM TABLE
+    # is comparable across engines (column types, indexes, charset, etc. are
+    # identical; only the engine differs).
+    test_helper._run_sql("DROP TABLE IF EXISTS test_rocksdb.sbtestcopy;")
+    test_helper._run_sql("CREATE TABLE test_rocksdb.sbtestcopy LIKE test.sbtest1;")
+    test_helper._run_sql("ALTER TABLE test_rocksdb.sbtestcopy ENGINE=ROCKSDB;")
+    test_helper._run_sql("INSERT INTO test_rocksdb.sbtestcopy SELECT * FROM test.sbtest1;")
+
+    test_helper.take_backup(single_incremental=True, databases=databases)
+
+    # Both checksums are taken after the backup+restore cycle so they reflect
+    # the same temporal snapshot (the restored datadir).
     innodb_cksum = test_helper.run_mysql_query(
         "CHECKSUM TABLE test.sbtest1;", capture=True
     )
-    test_helper._run_sql("CREATE TABLE test_rocksdb.sbtestcopy LIKE test_rocksdb.sbtest1;")
-    test_helper._run_sql("INSERT INTO test_rocksdb.sbtestcopy SELECT * FROM test.sbtest1;")
-    test_helper.take_backup(single_incremental=True, databases=databases)
     myrocks_cksum = test_helper.run_mysql_query(
         "CHECKSUM TABLE test_rocksdb.sbtestcopy;", capture=True
     )

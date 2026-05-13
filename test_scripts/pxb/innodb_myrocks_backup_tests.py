@@ -144,13 +144,13 @@ def test_copy_data_across_engine(test_helper):
         pytest.skip("RocksDB disabled")
     databases = _init_for_ddl(test_helper)
     innodb_cksum = test_helper.run_mysql_query(
-        "SELECT CHECKSUM TABLE test.sbtest1;", capture=True
+        "CHECKSUM TABLE test.sbtest1;", capture=True
     )
     test_helper._run_sql("CREATE TABLE test_rocksdb.sbtestcopy LIKE test_rocksdb.sbtest1;")
     test_helper._run_sql("INSERT INTO test_rocksdb.sbtestcopy SELECT * FROM test.sbtest1;")
     test_helper.take_backup(single_incremental=True, databases=databases)
     myrocks_cksum = test_helper.run_mysql_query(
-        "SELECT CHECKSUM TABLE test_rocksdb.sbtestcopy;", capture=True
+        "CHECKSUM TABLE test_rocksdb.sbtestcopy;", capture=True
     )
     innodb_val = innodb_cksum.strip().split()[-1] if innodb_cksum else ""
     myrocks_val = myrocks_cksum.strip().split()[-1] if myrocks_cksum else ""

@@ -318,7 +318,7 @@ export S3_ENDPOINT=https://s3.us-west-2.amazonaws.com
 export INSTALL_TYPE=tarball     # or "package" (default: tarball)
 ```
 
-**For cloud backup tests** (`test_cloud_inc_backup`), set the `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`, and `S3_ENDPOINT` environment variables. The test passes them to `xbcloud` as `--s3-*` options together with fixed defaults (`--storage=s3 --s3-bucket-lookup=auto --s3-api-version=4 --parallel=10 --verbose`). If any of these env vars is unset, the test is skipped.
+**For cloud backup tests** (`test_cloud_inc_backup`), set the `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`, and `S3_ENDPOINT` environment variables. The test passes them to `xbcloud` as `--s3-*` options together with fixed defaults (`--storage=s3 --s3-bucket-lookup=auto --s3-api-version=4 --parallel=10 --verbose`). If any of these env vars is unset, the test fails immediately with a message listing the missing variables.
 
 **For encryption tests**, the following are needed depending on the keyring type:
 

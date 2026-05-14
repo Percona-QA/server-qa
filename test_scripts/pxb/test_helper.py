@@ -1894,8 +1894,9 @@ class BackupTestHelper:
         when it is argv[1]; placing it after the subcommand silently falls back
         to the Swift storage backend.
 
-        If any required env var is missing the test is skipped with a message
-        naming the missing variables.
+        If any required env var is missing the test fails with a message
+        naming the missing variables, so it is obvious that the test was
+        invoked without the configuration it needs.
         """
         required = {
             "S3_BUCKET": self.s3_bucket,
@@ -1906,7 +1907,7 @@ class BackupTestHelper:
         }
         missing = [name for name, value in required.items() if not value]
         if missing:
-            pytest.skip(
+            pytest.fail(
                 "Cloud backup test requires the following environment "
                 f"variables to be set: {', '.join(missing)}"
             )

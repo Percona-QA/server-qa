@@ -1261,6 +1261,7 @@ class BackupTestHelper:
                 result = subprocess.run(get_cmd, shell=True, check=False)
                 if result.returncode != 0:
                     pytest.fail(f"ERR: Full cloud backup download failed. Please check the log at: {log_file}")
+                self._decrypt_decompress(full_target, self.backup_params)
                 del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {cloud_name} 2>>{log_file}"
                 subprocess.run(del_cmd, shell=True, check=False)
             else:
@@ -1328,6 +1329,7 @@ class BackupTestHelper:
                     result = subprocess.run(get_cmd, shell=True, check=False)
                     if result.returncode != 0:
                         pytest.fail(f"ERR: Inc cloud backup download failed. Please check the log at: {log_file}")
+                    self._decrypt_decompress(inc_target, self.backup_params)
                     del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {cloud_name} 2>>{log_file}"
                     subprocess.run(del_cmd, shell=True, check=False)
                 else:
@@ -1401,6 +1403,7 @@ class BackupTestHelper:
                         result = subprocess.run(get_cmd, shell=True, check=False)
                         if result.returncode != 0:
                             pytest.fail(f"ERR: Inc{inc_num} cloud download failed. Log: {log_file}")
+                        self._decrypt_decompress(inc_target, self.backup_params)
                         del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {cloud_name} 2>>{log_file}"
                         subprocess.run(del_cmd, shell=True, check=False)
                     else:
@@ -1622,6 +1625,48 @@ class BackupTestHelper:
             else:
                 print("Binlog applying skipped, ignore differences between actual data and restored data")
 
+    def _decrypt_decompress(self, target_dir: str, backup_params: str):
+        """Run decrypt / decompress passes if backup_params requested them and
+        sanity-check that the resulting directory looks like a valid backup.
+
+        Used by both ``process_backup`` (after xbstream/tar extraction) and by
+        the cloud branches of ``take_backup`` (where ``xbcloud get | xbstream
+        -x`` already laid the encrypted/compressed files on disk and only the
+        decrypt/decompress passes remain).
+
+        The xtrabackup_info presence check at the end converts silent failures
+        (e.g. an upload pipe that returned 0 but only transmitted part of the
+        stream) into an immediate, descriptive test failure instead of letting
+        the test crash later during ``--prepare``.
+        """
+        if "--encrypt=" in backup_params:
+            print(f"Decrypting backup files in {target_dir}")
+            xb_cmd = self._xtrabackup_cmd_prefix() + [
+                "--decrypt=AES256", f"--encrypt-key={self.encrypt_key}", f"--target-dir={target_dir}",
+            ]
+            subprocess.run(xb_cmd, capture_output=True, check=True)
+            for enc_file in glob.glob(os.path.join(target_dir, "**/*.xbcrypt"), recursive=True):
+                os.remove(enc_file)
+
+        if "--compress" in backup_params:
+            print(f"Decompressing backup files in {target_dir}")
+            xb_cmd = self._xtrabackup_cmd_prefix() + ["--decompress", f"--target-dir={target_dir}"]
+            subprocess.run(xb_cmd, capture_output=True, check=True)
+            for qp_file in glob.glob(os.path.join(target_dir, "**/*.qp"), recursive=True):
+                os.remove(qp_file)
+            for lz4_file in glob.glob(os.path.join(target_dir, "**/*.lz4"), recursive=True):
+                os.remove(lz4_file)
+            for zst_file in glob.glob(os.path.join(target_dir, "**/*.zst"), recursive=True):
+                os.remove(zst_file)
+
+        info_path = os.path.join(target_dir, "xtrabackup_info")
+        if not os.path.isfile(info_path):
+            pytest.fail(
+                f"ERR: Post-extract sanity check failed: {info_path} is missing. "
+                "The backup directory was not populated correctly (possible causes: "
+                "truncated upload, failed decrypt, or failed decompress)."
+            )
+
     def process_backup(self, backup_type: str, backup_params: str, target_dir: str):
         """Post-backup processing: extract xbstream/tar, decrypt, decompress."""
         if backup_type == "stream":
@@ -1643,25 +1688,7 @@ class BackupTestHelper:
                 subprocess.run(["tar", "-xvf", tar_file, "-C", target_dir], capture_output=True, check=True)
                 os.remove(tar_file)
 
-        if "--encrypt=" in backup_params:
-            print("Decrypting backup files")
-            xb_cmd = self._xtrabackup_cmd_prefix() + [
-                "--decrypt=AES256", f"--encrypt-key={self.encrypt_key}", f"--target-dir={target_dir}",
-            ]
-            subprocess.run(xb_cmd, capture_output=True, check=True)
-            for enc_file in glob.glob(os.path.join(target_dir, "**/*.xbcrypt"), recursive=True):
-                os.remove(enc_file)
-
-        if "--compress" in backup_params:
-            print("Decompressing backup files")
-            xb_cmd = self._xtrabackup_cmd_prefix() + ["--decompress", f"--target-dir={target_dir}"]
-            subprocess.run(xb_cmd, capture_output=True, check=True)
-            for qp_file in glob.glob(os.path.join(target_dir, "**/*.qp"), recursive=True):
-                os.remove(qp_file)
-            for lz4_file in glob.glob(os.path.join(target_dir, "**/*.lz4"), recursive=True):
-                os.remove(lz4_file)
-            for zst_file in glob.glob(os.path.join(target_dir, "**/*.zst"), recursive=True):
-                os.remove(zst_file)
+        self._decrypt_decompress(target_dir, backup_params)
 
     def collect_table_data(self, databases: List[str]) -> Dict[str, Dict[str, Tuple[str, str]]]:
         """Collect per-table COUNT(*) and CHECKSUM for verification.

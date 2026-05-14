@@ -1186,10 +1186,17 @@ class BackupTestHelper:
             self.run_command(cmd, check=False, background=True, log_file=log_file)
 
     def is_load_running(self) -> bool:
-        """Check if load tool is running."""
-        for proc in psutil.process_iter(["pid", "name"]):
+        """Check if load tool is running (ignoring zombie/defunct entries).
+
+        Background loads launched via run_command(background=True) are not
+        waited on, so when they self-terminate they linger as zombies under
+        the pytest parent. psutil still reports their preserved /proc/<pid>/comm
+        name, which would make a naive name-only check spin forever.
+        """
+        for proc in psutil.process_iter(["pid", "name", "status"]):
             try:
-                if self.load_tool in proc.info["name"].lower():
+                if (proc.info["status"] != psutil.STATUS_ZOMBIE
+                        and self.load_tool in proc.info["name"].lower()):
                     return True
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass

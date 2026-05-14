@@ -68,7 +68,14 @@ THREADS = 5
 LOCK_DDL = "on"  # lock_ddl accepted values (on, reduced)
 
 # Additional configuration from environment
-CLOUD_CONFIG = os.environ.get("CLOUD_CONFIG", os.path.join(HOME, "aws.cnf"))
+# S3/xbcloud configuration (used by cloud backup tests).
+# Unset variables default to "" so tests can skip cleanly with a clear message
+# instead of failing with an obscure xbcloud error.
+S3_BUCKET = os.environ.get("S3_BUCKET", "")
+S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
+S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
+S3_REGION = os.environ.get("S3_REGION", "")
+S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
 INSTALL_TYPE = os.environ.get("INSTALL_TYPE", "tarball")  # tarball or package
 ROCKSDB = os.environ.get("ROCKSDB", "disabled")  # enabled or disabled
 BACKUP_USER = os.environ.get("BACKUP_USER", "root")
@@ -391,7 +398,11 @@ class BackupTestHelper:
         self.lock_ddl = lock_ddl
         self.mysql_start_timeout = MYSQL_START_TIMEOUT
 
-        self.cloud_config = CLOUD_CONFIG
+        self.s3_bucket = S3_BUCKET
+        self.s3_access_key = S3_ACCESS_KEY
+        self.s3_secret_key = S3_SECRET_KEY
+        self.s3_region = S3_REGION
+        self.s3_endpoint = S3_ENDPOINT
         self.install_type = INSTALL_TYPE
         self.rocksdb = ROCKSDB
         self.backup_user = BACKUP_USER
@@ -1867,6 +1878,53 @@ class BackupTestHelper:
             path = os.path.join(plugin_dir, cnf)
             if os.path.isfile(path):
                 os.remove(path)
+
+    def build_cloud_params(self, verbose: bool = True) -> str:
+        """Assemble the xbcloud option string from S3 env vars.
+
+        Reads S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_REGION and S3_ENDPOINT
+        from the instance attributes populated at construction time, and returns
+        a single space-separated string ready to be injected after the xbcloud
+        subcommand (put/get/delete). Fixed defaults (--storage=s3,
+        --s3-bucket-lookup=auto, --s3-api-version=4, --parallel=10) are always
+        included.
+
+        These are inline CLI flags rather than a --defaults-file because
+        xbcloud's underlying MySQL load_defaults() only honors --defaults-file
+        when it is argv[1]; placing it after the subcommand silently falls back
+        to the Swift storage backend.
+
+        If any required env var is missing the test is skipped with a message
+        naming the missing variables.
+        """
+        required = {
+            "S3_BUCKET": self.s3_bucket,
+            "S3_ACCESS_KEY": self.s3_access_key,
+            "S3_SECRET_KEY": self.s3_secret_key,
+            "S3_REGION": self.s3_region,
+            "S3_ENDPOINT": self.s3_endpoint,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            pytest.skip(
+                "Cloud backup test requires the following environment "
+                f"variables to be set: {', '.join(missing)}"
+            )
+
+        params = [
+            "--storage=s3",
+            f"--s3-endpoint={self.s3_endpoint}",
+            f"--s3-region={self.s3_region}",
+            f"--s3-bucket={self.s3_bucket}",
+            f"--s3-access-key={self.s3_access_key}",
+            f"--s3-secret-key={self.s3_secret_key}",
+            "--s3-bucket-lookup=auto",
+            "--s3-api-version=4",
+            "--parallel=10",
+        ]
+        if verbose:
+            params.append("--verbose")
+        return " ".join(params)
 
     def xbcloud_put(self, cloud_params: str, name: str, stream_file: str):
         """Upload backup stream to cloud."""

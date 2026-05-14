@@ -784,7 +784,7 @@ def _run_encryption_2_4_tests(test_helper, encrypt_type):
 
 def test_cloud_inc_backup(test_helper):
     """Cloud incremental backup tests."""
-    cloud_params = f"--defaults-file={test_helper.cloud_config} --verbose"
+    cloud_params = test_helper.build_cloud_params()
 
     test_helper.mysqld_options = _default_mysqld_options()
     test_helper.backup_params = f"--parallel=10 {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
@@ -965,7 +965,12 @@ if __name__ == "__main__":
         print("   export QASCRIPTS=$HOME/server-qa")
         print("   export LOAD_TOOL=sysbench")
         print("   export ROCKSDB=enabled  # or disabled")
-        print("   export CLOUD_CONFIG=$HOME/aws.cnf")
+        print("   # Cloud (S3) backup test variables (required for test_cloud_inc_backup):")
+        print("   export S3_BUCKET=<your-bucket>")
+        print("   export S3_ACCESS_KEY=<your-access-key-id>")
+        print("   export S3_SECRET_KEY=<your-secret-access-key>")
+        print("   export S3_REGION=us-west-2")
+        print("   export S3_ENDPOINT=https://s3.us-west-2.amazonaws.com")
         print("   export INSTALL_TYPE=tarball  # or package")
         print("2. Run the script as: pytest innodb_myrocks_backup_tests.py -k <test_name> -s -v")
         print("   Or: python innodb_myrocks_backup_tests.py <Test Suites>")

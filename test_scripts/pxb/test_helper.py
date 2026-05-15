@@ -2851,7 +2851,7 @@ class BackupTestHelper:
             self.backup_params = f"{CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
             self.prepare_params = f"{CORE_FILE_OPT}"
             self.restore_params = ""
-            load_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --no-encryption --engine=rocksdb"
+            load_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --no-encryption --engine=rocksdb --no-fk-tables"
         else:
             self.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
             self.backup_params = f"{CORE_FILE_OPT} --lock-ddl={self.lock_ddl}"
@@ -2885,17 +2885,22 @@ class BackupTestHelper:
                 load_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --no-encryption --undo-tbs-sql 0"
 
         if storage_engine == "rocksdb":
-            subprocess.run(
+            result = subprocess.run(
                 [
                     os.path.join(self.mysqldir, "bin/ps-admin"),
                     "--enable-rocksdb",
                     "-uroot",
                     f"-S{self.socket_path}",
                 ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
                 check=False,
             )
+            if result.returncode != 0:
+                pytest.fail(
+                    f"ps-admin --enable-rocksdb failed (rc={result.returncode})\n"
+                    f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+                )
             subprocess.run(
                 [
                     os.path.join(self.mysqldir, "bin/mysql"),

@@ -109,14 +109,20 @@ def test_rocksdb_backup(test_helper):
     test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
 
-    tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds {test_helper.seconds} --no-encryption --engine=rocksdb"
+    tool_options = f"--tables {test_helper.num_tables} --records {test_helper.table_size} --threads {test_helper.threads} --seconds {test_helper.seconds} --no-encryption --engine=rocksdb --no-fk-tables"
 
     test_helper.initialize_db()
-    subprocess.run(
+    result = subprocess.run(
         [os.path.join(test_helper.mysqldir, "bin/ps-admin"), "--enable-rocksdb", "-uroot", f"-S{test_helper.socket_path}"],
         capture_output=True,
+        text=True,
         check=False,
     )
+    if result.returncode != 0:
+        pytest.fail(
+            f"ps-admin --enable-rocksdb failed (rc={result.returncode})\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
     subprocess.run(
         [os.path.join(test_helper.mysqldir, "bin/mysql"), "-uroot", f"-S{test_helper.socket_path}", "-e", "CREATE DATABASE IF NOT EXISTS test"],
         check=False,

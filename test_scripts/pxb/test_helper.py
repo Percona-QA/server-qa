@@ -3256,12 +3256,14 @@ class BackupTestHelper:
             except Exception as exc:  # noqa: BLE001
                 print(f"  Ignoring Fortanix app cleanup error: {exc}")
 
-        # Stop vault server and cleanup vault directory
+        # Stop vault server and cleanup vault directory.
+        # vault_test_setup.sh creates everything under $HOME/vault as the
+        # current user (pxbtest), so a plain rmtree is sufficient and avoids
+        # hanging on `sudo` when the user has no NOPASSWD entry (notably on
+        # Debian where sudo, without `requiretty`, blocks on /dev/tty instead
+        # of failing fast like on RHEL).
         self.stop_vault_server()
         vault_dir = os.path.join(HOME, "vault")
         if os.path.exists(vault_dir) and HOME:
             print("Cleaning up vault directory...")
-            try:
-                subprocess.run(["sudo", "rm", "-rf", vault_dir], check=False)
-            except Exception:
-                pass
+            shutil.rmtree(vault_dir, ignore_errors=True)

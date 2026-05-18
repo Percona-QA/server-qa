@@ -1913,7 +1913,7 @@ class BackupTestHelper:
         from the instance attributes populated at construction time, and returns
         a single space-separated string ready to be injected after the xbcloud
         subcommand (put/get/delete). Fixed defaults (--storage=s3,
-        --s3-bucket-lookup=auto, --s3-api-version=4, --parallel=10) are always
+        --s3-bucket-lookup=auto, --s3-api-version=4, --parallel=4) are always
         included.
 
         These are inline CLI flags rather than a --defaults-file because
@@ -1948,7 +1948,7 @@ class BackupTestHelper:
             f"--s3-secret-key={self.s3_secret_key}",
             "--s3-bucket-lookup=auto",
             "--s3-api-version=4",
-            "--parallel=10",
+            "--parallel=4",
         ]
         if verbose:
             params.append("--verbose")

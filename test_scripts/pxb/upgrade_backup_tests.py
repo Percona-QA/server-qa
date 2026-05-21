@@ -20,7 +20,7 @@ Environment variables:
   path to the *previous* xtrabackup ``bin`` directory.
 - ``MYSQLDIR`` - path to MySQL/PS install dir.
 - ``QASCRIPTS`` - path to the ``server-qa`` checkout.
-- ``ROCKSDB`` (``enabled`` | ``disabled``, default ``disabled``) - when
+- ``ROCKSDB`` (``enabled`` | ``disabled``, default ``enabled``) - when
   enabled, also creates and loads ``test_rocksdb`` (PS 8.0+ only).
 """
 
@@ -56,7 +56,7 @@ PREVIOUS_XTRABACKUP_DIR = os.environ.get(
     "PREVIOUS_XTRABACKUP_DIR", os.path.join(HOME, "pxb_previous/bin")
 )
 
-ROCKSDB = os.environ.get("ROCKSDB", "disabled")
+ROCKSDB = os.environ.get("ROCKSDB", "enabled")
 
 
 # ---------------------------------------------------------------------------
@@ -622,7 +622,7 @@ if __name__ == "__main__":
         print(f"   export PREVIOUS_XTRABACKUP_DIR={PREVIOUS_XTRABACKUP_DIR}")
         print("   export MYSQLDIR=$HOME/Percona-Server-8.0.x-Linux.x86_64.glibc2.35")
         print("   export QASCRIPTS=$HOME/server-qa")
-        print(f"   export ROCKSDB={ROCKSDB}    # 'enabled' to also load test_rocksdb")
+        print(f"   export ROCKSDB={ROCKSDB}    # default enabled; use disabled to skip test_rocksdb")
         print("2. Run the script as: pytest upgrade_backup_tests.py -k <test_name> -s -v")
         print("   Or: python upgrade_backup_tests.py <Test Suites>")
         print("   Test Suites:")

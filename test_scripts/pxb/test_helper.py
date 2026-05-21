@@ -653,6 +653,7 @@ class BackupTestHelper:
         genuine xtrabackup failures fall through unchanged.
         """
         if log_file:
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
             with open(log_file, "a") as f:
                 f.write(f"Command: {' '.join(cmd)}\n")
                 f.write(f"Time: {datetime.now()}\n")

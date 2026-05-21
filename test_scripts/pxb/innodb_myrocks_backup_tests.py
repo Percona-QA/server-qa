@@ -36,6 +36,34 @@ def _default_mysqld_options():
     return "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
 
 
+def _pstress_tool_options(test_helper, seconds=20, rocksdb=False):
+    """Build pstress options (aligned with inc_backup_load_tests.py)."""
+    tool_options = (
+        f"--tables {test_helper.num_tables} --records {test_helper.table_size} "
+        f"--threads {test_helper.threads} --seconds {seconds} --no-encryption --undo-tbs-sql 0"
+    )
+    if test_helper.server_type == "MS":
+        tool_options += " --no-column-compression --no-temp-tables"
+    if rocksdb:
+        tool_options += " --engine=rocksdb --no-fk-tables"
+    return tool_options
+
+
+def _run_load(test_helper, time_sec=20):
+    """Run backup load; pstress gets explicit options, sysbench keeps legacy empty options."""
+    if test_helper.load_tool == "pstress":
+        if test_helper.rocksdb == "enabled":
+            test_helper.run_load(_pstress_tool_options(test_helper, seconds=time_sec))
+            test_helper.run_load(_pstress_tool_options(test_helper, seconds=time_sec, rocksdb=True))
+        else:
+            test_helper.run_load(_pstress_tool_options(test_helper, seconds=time_sec))
+    elif test_helper.rocksdb == "enabled":
+        test_helper.run_load("", database="test", time_sec=time_sec)
+        test_helper.run_load("", database="test_rocksdb", engine="ROCKSDB", time_sec=time_sec)
+    else:
+        test_helper.run_load("", time_sec=time_sec)
+
+
 def _init_for_ddl(test_helper):
     """Common initialization for DDL tests."""
     test_helper.mysqld_options = _default_mysqld_options()
@@ -45,11 +73,7 @@ def _init_for_ddl(test_helper):
     rocksdb_enabled = test_helper.rocksdb == "enabled"
     test_helper.initialize_db(rocksdb=rocksdb_enabled)
 
-    if rocksdb_enabled:
-        test_helper.run_load("", database="test", time_sec=20)
-        test_helper.run_load("", database="test_rocksdb", engine="ROCKSDB", time_sec=20)
-    else:
-        test_helper.run_load("", time_sec=20)
+    _run_load(test_helper)
 
     databases = ["test", "test_rocksdb"] if rocksdb_enabled else ["test"]
     return databases
@@ -336,13 +360,13 @@ def test_streaming_backup(test_helper):
     test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
     test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
-    test_helper.run_load("", time_sec=20)
+    _run_load(test_helper)
     test_helper.take_backup(backup_type="stream", single_incremental=True)
 
     if test_helper.server_version_normalized < 80000:
         print("Test: Incremental Backup and Restore with streaming format as tar")
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
-        test_helper.run_load("", time_sec=20)
+        _run_load(test_helper)
         test_helper.take_backup(backup_type="tar", single_incremental=True)
 
 
@@ -358,7 +382,7 @@ def test_compress_stream_backup(test_helper):
         print(f"Testing {compress} compression with streaming")
         test_helper.backup_params = f"--compress={compress} --compress-threads=10 {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
-        test_helper.run_load("", time_sec=20)
+        _run_load(test_helper)
         test_helper.take_backup(backup_type="stream", single_incremental=True)
 
 
@@ -378,7 +402,7 @@ def test_encrypt_compress_stream_backup(test_helper):
             f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         )
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
-        test_helper.run_load("", time_sec=20)
+        _run_load(test_helper)
         test_helper.take_backup(backup_type="stream", single_incremental=True)
 
 
@@ -403,7 +427,7 @@ def test_compress_backup(test_helper):
         print(f"Testing compression: {cfg}")
         test_helper.backup_params = f"{cfg} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
-        test_helper.run_load("", time_sec=20)
+        _run_load(test_helper)
         test_helper.take_backup(single_incremental=True)
 
 
@@ -565,7 +589,7 @@ def _run_encryption_8_0_tests(test_helper, encrypt_type):
     test_helper.prepare_params = f"{pxb_opts} {pxb_comp} {CORE_FILE_OPT}" if pxb_comp else f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.initialize_db()
-    test_helper.run_load("", time_sec=20)
+    _run_load(test_helper)
     test_helper.take_backup(single_incremental=True)
 
     # Sub-test 2: All encryption options enabled
@@ -578,7 +602,7 @@ def _run_encryption_8_0_tests(test_helper, encrypt_type):
     test_helper.prepare_params = f"{pxb_opts} {pxb_comp} {CORE_FILE_OPT}" if pxb_comp else f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.initialize_db()
-    test_helper.run_load("", time_sec=20)
+    _run_load(test_helper)
     test_helper.take_backup(single_incremental=True)
 
     # Sub-test 3: transition-key
@@ -720,7 +744,7 @@ def _run_encryption_2_4_tests(test_helper, encrypt_type):
     test_helper.prepare_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.restore_params = f"{pxb_opts} {CORE_FILE_OPT}"
     test_helper.initialize_db()
-    test_helper.run_load("", time_sec=20)
+    _run_load(test_helper)
     test_helper.take_backup(single_incremental=True)
 
     # Transition-key test
@@ -791,7 +815,7 @@ def test_cloud_inc_backup(test_helper):
     test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
     test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
-    test_helper.run_load("", time_sec=20)
+    _run_load(test_helper)
 
     print("Test: Cloud backup")
     test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True)
@@ -843,7 +867,7 @@ def test_inc_backup_innodb_params(test_helper):
         test_helper.backup_params = f"{cfg['backup_extra']} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}" if cfg["backup_extra"] else f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.prepare_params = cfg["prepare_extra"]
         test_helper.initialize_db()
-        test_helper.run_load("", time_sec=20)
+        _run_load(test_helper)
         test_helper.take_backup(single_incremental=True)
 
 
@@ -864,7 +888,7 @@ def test_inc_backup_archive_log(test_helper):
         f"--innodb-redo-log-archive-dirs=archive:{archive_dir}"
     )
     test_helper.initialize_db()
-    test_helper.run_load("", time_sec=20)
+    _run_load(test_helper)
     test_helper.take_backup(single_incremental=True)
 
     test_helper.mysqld_options = (
@@ -874,7 +898,7 @@ def test_inc_backup_archive_log(test_helper):
     )
     test_helper.prepare_params = f"--innodb-log-file-size=536870912 {CORE_FILE_OPT}"
     test_helper.initialize_db()
-    test_helper.run_load("", time_sec=20)
+    _run_load(test_helper)
     test_helper.take_backup(single_incremental=True)
 
 
@@ -906,7 +930,7 @@ def test_ssl_backup(test_helper):
 
     print("Test: Backup with SSL certificates and keys")
     test_helper.backup_params = f"{ssl_opts} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
-    test_helper.run_load("", time_sec=20)
+    _run_load(test_helper)
     test_helper.take_backup(single_incremental=True, databases=databases)
 
     print("Test: Backup with --ssl-mode")
@@ -916,7 +940,7 @@ def test_ssl_backup(test_helper):
     )
     mysql_port = port_result.stdout.strip() if port_result.returncode == 0 else "21000"
     test_helper.backup_params = f"{ssl_opts} --ssl-mode=REQUIRED --host=127.0.0.1 -P {mysql_port} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
-    test_helper.run_load("", time_sec=20)
+    _run_load(test_helper)
     test_helper.take_backup(single_incremental=True, databases=databases)
 
     test_helper.backup_user = "root"

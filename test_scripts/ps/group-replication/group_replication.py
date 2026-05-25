@@ -1,0 +1,242 @@
+import time
+
+from docker_helper import DockerHelper
+
+
+class GroupReplication:
+    def __init__(
+        self,
+        docker: DockerHelper,
+        num_nodes: int = 3,
+        network: str = "grnet",
+        image: str = "percona/percona-server:8.4",
+        node_prefix: str = "ps",
+        root_password: str = "rootpass",
+        base_host_port: int = 33060,
+        cluster_name: str = "testCluster",
+        group_name: str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        gr_port: int = 33061,
+        communication_stack: str = "XCOM",
+        single_primary: bool = True,
+        start_on_boot: bool = False,
+        mysql_extra_args: list[str] | None = None,
+    ):
+        if num_nodes < 1:
+            raise ValueError("num_nodes must be >= 1")
+        self.docker = docker
+        self.num_nodes = num_nodes
+        self.network = network
+        self.image = image
+        self.node_prefix = node_prefix
+        self.root_password = root_password
+        self.base_host_port = base_host_port
+        self.cluster_name = cluster_name
+        self.group_name = group_name
+        self.gr_port = gr_port
+        self.communication_stack = communication_stack
+        self.single_primary = single_primary
+        self.start_on_boot = start_on_boot
+        self.mysql_extra_args = list(mysql_extra_args or [])
+        self.containers: list[str] = []
+        self.networks: list[str] = []
+
+    def _gr_address(self, name: str) -> str:
+        return f"{name}:{self.gr_port}"
+
+    def _group_seeds(self) -> str:
+        return ",".join(self._gr_address(self._node_name(i)) for i in range(1, self.num_nodes + 1))
+
+    def _node_name(self, index: int) -> str:
+        return f"{self.node_prefix}{index}"
+
+    def _volume_name(self, index: int) -> str:
+        return f"{self._node_name(index)}-data"
+
+    def _mysqld_args(self, server_id: int, hostname: str) -> list[str]:
+        args = [
+            f"--server-id={server_id}",
+            f"--report-host={hostname}",
+            "--log-bin=binlog",
+            "--enforce-gtid-consistency=ON",
+            "--gtid-mode=ON",
+            "--log-replica-updates=ON",
+            "--binlog-format=ROW",
+            "--plugin-load-add=group_replication.so",
+        ]
+        args.extend(self.mysql_extra_args)
+        return args
+
+    def _wait_ready(self, name: str, timeout: int = 180) -> None:
+        deadline = time.time() + timeout
+        last_err = ""
+        while time.time() < deadline:
+            result = self.docker.exec_command(
+                name, f"mysqladmin -uroot -p{self.root_password} ping --silent"
+            )
+            if result.ok and "mysqld is alive" in result.stdout:
+                return
+            last_err = (result.stderr or result.stdout).strip()
+            time.sleep(2)
+        raise RuntimeError(f"Container {name} did not become ready in {timeout}s. Last: {last_err}")
+
+    def primary(self) -> str:
+        if not self.containers:
+            raise RuntimeError("Cluster not created yet")
+        return self.containers[0]
+
+    def create(self) -> None:
+        self.docker.network_create(self.network)
+        self.networks.append(self.network)
+
+        for i in range(1, self.num_nodes + 1):
+            name = self._node_name(i)
+            self.docker.create(
+                image=self.image,
+                name=name,
+                hostname=name,
+                environment={"MYSQL_ROOT_PASSWORD": self.root_password},
+                volumes=[f"{self._volume_name(i)}:/var/lib/mysql"],
+                networks=[self.network],
+                ports=[f"{self.base_host_port + i}:3306"],
+                command=self._mysqld_args(server_id=i, hostname=name),
+                restart="always",
+            )
+            self.containers.append(name)
+
+        for name in self.containers:
+            self._wait_ready(name)
+
+        primary = self.primary()
+        bootstrap_opts = (
+            f"groupName:'{self.group_name}',"
+            f"communicationStack:'{self.communication_stack}',"
+            f"localAddress:'{self._gr_address(primary)}',"
+            f"multiPrimary:{'false' if self.single_primary else 'true'}"
+        )
+        bootstrap_script = (
+            f"var c = dba.createCluster('{self.cluster_name}', {{{bootstrap_opts}}});"
+        )
+        self.docker.exec_mysqlsh(primary, bootstrap_script)
+
+        for i in range(2, self.num_nodes + 1):
+            node = self._node_name(i)
+            add_script = (
+                f"var c = dba.getCluster('{self.cluster_name}');"
+                f"c.addInstance('root:{self.root_password}@{node}:3306', {{"
+                f"recoveryMethod:'clone',"
+                f"localAddress:'{self._gr_address(node)}'"
+                "});"
+            )
+            self.docker.exec_mysqlsh(primary, add_script)
+
+        status = self.docker.exec_mysqlsh(
+            primary,
+            f"var c = dba.getCluster('{self.cluster_name}'); print(JSON.stringify(c.status()));",
+        )
+        if '"status": "ONLINE"' not in status.stdout and '"status":"ONLINE"' not in status.stdout:
+            raise RuntimeError(
+                f"Cluster did not reach ONLINE state. mysqlsh output:\n{status.stdout}\n{status.stderr}"
+            )
+
+        start_on_boot = "ON" if self.start_on_boot else "OFF"
+        seeds = self._group_seeds()
+        for name in self.containers:
+            self.docker.exec_mysql(
+                name,
+                f"SET PERSIST group_replication_start_on_boot={start_on_boot};"
+                f"SET PERSIST group_replication_group_seeds='{seeds}';",
+            )
+
+    def _read_variables(self, name: str, variables: list[str]) -> dict[str, str]:
+        in_clause = ",".join(f"'{v}'" for v in variables)
+        result = self.docker.exec_mysql(
+            name,
+            f"SHOW GLOBAL VARIABLES WHERE Variable_name IN ({in_clause});",
+        )
+        actual: dict[str, str] = {}
+        for line in result.stdout.strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                actual[parts[0]] = parts[1]
+        return actual
+
+    def verify(self) -> None:
+        if not self.containers:
+            raise RuntimeError("Cluster not created yet")
+
+        errors: list[str] = []
+
+        common_expected = {
+            "group_replication_group_name": self.group_name,
+            "group_replication_start_on_boot": "ON" if self.start_on_boot else "OFF",
+            "group_replication_group_seeds": self._group_seeds(),
+            "group_replication_single_primary_mode": "ON" if self.single_primary else "OFF",
+            "gtid_mode": "ON",
+            "enforce_gtid_consistency": "ON",
+        }
+        variables = list(common_expected.keys()) + ["group_replication_local_address"]
+
+        for node in self.containers:
+            actual = self._read_variables(node, variables)
+            for var, expected in common_expected.items():
+                got = actual.get(var)
+                if got != expected:
+                    errors.append(f"{node}: {var}={got!r}, expected {expected!r}")
+            expected_local = self._gr_address(node)
+            got_local = actual.get("group_replication_local_address")
+            if got_local != expected_local:
+                errors.append(
+                    f"{node}: group_replication_local_address={got_local!r}, "
+                    f"expected {expected_local!r}"
+                )
+
+        primary = self.primary()
+        result = self.docker.exec_mysql(
+            primary,
+            "SELECT MEMBER_HOST, MEMBER_PORT, MEMBER_STATE, MEMBER_ROLE "
+            "FROM performance_schema.replication_group_members;",
+        )
+        members: list[tuple[str, str, str, str]] = []
+        for line in result.stdout.strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 4:
+                members.append((parts[0], parts[1], parts[2], parts[3]))
+
+        if len(members) != self.num_nodes:
+            errors.append(
+                f"Expected {self.num_nodes} members in replication_group_members, "
+                f"got {len(members)}: {members}"
+            )
+
+        hosts = sorted(m[0] for m in members)
+        expected_hosts = sorted(self.containers)
+        if hosts != expected_hosts:
+            errors.append(f"Member hosts mismatch: got {hosts}, expected {expected_hosts}")
+
+        bad_state = [m for m in members if m[2] != "ONLINE"]
+        if bad_state:
+            errors.append(f"Members not ONLINE: {bad_state}")
+
+        primaries = [m for m in members if m[3] == "PRIMARY"]
+        secondaries = [m for m in members if m[3] == "SECONDARY"]
+        if self.single_primary:
+            if len(primaries) != 1:
+                errors.append(f"Expected exactly 1 PRIMARY, got {len(primaries)}: {members}")
+            if len(secondaries) != self.num_nodes - 1:
+                errors.append(
+                    f"Expected {self.num_nodes - 1} SECONDARY, got {len(secondaries)}: {members}"
+                )
+
+        if errors:
+            raise AssertionError("GroupReplication.verify failed:\n  " + "\n  ".join(errors))
+
+    def destroy(self, remove_volumes: bool = False) -> None:
+        for name in reversed(self.containers):
+            self.docker.destroy(name)
+        if remove_volumes:
+            for i in range(1, self.num_nodes + 1):
+                self.docker.volume_remove(self._volume_name(i))
+        for net in self.networks:
+            self.docker.network_remove(net)
+        self.containers.clear()
+        self.networks.clear()

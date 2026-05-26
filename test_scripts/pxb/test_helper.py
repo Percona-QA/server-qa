@@ -29,6 +29,8 @@ HOME = os.path.expanduser("~")
 # Override via MYSQL_START_TIMEOUT env var; default raised to 180 to absorb the
 # ~60s Fortanix KMIP cold-start that the keyring component pays on a brand-new app.
 MYSQL_START_TIMEOUT = int(os.environ.get("MYSQL_START_TIMEOUT", "180"))
+# Graceful shutdown wait for mysqladmin shutdown (seconds); default 5 minutes.
+MYSQL_SHUTDOWN_TIMEOUT = int(os.environ.get("MYSQL_SHUTDOWN_TIMEOUT", "300"))
 # Each xtrabackup invocation opens its own KMIP/TLS session and pays a fresh
 # Fortanix cold-start; occasional invocations exceed xtrabackup's internal ~60s
 # tolerance and fail with MY-013714 + 'Encryption can't find master key'.
@@ -216,7 +218,7 @@ class MySQLServer:
                     f"Please check error log: {self.error_log}"
                 )
 
-    def stop(self, timeout: int = 300) -> None:
+    def stop(self, timeout: int = MYSQL_SHUTDOWN_TIMEOUT) -> None:
         """Gracefully shut down this instance, falling back to SIGTERM/SIGKILL."""
         if self.is_alive():
             result = subprocess.run(
@@ -727,7 +729,7 @@ class BackupTestHelper:
         """Start MySQL primary server (thin delegator to ``self.primary.start``)."""
         self.primary.start()
 
-    def stop_server(self, timeout: int = 300):
+    def stop_server(self, timeout: int = MYSQL_SHUTDOWN_TIMEOUT):
         """Stop MySQL primary server (thin delegator to ``self.primary.stop``)."""
         self.primary.stop(timeout=timeout)
 
@@ -1523,10 +1525,7 @@ class BackupTestHelper:
 
         # --- Stop server and move data directory ---
         print("Stopping mysql server and moving data directory")
-        subprocess.run(
-            [os.path.join(self.mysqldir, "bin/mysqladmin"), "-uroot", f"-S{self.socket_path}", "shutdown"],
-            check=True,
-        )
+        self.primary.stop(timeout=MYSQL_SHUTDOWN_TIMEOUT)
 
         data_orig = os.path.join(self.backup_dir, f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         if os.path.exists(data_orig):
@@ -2491,15 +2490,7 @@ class BackupTestHelper:
         orig_data = self.count_rows()
 
         print("Stopping mysql server and moving data directory")
-        subprocess.run(
-            [
-                os.path.join(self.mysqldir, "bin/mysqladmin"),
-                "-uroot",
-                f"-S{self.socket_path}",
-                "shutdown",
-            ],
-            check=True,
-        )
+        self.primary.stop(timeout=MYSQL_SHUTDOWN_TIMEOUT)
         data_orig = os.path.join(
             os.path.dirname(self.datadir),
             f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}",

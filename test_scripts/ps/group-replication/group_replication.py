@@ -230,6 +230,55 @@ class GroupReplication:
         if errors:
             raise AssertionError("GroupReplication.verify failed:\n  " + "\n  ".join(errors))
 
+    def _list_tables(self, node: str, database: str) -> list[str]:
+        result = self.docker.exec_mysql(
+            node,
+            "SELECT TABLE_NAME FROM information_schema.TABLES "
+            f"WHERE TABLE_SCHEMA='{database}' AND TABLE_TYPE='BASE TABLE' "
+            "ORDER BY TABLE_NAME;",
+        )
+        return [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+
+    def _table_checksum(self, node: str, database: str, table: str) -> str:
+        result = self.docker.exec_mysql(
+            node, f"CHECKSUM TABLE `{database}`.`{table}`;"
+        )
+        # Output is "<database>.<table>\t<checksum>" (or NULL if the table is missing).
+        parts = result.stdout.strip().split("\t")
+        return parts[-1] if parts else ""
+
+    def verify_checksums(self, database: str, timeout: int = 30) -> dict[str, str]:
+        if not self.containers:
+            raise RuntimeError("Cluster not created yet")
+
+        tables = self._list_tables(self.primary(), database)
+        if not tables:
+            raise AssertionError(f"No base tables found in database {database!r}")
+
+        # Secondaries apply transactions asynchronously, so a checksum taken right
+        # after a write can briefly differ. Retry until everything agrees or we time out.
+        deadline = time.time() + timeout
+        while True:
+            errors: list[str] = []
+            checksums: dict[str, str] = {}
+            for table in tables:
+                per_node = {
+                    node: self._table_checksum(node, database, table)
+                    for node in self.containers
+                }
+                if len(set(per_node.values())) != 1:
+                    errors.append(f"{database}.{table} checksum mismatch: {per_node}")
+                else:
+                    checksums[table] = next(iter(per_node.values()))
+
+            if not errors:
+                return checksums
+            if time.time() >= deadline:
+                raise AssertionError(
+                    "GroupReplication.verify_checksums failed:\n  " + "\n  ".join(errors)
+                )
+            time.sleep(1)
+
     def destroy(self, remove_volumes: bool = False) -> None:
         for name in reversed(self.containers):
             self.docker.destroy(name)

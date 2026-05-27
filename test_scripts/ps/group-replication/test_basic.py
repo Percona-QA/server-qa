@@ -1,18 +1,3 @@
-import time
-
-
-def _count_with_retry(docker, node, table_fqn, expected, timeout=30):
-    deadline = time.time() + timeout
-    last = None
-    while time.time() < deadline:
-        result = docker.exec_mysql(node, f"SELECT COUNT(*) FROM {table_fqn};", check=False)
-        last = result.stdout.strip()
-        if result.ok and last == str(expected):
-            return last
-        time.sleep(1)
-    return last
-
-
 def test_replicates_table_across_nodes(gr_cluster):
     primary = gr_cluster.primary()
     docker = gr_cluster.docker
@@ -28,3 +13,5 @@ def test_replicates_table_across_nodes(gr_cluster):
         primary,
         "INSERT INTO gr_test.t VALUES (1,'a'),(2,'b'),(3,'c');",
     )
+
+    gr_cluster.verify_checksums("gr_test")

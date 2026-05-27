@@ -1,6 +1,10 @@
+import logging
+import os
 import time
 
 from docker_helper import DockerHelper
+
+_logger = logging.getLogger("GR")
 
 
 class GroupReplication:
@@ -20,9 +24,13 @@ class GroupReplication:
         single_primary: bool = True,
         start_on_boot: bool = False,
         mysql_extra_args: list[str] | None = None,
+        verbose: bool | None = None,
     ):
         if num_nodes < 1:
             raise ValueError("num_nodes must be >= 1")
+        if verbose is None:
+            verbose = os.environ.get("GR_VERBOSE", "").lower() in ("1", "true", "yes", "on")
+        self.verbose = verbose
         self.docker = docker
         self.num_nodes = num_nodes
         self.network = network
@@ -39,6 +47,10 @@ class GroupReplication:
         self.mysql_extra_args = list(mysql_extra_args or [])
         self.containers: list[str] = []
         self.networks: list[str] = []
+
+    def log(self, msg: str) -> None:
+        if self.verbose:
+            _logger.info(msg)
 
     def _gr_address(self, name: str) -> str:
         return f"{name}:{self.gr_port}"
@@ -67,6 +79,7 @@ class GroupReplication:
         return args
 
     def _wait_ready(self, name: str, timeout: int = 180) -> None:
+        self.log(f"wait for {name} to accept connections")
         deadline = time.time() + timeout
         last_err = ""
         while time.time() < deadline:
@@ -85,11 +98,13 @@ class GroupReplication:
         return self.containers[0]
 
     def create(self) -> None:
+        self.log(f"create network {self.network}")
         self.docker.network_create(self.network)
         self.networks.append(self.network)
 
         for i in range(1, self.num_nodes + 1):
             name = self._node_name(i)
+            self.log(f"start node {name} (server-id={i}, {self.base_host_port + i}->3306)")
             self.docker.create(
                 image=self.image,
                 name=name,
@@ -116,10 +131,12 @@ class GroupReplication:
         bootstrap_script = (
             f"var c = dba.createCluster('{self.cluster_name}', {{{bootstrap_opts}}});"
         )
+        self.log(f"bootstrap cluster on {primary}")
         self.docker.exec_mysqlsh(primary, bootstrap_script)
 
         for i in range(2, self.num_nodes + 1):
             node = self._node_name(i)
+            self.log(f"add {node} to cluster (clone)")
             add_script = (
                 f"var c = dba.getCluster('{self.cluster_name}');"
                 f"c.addInstance('root:{self.root_password}@{node}:3306', {{"
@@ -137,9 +154,11 @@ class GroupReplication:
             raise RuntimeError(
                 f"Cluster did not reach ONLINE state. mysqlsh output:\n{status.stdout}\n{status.stderr}"
             )
+        self.log("cluster is ONLINE")
 
         start_on_boot = "ON" if self.start_on_boot else "OFF"
         seeds = self._group_seeds()
+        self.log("persist GR settings (start_on_boot, group_seeds) on each node")
         for name in self.containers:
             self.docker.exec_mysql(
                 name,
@@ -176,6 +195,7 @@ class GroupReplication:
         }
         variables = list(common_expected.keys()) + ["group_replication_local_address"]
 
+        self.log("verify GR variables on each node")
         for node in self.containers:
             actual = self._read_variables(node, variables)
             for var, expected in common_expected.items():
@@ -191,6 +211,7 @@ class GroupReplication:
                 )
 
         primary = self.primary()
+        self.log("check membership via replication_group_members")
         result = self.docker.exec_mysql(
             primary,
             "SELECT MEMBER_HOST, MEMBER_PORT, MEMBER_STATE, MEMBER_ROLE "
@@ -251,6 +272,7 @@ class GroupReplication:
         if not self.containers:
             raise RuntimeError("Cluster not created yet")
 
+        self.log(f"list tables in {database}")
         tables = self._list_tables(self.primary(), database)
         if not tables:
             raise AssertionError(f"No base tables found in database {database!r}")
@@ -258,10 +280,13 @@ class GroupReplication:
         # Secondaries apply transactions asynchronously, so a checksum taken right
         # after a write can briefly differ. Retry until everything agrees or we time out.
         deadline = time.time() + timeout
+        first_pass = True
         while True:
             errors: list[str] = []
             checksums: dict[str, str] = {}
             for table in tables:
+                if first_pass:
+                    self.log(f"compare checksum {database}.{table} across nodes")
                 per_node = {
                     node: self._table_checksum(node, database, table)
                     for node in self.containers
@@ -277,9 +302,11 @@ class GroupReplication:
                 raise AssertionError(
                     "GroupReplication.verify_checksums failed:\n  " + "\n  ".join(errors)
                 )
+            first_pass = False
             time.sleep(1)
 
     def destroy(self, remove_volumes: bool = False) -> None:
+        self.log("destroy cluster")
         for name in reversed(self.containers):
             self.docker.destroy(name)
         if remove_volumes:

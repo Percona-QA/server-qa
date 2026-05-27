@@ -80,6 +80,50 @@ pytest -s test_basic.py        # don't capture stdout/stderr (live container log
 pytest --tb=short test_basic.py  # shorter tracebacks
 ```
 
+### Verbose mode (framework step logging)
+
+By default the framework is silent until something fails. Enable verbose mode to
+log a `[GR]` message before each high-level step (create network, start node,
+bootstrap, add instance, verify, checksum, destroy) so you can follow a run live.
+
+Enable it with the `GR_VERBOSE` env var:
+
+```bash
+GR_VERBOSE=1 pytest -v test_basic.py
+```
+
+Sample output (appears in pytest's live log — no `-s` needed; each line is
+timestamped to help debug timing/hangs):
+
+```
+2026-05-27 14:24:09.512 [GR] create network grnet
+2026-05-27 14:24:09.981 [GR] start node ps1 (server-id=1, 33061->3306)
+2026-05-27 14:24:11.400 [GR] wait for ps1 to accept connections
+2026-05-27 14:24:30.210 [GR] bootstrap cluster on ps1
+2026-05-27 14:24:33.005 [GR] add ps2 to cluster (clone)
+2026-05-27 14:24:48.117 [GR] add ps3 to cluster (clone)
+2026-05-27 14:25:02.640 [GR] cluster is ONLINE
+2026-05-27 14:25:02.900 [GR] verify GR variables on each node
+2026-05-27 14:25:03.330 [GR] create database gr_test
+2026-05-27 14:25:03.560 [GR] create table gr_test.t
+2026-05-27 14:25:03.770 [GR] insert 3 rows into gr_test.t
+2026-05-27 14:25:04.010 [GR] compare checksum gr_test.t across nodes
+2026-05-27 14:25:05.220 [GR] destroy cluster
+```
+
+Tests can narrate their own steps the same way by calling `gr_cluster.log("...")`
+— it shares the `[GR]` prefix and obeys the same `GR_VERBOSE` toggle (see the
+`gr_cluster.log(...)` calls in `test_basic.py`).
+
+When constructing the cluster directly you can also pass `verbose=True`:
+
+```python
+cluster = GroupReplication(helper, num_nodes=3, verbose=True)
+```
+
+Outside pytest (e.g. a standalone script), configure logging so the messages
+show: `logging.basicConfig(level=logging.INFO)`.
+
 ### Timeouts
 
 `pytest-timeout` is installed. To cap a single run:

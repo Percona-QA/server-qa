@@ -983,7 +983,7 @@ if __name__ == "__main__":
         print("Assumption: PS and PXB are already installed as tarballs")
         print("Usage: ")
         print("1. Set environment variables (or use defaults):")
-        print("   export TEST_BASE_DIR=$HOME/inc_backup_load_tests")
+        print("   export TEST_BASE_DIR=$HOME/innodb_myrocks_backup_tests")
         print("   export XTRABACKUP_DIR=$HOME/percona-xtrabackup-8.0/bin")
         print("   export MYSQLDIR=$HOME/Percona-Server-8.0")
         print("   export QASCRIPTS=$HOME/server-qa")

@@ -79,6 +79,30 @@ class DockerHelper:
             args.extend(command)
         return self._run(args)
 
+    def run(
+        self,
+        image: str,
+        name: str | None = None,
+        networks: list[str] | None = None,
+        entrypoint: str | None = None,
+        command: list[str] | None = None,
+        remove: bool = True,
+        check: bool = True,
+    ) -> ExecResult:
+        args = ["run"]
+        if remove:
+            args.append("--rm")
+        if name:
+            args.extend(["--name", name])
+        if entrypoint:
+            args.extend(["--entrypoint", entrypoint])
+        for net in networks or []:
+            args.extend(["--network", net])
+        args.append(image)
+        if command:
+            args.extend(command)
+        return self._run(args, check=check)
+
     def destroy(self, name: str) -> ExecResult:
         return self._run(["rm", "-f", name], check=False)
 

@@ -22,7 +22,7 @@ class GroupReplication:
         gr_port: int = 33061,
         communication_stack: str = "XCOM",
         single_primary: bool = True,
-        start_on_boot: bool = False,
+        start_on_boot: bool = True,
         mysql_extra_args: list[str] | None = None,
         verbose: bool | None = None,
     ):
@@ -46,6 +46,7 @@ class GroupReplication:
         self.start_on_boot = start_on_boot
         self.mysql_extra_args = list(mysql_extra_args or [])
         self.containers: list[str] = []
+        self.active_nodes: list[str] = []
         self.networks: list[str] = []
 
     def log(self, msg: str) -> None:
@@ -97,6 +98,67 @@ class GroupReplication:
             raise RuntimeError("Cluster not created yet")
         return self.containers[0]
 
+    def get_primary(self, timeout: int = 60) -> str:
+        if not self.active_nodes:
+            raise RuntimeError("No active nodes")
+        deadline = time.time() + timeout
+        last = ""
+        while time.time() < deadline:
+            node = self.active_nodes[0]
+            result = self.docker.exec_mysql(
+                node,
+                "SELECT MEMBER_HOST FROM performance_schema.replication_group_members "
+                "WHERE MEMBER_ROLE='PRIMARY' AND MEMBER_STATE='ONLINE';",
+                check=False,
+            )
+            host = result.stdout.strip()
+            if result.ok and host and "\n" not in host:
+                return host
+            last = host or (result.stderr or "").strip()
+            time.sleep(2)
+        raise RuntimeError(f"No PRIMARY elected within {timeout}s (last: {last!r})")
+
+    def stop_node(self, name: str) -> None:
+        self.log(f"stop node {name}")
+        self.docker.stop(name)
+        if name in self.active_nodes:
+            self.active_nodes.remove(name)
+
+    def _member_states(self, node: str) -> dict[str, str]:
+        result = self.docker.exec_mysql(
+            node,
+            "SELECT MEMBER_HOST, MEMBER_STATE "
+            "FROM performance_schema.replication_group_members;",
+            check=False,
+        )
+        states: dict[str, str] = {}
+        if result.ok:
+            for line in result.stdout.strip().splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    states[parts[0]] = parts[1]
+        return states
+
+    def wait_all_online(self, timeout: int = 180) -> None:
+        self.log("wait for all members ONLINE")
+        deadline = time.time() + timeout
+        last: dict[str, str] = {}
+        while time.time() < deadline:
+            states = self._member_states(self.active_nodes[0])
+            last = states
+            if len(states) == self.num_nodes and all(s == "ONLINE" for s in states.values()):
+                return
+            time.sleep(2)
+        raise RuntimeError(f"Not all members ONLINE within {timeout}s (last: {last})")
+
+    def rejoin_node(self, name: str, timeout: int = 180) -> None:
+        self.log(f"start node {name} (auto-rejoin)")
+        self.docker.start(name)
+        self._wait_ready(name)
+        if name not in self.active_nodes:
+            self.active_nodes.append(name)
+        self.wait_all_online(timeout=timeout)
+
     def create(self) -> None:
         self.log(f"create network {self.network}")
         self.docker.network_create(self.network)
@@ -117,6 +179,8 @@ class GroupReplication:
                 restart="always",
             )
             self.containers.append(name)
+
+        self.active_nodes = list(self.containers)
 
         for name in self.containers:
             self._wait_ready(name)
@@ -268,12 +332,17 @@ class GroupReplication:
         parts = result.stdout.strip().split("\t")
         return parts[-1] if parts else ""
 
-    def verify_checksums(self, database: str, timeout: int = 30) -> dict[str, str]:
+    def verify_checksums(
+        self, database: str, nodes: list[str] | None = None, timeout: int = 30
+    ) -> dict[str, str]:
         if not self.containers:
             raise RuntimeError("Cluster not created yet")
+        nodes = nodes if nodes is not None else self.active_nodes
+        if not nodes:
+            raise RuntimeError("No nodes to compare")
 
         self.log(f"list tables in {database}")
-        tables = self._list_tables(self.primary(), database)
+        tables = self._list_tables(nodes[0], database)
         if not tables:
             raise AssertionError(f"No base tables found in database {database!r}")
 
@@ -289,7 +358,7 @@ class GroupReplication:
                     self.log(f"compare checksum {database}.{table} across nodes")
                 per_node = {
                     node: self._table_checksum(node, database, table)
-                    for node in self.containers
+                    for node in nodes
                 }
                 if len(set(per_node.values())) != 1:
                     errors.append(f"{database}.{table} checksum mismatch: {per_node}")
@@ -315,4 +384,5 @@ class GroupReplication:
         for net in self.networks:
             self.docker.network_remove(net)
         self.containers.clear()
+        self.active_nodes.clear()
         self.networks.clear()

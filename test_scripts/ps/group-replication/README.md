@@ -7,12 +7,14 @@ in containers (Percona Server 8.4) and runs tests against it.
 
 ```
 group-replication/
-├── conftest.py              # gr_cluster fixture (module-scoped)
+├── conftest.py              # gr_cluster + sysbench fixtures
 ├── pytest.ini               # python_files = test_*.py
 ├── requirements.txt         # pytest, pytest-timeout
 ├── docker_helper.py         # DockerHelper — wraps docker/podman CLI
 ├── group_replication.py     # GroupReplication — N-node cluster lifecycle
+├── sysbench_helper.py       # Sysbench — ephemeral sysbench load container
 ├── test_basic.py            # smoke test: write on primary, read on every node
+├── test_failover.py         # primary failover + recovery under sysbench load
 └── templates/
     └── docker-compose.yaml  # equivalent 3-node topology, for reference
 ```
@@ -40,6 +42,35 @@ cd /Users/plavi/Development/percona/server-qa/test_scripts/ps/group-replication
 The fixture brings up 3 containers (`ps1`, `ps2`, `ps3`) on the `grnet` network,
 bootstraps the cluster via mysqlsh, runs the tests, then removes containers,
 volumes, and the network. Expect ~1 minute end-to-end.
+
+## Failover test (sysbench)
+
+`test_failover.py` drives real load and exercises a primary outage:
+
+```bash
+GR_VERBOSE=1 /Users/plavi/Development/percona/server-qa/.venv/bin/pytest -v test_failover.py
+```
+
+What it does: load initial data with sysbench (`prepare`, 4 tables × 10000 rows),
+stop the primary and assert a secondary is promoted, run a 20s `oltp_read_write`
+workload against the new primary and compare checksums across the online nodes,
+restart the stopped node (it **auto-rejoins** because the framework persists
+`group_replication_start_on_boot=ON`), then run another 20s workload against the
+full cluster and compare checksums across all three. Expect ~2-3 minutes.
+
+Sysbench notes:
+- Runs from the multi-arch image `pingwinator/sysbench:latest` (pulled on first
+  use). Each sysbench command is its own one-shot `--rm` container named
+  `sysbench_<test-name>` on `grnet` — nothing persists between calls.
+- The `sysbench` fixture creates the `sbtest` database and a `sysbench`@`'%'`
+  MySQL user on the primary (replicated cluster-wide, so it survives failover).
+- sysbench always targets the **current** primary (single-primary mode only
+  accepts writes on the primary); the framework resolves it dynamically via
+  `gr_cluster.get_primary()`.
+
+Relevant `GroupReplication` helpers: `get_primary()`, `stop_node()`,
+`rejoin_node()`, `wait_all_online()`, and `verify_checksums(database, nodes=...)`
+(defaults to the currently-online nodes).
 
 ## Options
 

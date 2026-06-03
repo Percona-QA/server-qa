@@ -1,3 +1,11 @@
+"""Basic Group Replication sanity test.
+
+Verifies that a freshly bootstrapped cluster has the expected GR configuration and
+membership, then creates a database/table and inserts rows on the primary and confirms
+the data replicates identically (matching checksums) to all nodes.
+"""
+
+
 def test_replicates_table_across_nodes(gr_cluster):
     primary = gr_cluster.primary()
     docker = gr_cluster.docker

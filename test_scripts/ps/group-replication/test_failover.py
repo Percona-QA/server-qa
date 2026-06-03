@@ -1,3 +1,12 @@
+"""Group Replication primary failover and recovery test.
+
+Loads data via sysbench, stops the current primary to force the election of a new one,
+and keeps writing through the failover. Then brings the stopped node back, confirms it
+auto-rejoins and the cluster is whole again, verifying data stays consistent across all
+online nodes (matching checksums) at every stage.
+"""
+
+
 def test_primary_failover_and_recovery(gr_cluster, sysbench):
     gr_cluster.verify()
 

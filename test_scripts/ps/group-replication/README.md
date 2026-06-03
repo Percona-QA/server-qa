@@ -63,14 +63,54 @@ Sysbench notes:
   use). Each sysbench command is its own one-shot `--rm` container named
   `sysbench_<test-name>` on `grnet` — nothing persists between calls.
 - The `sysbench` fixture creates the `sbtest` database and a `sysbench`@`'%'`
-  MySQL user on the primary (replicated cluster-wide, so it survives failover).
-- sysbench always targets the **current** primary (single-primary mode only
-  accepts writes on the primary); the framework resolves it dynamically via
-  `gr_cluster.get_primary()`.
+  MySQL user (replicated cluster-wide, so it survives failover).
+- sysbench targets the cluster's **read/write endpoint**, resolved dynamically
+  via `gr_cluster.rw_endpoint()` — the MySQL Router RW port when the router is
+  enabled (it routes writes to the current primary and follows failover), or the
+  current primary directly otherwise.
 
 Relevant `GroupReplication` helpers: `get_primary()`, `stop_node()`,
 `rejoin_node()`, `wait_all_online()`, and `verify_checksums(database, nodes=...)`
 (defaults to the currently-online nodes).
+
+## MySQL Router
+
+Tests run **through a proxy**, selected by the parametrized `gr_cluster` fixture.
+Today the only proxy is **MySQL Router** (`mysql_router=True`), so every test gets
+a `[router]` id suffix (e.g. `test_basic.py::test_replicates_table_across_nodes[router]`).
+HAProxy will be added as a second parametrized mode later; there is intentionally
+no "direct" mode in the test matrix (the `GroupReplication` class still defaults to
+`mysql_router=False` for direct use outside the suite).
+
+When `mysql_router=True`, `create()` starts a `percona/percona-mysql-router:8.4`
+container named `psrouter` on the cluster network **after** the InnoDB Cluster is
+ONLINE, bootstrapping it against a live member. The router exposes:
+
+- `6446` — classic read/write, routes to the **primary** (follows failover),
+- `6447` — classic read-only, load-balances across **secondaries**,
+- `6448`/`6449` — the same split over the X protocol.
+
+Host ports `33150` → `6446` and `33151` → `6447` are published for manual
+debugging (`mysql -h 127.0.0.1 -P 33150 -uroot -prootpass`).
+
+**What routes through the router and what stays direct.** The router is only a
+client connection path for **application traffic** — test DDL/DML and sysbench
+go through `6446`. The control plane stays **direct, per-node** and never goes
+through the router: the mysqlsh cluster bootstrap, `SET PERSIST`, `get_primary()`,
+membership/state polling, per-node variable checks in `verify()`, and per-node
+`verify_checksums()` — these inspect or configure individual members, which a
+proxy that routes to a single node cannot do.
+
+Proxy-agnostic accessors on `GroupReplication` keep tests identical across proxies:
+
+- `rw_endpoint()` → `(host, port)` for read/write traffic (router `6446` when
+  enabled, else the live primary on `3306`).
+- `ro_endpoint()` → `(host, port)` for read-only traffic (router `6447` when
+  enabled, else an active secondary on `3306`).
+- `exec_sql(sql, database=None)` — run application SQL through the read/write
+  endpoint (routed via the router when enabled, else direct to the primary).
+- `verify(check_router=...)` — defaults to checking, when the router is enabled,
+  that the RW endpoint routes to the current primary.
 
 ## Options
 
@@ -267,7 +307,7 @@ If a previous run aborted before the fixture's teardown, you'll have leftover
 containers/network/volumes. Clean them up:
 
 ```bash
-docker rm -f ps1 ps2 ps3
+docker rm -f ps1 ps2 ps3 psrouter
 docker volume rm ps1-data ps2-data ps3-data
 docker network rm grnet
 ```
@@ -277,6 +317,11 @@ docker network rm grnet
 Add files named `test_*.py` in this directory. Request the `gr_cluster`
 fixture and use:
 
+- `gr_cluster.exec_sql("SQL;")` — run application SQL through the read/write
+  endpoint (the router when enabled, else the primary). Use this for DDL/DML
+  instead of targeting a node directly, so the test is proxy-agnostic.
+- `gr_cluster.rw_endpoint()` / `gr_cluster.ro_endpoint()` — `(host, port)` for
+  read/write or read-only client traffic (e.g. to point sysbench at).
 - `gr_cluster.primary()` — name of the bootstrap node (`"ps1"`).
 - `gr_cluster.containers` — list of all node names in start order.
 - `gr_cluster.docker` — the `DockerHelper`. Common methods:

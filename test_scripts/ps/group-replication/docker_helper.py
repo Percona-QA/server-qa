@@ -55,6 +55,7 @@ class DockerHelper:
         volumes: list[str] | None = None,
         networks: list[str] | None = None,
         ports: list[str] | None = None,
+        entrypoint: str | None = None,
         command: list[str] | None = None,
         detach: bool = True,
         restart: str | None = None,
@@ -66,6 +67,8 @@ class DockerHelper:
         args.extend(["--name", name])
         if hostname:
             args.extend(["--hostname", hostname])
+        if entrypoint:
+            args.extend(["--entrypoint", entrypoint])
         if restart:
             args.extend(["--restart", restart])
         for k, v in (environment or {}).items():
@@ -129,10 +132,21 @@ class DockerHelper:
         user: str = "root",
         password: str = "rootpass",
         database: str | None = None,
+        host: str | None = None,
+        port: int | None = None,
         check: bool = True,
     ) -> ExecResult:
-        """Run a SQL statement inside a container using the mysql client."""
+        """Run a SQL statement inside a container using the mysql client.
+
+        With host/port omitted the client uses the container's local socket. Pass
+        host/port to connect over TCP instead (e.g. through MySQL Router).
+        """
         args = ["exec", name, "mysql", f"-u{user}", f"-p{password}", "-N", "-B"]
+        if host:
+            args.append(f"-h{host}")
+        if port:
+            # Force TCP so a host such as "localhost" is not silently swapped for the socket.
+            args.extend([f"-P{port}", "--protocol=TCP"])
         if database:
             args.extend(["-D", database])
         args.extend(["-e", sql])

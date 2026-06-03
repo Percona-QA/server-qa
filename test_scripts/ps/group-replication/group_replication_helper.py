@@ -23,6 +23,10 @@ class GroupReplication:
         communication_stack: str = "XCOM",
         single_primary: bool = True,
         start_on_boot: bool = True,
+        mysql_router: bool = False,
+        router_image: str = "percona/percona-mysql-router:8.4",
+        router_rw_port: int = 6446,
+        router_ro_port: int = 6447,
         mysql_extra_args: list[str] | None = None,
         verbose: bool | None = None,
     ):
@@ -44,6 +48,12 @@ class GroupReplication:
         self.communication_stack = communication_stack
         self.single_primary = single_primary
         self.start_on_boot = start_on_boot
+        self.mysql_router = mysql_router
+        self.router_image = router_image
+        self.router_name = f"{node_prefix}router"
+        self.router_rw_port = router_rw_port
+        self.router_ro_port = router_ro_port
+        self._router_started = False
         self.mysql_extra_args = list(mysql_extra_args or [])
         self.containers: list[str] = []
         self.active_nodes: list[str] = []
@@ -172,6 +182,84 @@ class GroupReplication:
             self.active_nodes.append(name)
         self.wait_all_online(timeout=timeout)
 
+    def rw_endpoint(self) -> tuple[str, int]:
+        """Return the (host, port) for read/write traffic: the router when enabled, else the live primary."""
+        if self.mysql_router:
+            return (self.router_name, self.router_rw_port)
+        return (self.get_primary(), 3306)
+
+    def ro_endpoint(self) -> tuple[str, int]:
+        """Return the (host, port) for read-only traffic: the router when enabled, else an active secondary."""
+        if self.mysql_router:
+            return (self.router_name, self.router_ro_port)
+        primary = self.get_primary()
+        secondaries = [n for n in self.active_nodes if n != primary]
+        return ((secondaries[0] if secondaries else primary), 3306)
+
+    def exec_sql(self, sql: str, database: str | None = None, check: bool = True):
+        """Run application SQL through the read/write endpoint (via the router when enabled, else direct to the primary)."""
+        if self.mysql_router:
+            return self.docker.exec_mysql(
+                self.active_nodes[0],
+                sql,
+                database=database,
+                host=self.router_name,
+                port=self.router_rw_port,
+                check=check,
+            )
+        return self.docker.exec_mysql(self.get_primary(), sql, database=database, check=check)
+
+    def _start_router(self) -> None:
+        """Start a MySQL Router container, bootstrapping it against the live InnoDB Cluster.
+
+        We override the image entrypoint and bootstrap explicitly: the Percona router image's
+        own (non-Kubernetes) entrypoint binds the routing ports to localhost, which is
+        unreachable from other containers. --conf-bind-address=0.0.0.0 fixes that, and we run
+        as the image's non-root user (no --user privilege drop).
+        """
+        seed = self.active_nodes[0]
+        self.log(f"start MySQL Router {self.router_name} (bootstrap from {seed})")
+        bootstrap = (
+            f"mysqlrouter --bootstrap root:{self.root_password}@{seed}:3306 "
+            "--directory /tmp/mysqlrouter "
+            "--conf-set-option=DEFAULT.unknown_config_option=warning "
+            "--conf-bind-address=0.0.0.0 --force "
+            "&& exec mysqlrouter -c /tmp/mysqlrouter/mysqlrouter.conf"
+        )
+        self.docker.create(
+            image=self.router_image,
+            name=self.router_name,
+            hostname=self.router_name,
+            networks=[self.network],
+            ports=[
+                f"{self.base_host_port + 90}:{self.router_rw_port}",
+                f"{self.base_host_port + 91}:{self.router_ro_port}",
+            ],
+            entrypoint="bash",
+            command=["-c", bootstrap],
+            restart="on-failure",
+        )
+
+    def _wait_router_ready(self, timeout: int = 60) -> None:
+        """Wait until the router accepts connections and routes the read/write port to the current primary."""
+        self.log(f"wait for router {self.router_name} to route to the primary")
+        deadline = time.time() + timeout
+        last = ""
+        while time.time() < deadline:
+            result = self.docker.exec_mysql(
+                self.active_nodes[0],
+                "SELECT @@hostname;",
+                host=self.router_name,
+                port=self.router_rw_port,
+                check=False,
+            )
+            routed = result.stdout.strip()
+            if result.ok and routed and routed == self.get_primary():
+                return
+            last = routed or (result.stderr or "").strip()
+            time.sleep(2)
+        raise RuntimeError(f"Router {self.router_name} not ready / not routing to primary in {timeout}s (last: {last!r})")
+
     def create(self) -> None:
         """Create the network and nodes, bootstrap the cluster, add instances, and persist GR settings."""
         self.log(f"create network {self.network}")
@@ -244,6 +332,11 @@ class GroupReplication:
                 f"SET PERSIST group_replication_group_seeds='{seeds}';",
             )
 
+        if self.mysql_router:
+            self._start_router()
+            self._router_started = True
+            self._wait_router_ready()
+
     def _read_variables(self, name: str, variables: list[str]) -> dict[str, str]:
         """Read the given global variables from a node as a name->value map."""
         in_clause = ",".join(f"'{v}'" for v in variables)
@@ -258,10 +351,16 @@ class GroupReplication:
                 actual[parts[0]] = parts[1]
         return actual
 
-    def verify(self) -> None:
-        """Assert that GR variables, membership, states, and roles match the expected configuration."""
+    def verify(self, check_router: bool | None = None) -> None:
+        """Assert that GR variables, membership, states, and roles match the expected configuration.
+
+        When check_router is set (defaults to whether the router is enabled), also assert that the
+        router's read/write endpoint routes to the current primary.
+        """
         if not self.containers:
             raise RuntimeError("Cluster not created yet")
+        if check_router is None:
+            check_router = self.mysql_router
 
         errors: list[str] = []
 
@@ -326,6 +425,21 @@ class GroupReplication:
             if len(secondaries) != self.num_nodes - 1:
                 errors.append(
                     f"Expected {self.num_nodes - 1} SECONDARY, got {len(secondaries)}: {members}"
+                )
+
+        if check_router:
+            self.log("verify router routes read/write traffic to the primary")
+            result = self.docker.exec_mysql(
+                self.active_nodes[0],
+                "SELECT @@hostname;",
+                host=self.router_name,
+                port=self.router_rw_port,
+                check=False,
+            )
+            routed = result.stdout.strip()
+            if not result.ok or routed != self.get_primary():
+                errors.append(
+                    f"Router RW endpoint routes to {routed!r}, expected primary {self.get_primary()!r}"
                 )
 
         if errors:
@@ -396,6 +510,10 @@ class GroupReplication:
     def destroy(self, remove_volumes: bool = False) -> None:
         """Remove all containers, optionally their data volumes, and the networks, then reset state."""
         self.log("destroy cluster")
+        if self._router_started or (self.mysql_router and self.docker.container_exists(self.router_name)):
+            self.log(f"remove router {self.router_name}")
+            self.docker.destroy(self.router_name)
+            self._router_started = False
         for name in reversed(self.containers):
             self.docker.destroy(name)
         if remove_volumes:

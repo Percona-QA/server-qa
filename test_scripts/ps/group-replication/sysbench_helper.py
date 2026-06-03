@@ -30,12 +30,12 @@ class Sysbench:
         self.threads = threads
         self.log = log or (lambda msg: None)
 
-    def _args(self, host: str, workload: str) -> list[str]:
+    def _args(self, host: str, workload: str, port: int = 3306) -> list[str]:
         return [
             workload,
             "--db-driver=mysql",
             f"--mysql-host={host}",
-            "--mysql-port=3306",
+            f"--mysql-port={port}",
             f"--mysql-user={self.mysql_user}",
             f"--mysql-password={self.mysql_password}",
             f"--mysql-db={self.database}",
@@ -54,13 +54,13 @@ class Sysbench:
             check=True,
         )
 
-    def prepare(self, host: str, workload: str = "oltp_read_write"):
-        self.log(f"sysbench prepare ({self.tables} tables x {self.table_size} rows) on {host}")
-        return self._exec(self._args(host, workload) + ["prepare"])
+    def prepare(self, host: str, workload: str = "oltp_read_write", port: int = 3306):
+        self.log(f"sysbench prepare ({self.tables} tables x {self.table_size} rows) on {host}:{port}")
+        return self._exec(self._args(host, workload, port) + ["prepare"])
 
-    def run(self, host: str, workload: str = "oltp_read_write", time: int = 20):
-        self.log(f"sysbench {workload} run for {time}s ({self.threads} threads) on {host}")
+    def run(self, host: str, workload: str = "oltp_read_write", time: int = 20, port: int = 3306):
+        self.log(f"sysbench {workload} run for {time}s ({self.threads} threads) on {host}:{port}")
         return self._exec(
-            self._args(host, workload)
+            self._args(host, workload, port)
             + [f"--threads={self.threads}", f"--time={time}", "--report-interval=5", "run"]
         )

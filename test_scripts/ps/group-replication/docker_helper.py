@@ -31,6 +31,7 @@ class DockerHelper:
         self.cli = cli
 
     def _run(self, args: list[str], check: bool = True, input_text: str | None = None) -> ExecResult:
+        """Run a container CLI command and return its result, raising on failure when check is set."""
         proc = subprocess.run(
             [self.cli, *args],
             capture_output=True,
@@ -58,6 +59,7 @@ class DockerHelper:
         detach: bool = True,
         restart: str | None = None,
     ) -> ExecResult:
+        """Create and start a long-lived (detached) container with the given config."""
         args = ["run"]
         if detach:
             args.append("-d")
@@ -89,6 +91,7 @@ class DockerHelper:
         remove: bool = True,
         check: bool = True,
     ) -> ExecResult:
+        """Run a one-off (by default --rm) container, e.g. an ephemeral helper task."""
         args = ["run"]
         if remove:
             args.append("--rm")
@@ -104,15 +107,19 @@ class DockerHelper:
         return self._run(args, check=check)
 
     def destroy(self, name: str) -> ExecResult:
+        """Force-remove a container, ignoring errors if it does not exist."""
         return self._run(["rm", "-f", name], check=False)
 
     def start(self, name: str) -> ExecResult:
+        """Start an existing stopped container."""
         return self._run(["start", name])
 
     def stop(self, name: str) -> ExecResult:
+        """Stop a running container."""
         return self._run(["stop", name])
 
     def exec_command(self, name: str, command: str, check: bool = False) -> ExecResult:
+        """Run a shell command inside a running container."""
         return self._run(["exec", name, "sh", "-c", command], check=check)
 
     def exec_mysql(
@@ -124,6 +131,7 @@ class DockerHelper:
         database: str | None = None,
         check: bool = True,
     ) -> ExecResult:
+        """Run a SQL statement inside a container using the mysql client."""
         args = ["exec", name, "mysql", f"-u{user}", f"-p{password}", "-N", "-B"]
         if database:
             args.extend(["-D", database])
@@ -141,6 +149,7 @@ class DockerHelper:
         language: str = "js",
         check: bool = True,
     ) -> ExecResult:
+        """Run a MySQL Shell (mysqlsh) script inside a container against the given URI."""
         uri = f"{user}:{password}@{host}:{port}"
         args = [
             "exec",
@@ -157,6 +166,7 @@ class DockerHelper:
         return self._run(args, check=check)
 
     def network_create(self, name: str) -> ExecResult:
+        """Create a container network, reusing it if one with the same name already exists."""
         existing = self._run(
             ["network", "ls", "--filter", f"name=^{name}$", "--format", "{{.Name}}"],
             check=False,
@@ -166,12 +176,15 @@ class DockerHelper:
         return self._run(["network", "create", name])
 
     def network_remove(self, name: str) -> ExecResult:
+        """Remove a container network, ignoring errors if it does not exist."""
         return self._run(["network", "rm", name], check=False)
 
     def volume_remove(self, name: str) -> ExecResult:
+        """Remove a container volume, ignoring errors if it does not exist."""
         return self._run(["volume", "rm", name], check=False)
 
     def container_exists(self, name: str) -> bool:
+        """Return True if a container with the exact given name exists (running or stopped)."""
         result = self._run(
             ["ps", "-a", "--filter", f"name=^{name}$", "--format", "{{.Names}}"],
             check=False,

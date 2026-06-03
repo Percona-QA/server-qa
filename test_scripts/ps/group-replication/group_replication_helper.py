@@ -50,22 +50,28 @@ class GroupReplication:
         self.networks: list[str] = []
 
     def log(self, msg: str) -> None:
+        """Log a message, but only when verbose mode is enabled."""
         if self.verbose:
             _logger.info(msg)
 
     def _gr_address(self, name: str) -> str:
+        """Build the GR communication address (host:gr_port) for a node."""
         return f"{name}:{self.gr_port}"
 
     def _group_seeds(self) -> str:
+        """Build the comma-separated group_replication_group_seeds list for all nodes."""
         return ",".join(self._gr_address(self._node_name(i)) for i in range(1, self.num_nodes + 1))
 
     def _node_name(self, index: int) -> str:
+        """Build the container/host name for the node at the given 1-based index."""
         return f"{self.node_prefix}{index}"
 
     def _volume_name(self, index: int) -> str:
+        """Build the data volume name for the node at the given 1-based index."""
         return f"{self._node_name(index)}-data"
 
     def _mysqld_args(self, server_id: int, hostname: str) -> list[str]:
+        """Build the mysqld command-line arguments required for Group Replication on a node."""
         args = [
             f"--server-id={server_id}",
             f"--report-host={hostname}",
@@ -80,6 +86,7 @@ class GroupReplication:
         return args
 
     def _wait_ready(self, name: str, timeout: int = 180) -> None:
+        """Wait until a node accepts MySQL connections (responds to ping), or time out."""
         self.log(f"wait for {name} to accept connections")
         deadline = time.time() + timeout
         last_err = ""
@@ -94,11 +101,13 @@ class GroupReplication:
         raise RuntimeError(f"Container {name} did not become ready in {timeout}s. Last: {last_err}")
 
     def primary(self) -> str:
+        """Return the bootstrap node name (the first container created)."""
         if not self.containers:
             raise RuntimeError("Cluster not created yet")
         return self.containers[0]
 
     def get_primary(self, timeout: int = 60) -> str:
+        """Query the cluster for the host of the currently elected ONLINE PRIMARY, or time out."""
         if not self.active_nodes:
             raise RuntimeError("No active nodes")
         deadline = time.time() + timeout
@@ -119,12 +128,14 @@ class GroupReplication:
         raise RuntimeError(f"No PRIMARY elected within {timeout}s (last: {last!r})")
 
     def stop_node(self, name: str) -> None:
+        """Stop a node's container and remove it from the active-nodes list."""
         self.log(f"stop node {name}")
         self.docker.stop(name)
         if name in self.active_nodes:
             self.active_nodes.remove(name)
 
     def _member_states(self, node: str) -> dict[str, str]:
+        """Read the host->state map of all group members as seen from the given node."""
         result = self.docker.exec_mysql(
             node,
             "SELECT MEMBER_HOST, MEMBER_STATE "
@@ -140,6 +151,7 @@ class GroupReplication:
         return states
 
     def wait_all_online(self, timeout: int = 180) -> None:
+        """Wait until every expected member reports the ONLINE state, or time out."""
         self.log("wait for all members ONLINE")
         deadline = time.time() + timeout
         last: dict[str, str] = {}
@@ -152,6 +164,7 @@ class GroupReplication:
         raise RuntimeError(f"Not all members ONLINE within {timeout}s (last: {last})")
 
     def rejoin_node(self, name: str, timeout: int = 180) -> None:
+        """Restart a stopped node and wait for it to auto-rejoin and all members to be ONLINE."""
         self.log(f"start node {name} (auto-rejoin)")
         self.docker.start(name)
         self._wait_ready(name)
@@ -160,6 +173,7 @@ class GroupReplication:
         self.wait_all_online(timeout=timeout)
 
     def create(self) -> None:
+        """Create the network and nodes, bootstrap the cluster, add instances, and persist GR settings."""
         self.log(f"create network {self.network}")
         self.docker.network_create(self.network)
         self.networks.append(self.network)
@@ -231,6 +245,7 @@ class GroupReplication:
             )
 
     def _read_variables(self, name: str, variables: list[str]) -> dict[str, str]:
+        """Read the given global variables from a node as a name->value map."""
         in_clause = ",".join(f"'{v}'" for v in variables)
         result = self.docker.exec_mysql(
             name,
@@ -244,6 +259,7 @@ class GroupReplication:
         return actual
 
     def verify(self) -> None:
+        """Assert that GR variables, membership, states, and roles match the expected configuration."""
         if not self.containers:
             raise RuntimeError("Cluster not created yet")
 
@@ -316,6 +332,7 @@ class GroupReplication:
             raise AssertionError("GroupReplication.verify failed:\n  " + "\n  ".join(errors))
 
     def _list_tables(self, node: str, database: str) -> list[str]:
+        """List the base table names in a database on the given node."""
         result = self.docker.exec_mysql(
             node,
             "SELECT TABLE_NAME FROM information_schema.TABLES "
@@ -325,6 +342,7 @@ class GroupReplication:
         return [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
 
     def _table_checksum(self, node: str, database: str, table: str) -> str:
+        """Return the CHECKSUM TABLE value for a single table on the given node."""
         result = self.docker.exec_mysql(
             node, f"CHECKSUM TABLE `{database}`.`{table}`;"
         )
@@ -335,6 +353,7 @@ class GroupReplication:
     def verify_checksums(
         self, database: str, nodes: list[str] | None = None, timeout: int = 30
     ) -> dict[str, str]:
+        """Compare per-table checksums across nodes (retrying for replication lag) and return them."""
         if not self.containers:
             raise RuntimeError("Cluster not created yet")
         nodes = nodes if nodes is not None else self.active_nodes
@@ -375,6 +394,7 @@ class GroupReplication:
             time.sleep(1)
 
     def destroy(self, remove_volumes: bool = False) -> None:
+        """Remove all containers, optionally their data volumes, and the networks, then reset state."""
         self.log("destroy cluster")
         for name in reversed(self.containers):
             self.docker.destroy(name)

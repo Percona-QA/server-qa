@@ -7,36 +7,19 @@ from group_replication_helper import GroupReplication
 from sysbench_helper import Sysbench
 
 
-# Proxy modes the suite exercises in front of the cluster. There is intentionally
-# no "direct" entry: every test runs behind a proxy. By default a test runs under
-# all of them; restrict with @pytest.mark.proxies("haproxy") / ("router").
+# Proxy modes the suite can run a test behind. There is intentionally no "direct"
+# entry: every test runs behind a proxy. Each test selects its proxies explicitly
+# with @pytest.mark.parametrize("gr_cluster", [...], indirect=True) — see the test
+# files. The value passed (e.g. "router"/"haproxy") is the key looked up here.
 PROXIES = {
     "router": {"mysql_router": True},
     "haproxy": {"haproxy": True},
 }
 
 
-def pytest_configure(config):
-    config.addinivalue_line(
-        "markers",
-        "proxies(*names): restrict a test to a subset of proxy modes "
-        "(e.g. @pytest.mark.proxies('haproxy')); unmarked runs under all.",
-    )
-
-
-def pytest_generate_tests(metafunc):
-    if "gr_cluster" not in metafunc.fixturenames:
-        return
-    marker = metafunc.definition.get_closest_marker("proxies")
-    names = list(marker.args) if marker else list(PROXIES)
-    unknown = [n for n in names if n not in PROXIES]
-    if unknown:
-        raise pytest.UsageError(f"unknown proxies marker value(s): {unknown}")
-    metafunc.parametrize("gr_cluster", names, indirect=True, ids=names, scope="module")
-
-
 @pytest.fixture(scope="module")
 def gr_cluster(request):
+    # request.param is supplied by each test's @pytest.mark.parametrize(..., indirect=True).
     helper = DockerHelper()
     cluster = GroupReplication(helper, num_nodes=3, **PROXIES[request.param])
     try:

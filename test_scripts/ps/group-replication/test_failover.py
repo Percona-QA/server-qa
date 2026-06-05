@@ -6,7 +6,10 @@ auto-rejoins and the cluster is whole again, verifying data stays consistent acr
 online nodes (matching checksums) at every stage.
 """
 
+import pytest
 
+
+@pytest.mark.parametrize("gr_cluster", ["router", "haproxy"], indirect=True)
 def test_primary_failover_and_recovery(gr_cluster, sysbench):
     gr_cluster.verify()
 

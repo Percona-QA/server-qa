@@ -75,28 +75,33 @@ Relevant `GroupReplication` helpers: `get_primary()`, `stop_node()`,
 
 ## Proxies (MySQL Router and HAProxy)
 
-Tests run **through a proxy**, selected by the parametrized `gr_cluster` fixture.
-Two modes are exercised — **MySQL Router** (`mysql_router=True`) and **HAProxy**
-(`haproxy=True`) — so by default every test runs twice, with `[router]` and
-`[haproxy]` id suffixes (e.g. `test_replicates_table_across_nodes[router]` and
-`[haproxy]`). There is intentionally no "direct" mode in the matrix (the
-`GroupReplication` class still defaults to no proxy for direct use outside the
-suite). `create()` starts the proxy on the cluster network **after** the InnoDB
-Cluster is ONLINE.
+Tests run **through a proxy**, chosen per test with an explicit
+`@pytest.mark.parametrize("gr_cluster", [...], indirect=True)` so the proxy set is
+visible right above the test. Two modes are available — **MySQL Router**
+(`"router"`, `mysql_router=True`) and **HAProxy** (`"haproxy"`, `haproxy=True`) —
+each yielding a `[router]` / `[haproxy]` id suffix (e.g.
+`test_replicates_table_across_nodes[router]`). There is intentionally no "direct"
+mode (the `GroupReplication` class still defaults to no proxy for direct use outside
+the suite). `create()` starts the proxy on the cluster network **after** the InnoDB
+Cluster is ONLINE. The parametrize value is looked up in `PROXIES` in `conftest.py`.
 
-### Restricting a test to a subset of proxies
+### Choosing which proxies a test runs under
 
-Unmarked tests run under all proxies. To pin a test to a subset, use the
-`proxies` marker:
+Declare it explicitly on each test (no hidden default — a test without the decorator
+gets no `gr_cluster` parameter and fails fast):
 
 ```python
-@pytest.mark.proxies("haproxy")          # haproxy only
+# Runs under both proxies
+@pytest.mark.parametrize("gr_cluster", ["router", "haproxy"], indirect=True)
+def test_both(gr_cluster): ...
+
+# HAProxy only
+@pytest.mark.parametrize("gr_cluster", ["haproxy"], indirect=True)
 def test_haproxy_specific(gr_cluster): ...
 
-@pytest.mark.proxies("router")           # router only
+# MySQL Router only
+@pytest.mark.parametrize("gr_cluster", ["router"], indirect=True)
 def test_router_specific(gr_cluster): ...
-
-def test_both(gr_cluster): ...           # default — runs under router AND haproxy
 ```
 
 ### MySQL Router (`psrouter`)

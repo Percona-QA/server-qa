@@ -5,7 +5,10 @@ membership, then creates a database/table and inserts rows on the primary and co
 the data replicates identically (matching checksums) to all nodes.
 """
 
+import pytest
 
+
+@pytest.mark.parametrize("gr_cluster", ["router", "haproxy"], indirect=True)
 def test_replicates_table_across_nodes(gr_cluster):
     gr_cluster.verify()
 

@@ -558,6 +558,9 @@ class GroupReplication:
 
         primaries = [m for m in members if m[3] == "PRIMARY"]
         secondaries = [m for m in members if m[3] == "SECONDARY"]
+        primary_hosts = ", ".join(sorted(m[0] for m in primaries)) or "none"
+        secondary_hosts = ", ".join(sorted(m[0] for m in secondaries)) or "none"
+        self.log(f"primary: {primary_hosts}; secondaries: {secondary_hosts}")
         if self.single_primary:
             if len(primaries) != 1:
                 errors.append(f"Expected exactly 1 PRIMARY, got {len(primaries)}: {members}")

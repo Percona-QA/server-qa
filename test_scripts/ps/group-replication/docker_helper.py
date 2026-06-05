@@ -30,19 +30,38 @@ class DockerHelper:
             )
         self.cli = cli
 
-    def _run(self, args: list[str], check: bool = True, input_text: str | None = None) -> ExecResult:
-        """Run a container CLI command and return its result, raising on failure when check is set."""
-        proc = subprocess.run(
-            [self.cli, *args],
-            capture_output=True,
-            text=True,
-            input=input_text,
-        )
-        result = ExecResult(stdout=proc.stdout, stderr=proc.stderr, returncode=proc.returncode)
+    def _run(
+        self,
+        args: list[str],
+        check: bool = True,
+        input_text: str | None = None,
+        timeout: float | None = None,
+    ) -> ExecResult:
+        """Run a container CLI command and return its result, raising on failure when check is set.
+
+        A timeout (seconds) bounds how long the call may block; on timeout the process is killed and
+        a non-ok result is returned (or raised when check is set), so a hung connection can't stall forever.
+        """
+        try:
+            proc = subprocess.run(
+                [self.cli, *args],
+                capture_output=True,
+                text=True,
+                input=input_text,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            result = ExecResult(
+                stdout=exc.stdout or "",
+                stderr=f"timed out after {timeout}s",
+                returncode=124,
+            )
+        else:
+            result = ExecResult(stdout=proc.stdout, stderr=proc.stderr, returncode=proc.returncode)
         if check and not result.ok:
             raise RuntimeError(
-                f"{self.cli} {' '.join(args)} failed (exit {proc.returncode})\n"
-                f"stdout: {proc.stdout}\nstderr: {proc.stderr}"
+                f"{self.cli} {' '.join(args)} failed (exit {result.returncode})\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
             )
         return result
 
@@ -59,12 +78,17 @@ class DockerHelper:
         command: list[str] | None = None,
         detach: bool = True,
         restart: str | None = None,
+        platform: str | None = None,
     ) -> ExecResult:
         """Create and start a long-lived (detached) container with the given config."""
         args = ["run"]
         if detach:
             args.append("-d")
         args.extend(["--name", name])
+        if platform:
+            # Needed for multi-arch manifest-list images with no native variant
+            # (e.g. an amd64-only image on Apple Silicon).
+            args.extend(["--platform", platform])
         if hostname:
             args.extend(["--hostname", hostname])
         if entrypoint:
@@ -135,11 +159,13 @@ class DockerHelper:
         host: str | None = None,
         port: int | None = None,
         check: bool = True,
+        timeout: float | None = None,
     ) -> ExecResult:
         """Run a SQL statement inside a container using the mysql client.
 
         With host/port omitted the client uses the container's local socket. Pass
-        host/port to connect over TCP instead (e.g. through MySQL Router).
+        host/port to connect over TCP instead (e.g. through a proxy). A timeout (seconds)
+        bounds the call so a connection that hangs (e.g. a proxy with no live backend) can't block.
         """
         args = ["exec", name, "mysql", f"-u{user}", f"-p{password}", "-N", "-B"]
         if host:
@@ -150,7 +176,7 @@ class DockerHelper:
         if database:
             args.extend(["-D", database])
         args.extend(["-e", sql])
-        return self._run(args, check=check)
+        return self._run(args, check=check, timeout=timeout)
 
     def exec_mysqlsh(
         self,

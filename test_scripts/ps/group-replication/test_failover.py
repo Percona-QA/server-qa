@@ -23,9 +23,9 @@ def test_primary_failover_and_recovery(gr_cluster, sysbench):
     assert new_primary in gr_cluster.active_nodes
 
     # The read/write endpoint must follow the failover before we load again
-    # (the router needs a moment to repoint 6446 at the new primary).
-    if gr_cluster.mysql_router:
-        gr_cluster._wait_router_ready()
+    # (the proxy needs a moment to repoint at the new primary).
+    if gr_cluster.proxy:
+        gr_cluster.wait_proxy_ready()
 
     # Load against the new primary; data stays consistent across the online nodes.
     host, port = gr_cluster.rw_endpoint()

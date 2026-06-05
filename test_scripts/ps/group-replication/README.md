@@ -73,44 +73,86 @@ Relevant `GroupReplication` helpers: `get_primary()`, `stop_node()`,
 `rejoin_node()`, `wait_all_online()`, and `verify_checksums(database, nodes=...)`
 (defaults to the currently-online nodes).
 
-## MySQL Router
+## Proxies (MySQL Router and HAProxy)
 
 Tests run **through a proxy**, selected by the parametrized `gr_cluster` fixture.
-Today the only proxy is **MySQL Router** (`mysql_router=True`), so every test gets
-a `[router]` id suffix (e.g. `test_basic.py::test_replicates_table_across_nodes[router]`).
-HAProxy will be added as a second parametrized mode later; there is intentionally
-no "direct" mode in the test matrix (the `GroupReplication` class still defaults to
-`mysql_router=False` for direct use outside the suite).
+Two modes are exercised — **MySQL Router** (`mysql_router=True`) and **HAProxy**
+(`haproxy=True`) — so by default every test runs twice, with `[router]` and
+`[haproxy]` id suffixes (e.g. `test_replicates_table_across_nodes[router]` and
+`[haproxy]`). There is intentionally no "direct" mode in the matrix (the
+`GroupReplication` class still defaults to no proxy for direct use outside the
+suite). `create()` starts the proxy on the cluster network **after** the InnoDB
+Cluster is ONLINE.
 
-When `mysql_router=True`, `create()` starts a `percona/percona-mysql-router:8.4`
-container named `psrouter` on the cluster network **after** the InnoDB Cluster is
-ONLINE, bootstrapping it against a live member. The router exposes:
+### Restricting a test to a subset of proxies
+
+Unmarked tests run under all proxies. To pin a test to a subset, use the
+`proxies` marker:
+
+```python
+@pytest.mark.proxies("haproxy")          # haproxy only
+def test_haproxy_specific(gr_cluster): ...
+
+@pytest.mark.proxies("router")           # router only
+def test_router_specific(gr_cluster): ...
+
+def test_both(gr_cluster): ...           # default — runs under router AND haproxy
+```
+
+### MySQL Router (`psrouter`)
+
+Image `percona/percona-mysql-router:8.4`, bootstrapped against a live member. Exposes:
 
 - `6446` — classic read/write, routes to the **primary** (follows failover),
 - `6447` — classic read-only, load-balances across **secondaries**,
 - `6448`/`6449` — the same split over the X protocol.
 
-Host ports `33150` → `6446` and `33151` → `6447` are published for manual
-debugging (`mysql -h 127.0.0.1 -P 33150 -uroot -prootpass`).
+Host ports `33150` → `6446`, `33151` → `6447` (for manual debugging:
+`mysql -h 127.0.0.1 -P 33150 -uroot -prootpass`).
 
-**What routes through the router and what stays direct.** The router is only a
-client connection path for **application traffic** — test DDL/DML and sysbench
-go through `6446`. The control plane stays **direct, per-node** and never goes
-through the router: the mysqlsh cluster bootstrap, `SET PERSIST`, `get_primary()`,
-membership/state polling, per-node variable checks in `verify()`, and per-node
-`verify_checksums()` — these inspect or configure individual members, which a
-proxy that routes to a single node cannot do.
+### HAProxy (`pshaproxy`)
+
+Image `perconalab/percona-server-mysql-operator:main-haproxy` (ships `haproxy` +
+a MySQL client, amd64-only — pulled with `--platform linux/amd64`). Two frontends:
+
+- `3307` — read/write, `balance first` → the current **primary**,
+- `3308` — read-only, `balance roundrobin` across live members.
+
+HAProxy is not SQL-aware and can't tell which member is the primary. Both backends
+use the built-in `mysql-check` only for **liveness**; the framework then pins the
+write backend to the current primary via HAProxy's **runtime API** over the stats
+socket (`set server be_write/<node> state ready|maint`) — the same external-management
+model the Percona operator uses. On failover, `wait_proxy_ready()` re-pins the write
+backend to the newly elected primary. (An autonomous `external-check` script keyed on
+`super_read_only` was tried first but is pathologically slow under the amd64-on-arm64
+**emulation** this image runs in, where each forked check can stall for minutes.)
+
+Host ports `33152` → `3307`, `33153` → `3308`. The config is injected via an
+environment variable (no host bind mounts), and the container runs as the image's
+non-root `mysql` user.
+
+### What routes through the proxy and what stays direct
+
+The proxy is only a client connection path for **application traffic** — test
+DDL/DML and sysbench go through the read/write endpoint. The control plane stays
+**direct, per-node** and never goes through the proxy: the mysqlsh cluster
+bootstrap, `SET PERSIST`, `get_primary()`, membership/state polling, per-node
+variable checks in `verify()`, and per-node `verify_checksums()` — these inspect
+or configure individual members, which a proxy that routes to a single node cannot do.
 
 Proxy-agnostic accessors on `GroupReplication` keep tests identical across proxies:
 
-- `rw_endpoint()` → `(host, port)` for read/write traffic (router `6446` when
-  enabled, else the live primary on `3306`).
-- `ro_endpoint()` → `(host, port)` for read-only traffic (router `6447` when
-  enabled, else an active secondary on `3306`).
+- `rw_endpoint()` → `(host, port)` for read/write traffic (the proxy's write
+  endpoint when enabled, else the live primary on `3306`).
+- `ro_endpoint()` → `(host, port)` for read-only traffic (the proxy's read
+  endpoint when enabled, else an active secondary on `3306`).
 - `exec_sql(sql, database=None)` — run application SQL through the read/write
-  endpoint (routed via the router when enabled, else direct to the primary).
-- `verify(check_router=...)` — defaults to checking, when the router is enabled,
-  that the RW endpoint routes to the current primary.
+  endpoint (routed via the proxy when enabled, else direct to the primary).
+- `wait_proxy_ready()` — block until the proxy's RW endpoint routes to the current
+  primary (used after failover before resuming writes).
+- `verify(check_proxy=...)` — defaults to checking, when a proxy is enabled, that
+  the RW endpoint routes to the current primary.
+- `gr_cluster.proxy` — `"router"`, `"haproxy"`, or `None`.
 
 ## Options
 
@@ -307,7 +349,7 @@ If a previous run aborted before the fixture's teardown, you'll have leftover
 containers/network/volumes. Clean them up:
 
 ```bash
-docker rm -f ps1 ps2 ps3 psrouter
+docker rm -f ps1 ps2 ps3 psrouter pshaproxy
 docker volume rm ps1-data ps2-data ps3-data
 docker network rm grnet
 ```

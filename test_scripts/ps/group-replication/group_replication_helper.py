@@ -27,11 +27,18 @@ class GroupReplication:
         router_image: str = "percona/percona-mysql-router:8.4",
         router_rw_port: int = 6446,
         router_ro_port: int = 6447,
+        haproxy: bool = False,
+        haproxy_image: str = "perconalab/percona-server-mysql-operator:main-haproxy",
+        haproxy_write_port: int = 3307,
+        haproxy_read_port: int = 3308,
+        haproxy_platform: str | None = "linux/amd64",
         mysql_extra_args: list[str] | None = None,
         verbose: bool | None = None,
     ):
         if num_nodes < 1:
             raise ValueError("num_nodes must be >= 1")
+        if mysql_router and haproxy:
+            raise ValueError("mysql_router and haproxy are mutually exclusive")
         if verbose is None:
             verbose = os.environ.get("GR_VERBOSE", "").lower() in ("1", "true", "yes", "on")
         self.verbose = verbose
@@ -53,7 +60,15 @@ class GroupReplication:
         self.router_name = f"{node_prefix}router"
         self.router_rw_port = router_rw_port
         self.router_ro_port = router_ro_port
-        self._router_started = False
+        self.haproxy = haproxy
+        self.haproxy_image = haproxy_image
+        self.haproxy_name = f"{node_prefix}haproxy"
+        self.haproxy_write_port = haproxy_write_port
+        self.haproxy_read_port = haproxy_read_port
+        self.haproxy_platform = haproxy_platform
+        # The active proxy in front of the cluster, if any.
+        self.proxy = "router" if mysql_router else "haproxy" if haproxy else None
+        self._proxy_started = False
         self.mysql_extra_args = list(mysql_extra_args or [])
         self.containers: list[str] = []
         self.active_nodes: list[str] = []
@@ -63,6 +78,15 @@ class GroupReplication:
         """Log a message, but only when verbose mode is enabled."""
         if self.verbose:
             _logger.info(msg)
+
+    @property
+    def proxy_name(self) -> str | None:
+        """Container name of the active proxy (router/haproxy), or None when running direct."""
+        if self.proxy == "router":
+            return self.router_name
+        if self.proxy == "haproxy":
+            return self.haproxy_name
+        return None
 
     def _gr_address(self, name: str) -> str:
         """Build the GR communication address (host:gr_port) for a node."""
@@ -183,28 +207,33 @@ class GroupReplication:
         self.wait_all_online(timeout=timeout)
 
     def rw_endpoint(self) -> tuple[str, int]:
-        """Return the (host, port) for read/write traffic: the router when enabled, else the live primary."""
-        if self.mysql_router:
+        """Return the (host, port) for read/write traffic: the proxy when enabled, else the live primary."""
+        if self.proxy == "router":
             return (self.router_name, self.router_rw_port)
+        if self.proxy == "haproxy":
+            return (self.haproxy_name, self.haproxy_write_port)
         return (self.get_primary(), 3306)
 
     def ro_endpoint(self) -> tuple[str, int]:
-        """Return the (host, port) for read-only traffic: the router when enabled, else an active secondary."""
-        if self.mysql_router:
+        """Return the (host, port) for read-only traffic: the proxy when enabled, else an active secondary."""
+        if self.proxy == "router":
             return (self.router_name, self.router_ro_port)
+        if self.proxy == "haproxy":
+            return (self.haproxy_name, self.haproxy_read_port)
         primary = self.get_primary()
         secondaries = [n for n in self.active_nodes if n != primary]
         return ((secondaries[0] if secondaries else primary), 3306)
 
     def exec_sql(self, sql: str, database: str | None = None, check: bool = True):
-        """Run application SQL through the read/write endpoint (via the router when enabled, else direct to the primary)."""
-        if self.mysql_router:
+        """Run application SQL through the read/write endpoint (via the proxy when enabled, else direct to the primary)."""
+        if self.proxy:
+            host, port = self.rw_endpoint()
             return self.docker.exec_mysql(
                 self.active_nodes[0],
                 sql,
                 database=database,
-                host=self.router_name,
-                port=self.router_rw_port,
+                host=host,
+                port=port,
                 check=check,
             )
         return self.docker.exec_mysql(self.get_primary(), sql, database=database, check=check)
@@ -240,25 +269,135 @@ class GroupReplication:
             restart="on-failure",
         )
 
-    def _wait_router_ready(self, timeout: int = 60) -> None:
-        """Wait until the router accepts connections and routes the read/write port to the current primary."""
-        self.log(f"wait for router {self.router_name} to route to the primary")
+    def _haproxy_config(self) -> str:
+        """Build the haproxy.cfg: write frontend (:3307) to the primary, read frontend (:3308) round-robin.
+
+        HAProxy is not SQL-aware and cannot tell which member is the primary, so both backends use the
+        built-in mysql-check only for liveness (no forking external-check, which is pathologically slow
+        under the amd64-on-arm64 emulation this operator image runs in). The write backend lists every
+        node but the framework keeps only the current primary in the ready state via the runtime API
+        (see _haproxy_set_write_primary) — the same external-management model the Percona operator uses.
+        """
+        servers = "\n".join(f"  server {n} {n}:3306" for n in self.containers)
+        return (
+            "global\n"
+            "  maxconn 2048\n"
+            "  log stdout format raw local0\n"
+            "  stats socket /tmp/haproxy.sock mode 660 level admin\n"
+            "\n"
+            "defaults\n"
+            "  mode tcp\n"
+            "  log global\n"
+            "  option tcplog\n"
+            "  timeout connect 5s\n"
+            "  timeout queue 10s\n"
+            "  timeout client 30m\n"
+            "  timeout server 30m\n"
+            "  default-server check inter 2s rise 1 fall 3\n"
+            "\n"
+            "backend be_write\n"
+            "  balance first\n"
+            "  option mysql-check\n"
+            f"{servers}\n"
+            "\n"
+            "backend be_read\n"
+            "  balance roundrobin\n"
+            "  option mysql-check\n"
+            f"{servers}\n"
+            "\n"
+            "frontend fe_write\n"
+            f"  bind :{self.haproxy_write_port}\n"
+            "  default_backend be_write\n"
+            "\n"
+            "frontend fe_read\n"
+            f"  bind :{self.haproxy_read_port}\n"
+            "  default_backend be_read\n"
+        )
+
+    def _haproxy_set_write_primary(self, primary: str) -> None:
+        """Pin the write backend to the given primary: mark it ready and every other node in maintenance.
+
+        Uses HAProxy's runtime API over the stats socket, so writes only reach the primary even though
+        mysql-check alone cannot distinguish it. Errors are ignored (e.g. before the socket is up).
+        """
+        cmds = "; ".join(
+            f"set server be_write/{n} state {'ready' if n == primary else 'maint'}"
+            for n in self.containers
+        )
+        self.docker.exec_command(
+            self.haproxy_name,
+            f"echo '{cmds}' | socat - UNIX-CONNECT:/tmp/haproxy.sock",
+            check=False,
+        )
+
+    def _start_haproxy(self) -> None:
+        """Start a Percona HAProxy container fronting the cluster (write :3307, read :3308).
+
+        The config is injected via an environment variable (avoids host bind mounts, unreliable under
+        podman-on-macOS) and written to /tmp before haproxy is exec'd in the foreground as the image's
+        non-root user.
+        """
+        self.log(f"start HAProxy {self.haproxy_name} (write:{self.haproxy_write_port} read:{self.haproxy_read_port})")
+        command = (
+            'printf "%s\\n" "$HAPROXY_CFG" > /tmp/haproxy.cfg && '
+            "exec haproxy -W -db -f /tmp/haproxy.cfg"
+        )
+        self.docker.create(
+            image=self.haproxy_image,
+            name=self.haproxy_name,
+            hostname=self.haproxy_name,
+            environment={"HAPROXY_CFG": self._haproxy_config()},
+            networks=[self.network],
+            ports=[
+                f"{self.base_host_port + 92}:{self.haproxy_write_port}",
+                f"{self.base_host_port + 93}:{self.haproxy_read_port}",
+            ],
+            entrypoint="bash",
+            command=["-c", command],
+            restart="on-failure",
+            platform=self.haproxy_platform,
+        )
+
+    def _start_proxy(self) -> None:
+        """Start whichever proxy (router or haproxy) is configured in front of the cluster."""
+        if self.proxy == "router":
+            self._start_router()
+        elif self.proxy == "haproxy":
+            self._start_haproxy()
+
+    def wait_proxy_ready(self, timeout: int = 120) -> None:
+        """Wait until the proxy accepts connections and routes the read/write endpoint to the current primary.
+
+        The default is generous because HAProxy's external health checks can take tens of seconds to
+        first stabilize when the operator image runs under CPU emulation.
+        """
+        if not self.proxy:
+            return
+        host, port = self.rw_endpoint()
+        self.log(f"wait for {self.proxy} {self.proxy_name} to route to the primary")
         deadline = time.time() + timeout
         last = ""
         while time.time() < deadline:
+            # HAProxy can't detect the primary itself; (re-)pin the write backend to the
+            # current primary each iteration. Idempotent, and self-heals after failover.
+            if self.proxy == "haproxy":
+                self._haproxy_set_write_primary(self.get_primary())
             result = self.docker.exec_mysql(
                 self.active_nodes[0],
                 "SELECT @@hostname;",
-                host=self.router_name,
-                port=self.router_rw_port,
+                host=host,
+                port=port,
                 check=False,
+                timeout=15,
             )
             routed = result.stdout.strip()
             if result.ok and routed and routed == self.get_primary():
                 return
             last = routed or (result.stderr or "").strip()
             time.sleep(2)
-        raise RuntimeError(f"Router {self.router_name} not ready / not routing to primary in {timeout}s (last: {last!r})")
+        raise RuntimeError(
+            f"{self.proxy} {self.proxy_name} not ready / not routing to primary in {timeout}s (last: {last!r})"
+        )
 
     def create(self) -> None:
         """Create the network and nodes, bootstrap the cluster, add instances, and persist GR settings."""
@@ -332,10 +471,10 @@ class GroupReplication:
                 f"SET PERSIST group_replication_group_seeds='{seeds}';",
             )
 
-        if self.mysql_router:
-            self._start_router()
-            self._router_started = True
-            self._wait_router_ready()
+        if self.proxy:
+            self._start_proxy()
+            self._proxy_started = True
+            self.wait_proxy_ready()
 
     def _read_variables(self, name: str, variables: list[str]) -> dict[str, str]:
         """Read the given global variables from a node as a name->value map."""
@@ -351,16 +490,16 @@ class GroupReplication:
                 actual[parts[0]] = parts[1]
         return actual
 
-    def verify(self, check_router: bool | None = None) -> None:
+    def verify(self, check_proxy: bool | None = None) -> None:
         """Assert that GR variables, membership, states, and roles match the expected configuration.
 
-        When check_router is set (defaults to whether the router is enabled), also assert that the
-        router's read/write endpoint routes to the current primary.
+        When check_proxy is set (defaults to whether a proxy is enabled), also assert that the
+        proxy's read/write endpoint routes to the current primary.
         """
         if not self.containers:
             raise RuntimeError("Cluster not created yet")
-        if check_router is None:
-            check_router = self.mysql_router
+        if check_proxy is None:
+            check_proxy = self.proxy is not None
 
         errors: list[str] = []
 
@@ -427,19 +566,20 @@ class GroupReplication:
                     f"Expected {self.num_nodes - 1} SECONDARY, got {len(secondaries)}: {members}"
                 )
 
-        if check_router:
-            self.log("verify router routes read/write traffic to the primary")
+        if check_proxy and self.proxy:
+            self.log(f"verify {self.proxy} routes read/write traffic to the primary")
+            host, port = self.rw_endpoint()
             result = self.docker.exec_mysql(
                 self.active_nodes[0],
                 "SELECT @@hostname;",
-                host=self.router_name,
-                port=self.router_rw_port,
+                host=host,
+                port=port,
                 check=False,
             )
             routed = result.stdout.strip()
             if not result.ok or routed != self.get_primary():
                 errors.append(
-                    f"Router RW endpoint routes to {routed!r}, expected primary {self.get_primary()!r}"
+                    f"{self.proxy} RW endpoint routes to {routed!r}, expected primary {self.get_primary()!r}"
                 )
 
         if errors:
@@ -510,10 +650,10 @@ class GroupReplication:
     def destroy(self, remove_volumes: bool = False) -> None:
         """Remove all containers, optionally their data volumes, and the networks, then reset state."""
         self.log("destroy cluster")
-        if self._router_started or (self.mysql_router and self.docker.container_exists(self.router_name)):
-            self.log(f"remove router {self.router_name}")
-            self.docker.destroy(self.router_name)
-            self._router_started = False
+        if self.proxy_name and (self._proxy_started or self.docker.container_exists(self.proxy_name)):
+            self.log(f"remove {self.proxy} {self.proxy_name}")
+            self.docker.destroy(self.proxy_name)
+            self._proxy_started = False
         for name in reversed(self.containers):
             self.docker.destroy(name)
         if remove_volumes:

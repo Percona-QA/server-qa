@@ -15,6 +15,7 @@ group-replication/
 ├── sysbench_helper.py       # Sysbench — ephemeral sysbench load container
 ├── test_basic.py            # smoke test: write on primary, read on every node
 ├── test_failover.py         # primary failover + recovery under sysbench load
+├── test_scaling.py          # scale up 3->5 and down 5->3 under sysbench load
 └── templates/
     └── docker-compose.yaml  # equivalent 3-node topology, for reference
 ```
@@ -72,6 +73,27 @@ Sysbench notes:
 Relevant `GroupReplication` helpers: `get_primary()`, `stop_node()`,
 `rejoin_node()`, `wait_all_online()`, and `verify_checksums(database, nodes=...)`
 (defaults to the currently-online nodes).
+
+## Scaling test (sysbench)
+
+`test_scaling.py` exercises elastic membership changes under load:
+
+```bash
+GR_VERBOSE=1 /Users/plavi/Development/percona/server-qa/.venv/bin/pytest -v test_scaling.py
+```
+
+What it does: load initial data with sysbench, **scale up** the cluster from 3 to 5
+nodes (`scale_up(2)` — each new node is started, `addInstance`'d with clone recovery,
+and waited ONLINE), verify checksums and cluster configuration across all five nodes,
+run a 20s `oltp_read_write` workload, then **scale down** back to 3 (`scale_down(2)` —
+removes the most recently added secondaries via `removeInstance`, never the primary,
+and destroys their containers/volumes) and re-verify. Expect ~3-4 minutes.
+
+Relevant `GroupReplication` helpers: `scale_up(count)`, `scale_down(count)`,
+`verify()`, and `verify_checksums()`. New nodes are named `ps4`, `ps5`, … and the
+proxy is reconciled automatically after each change — MySQL Router auto-discovers
+members from cluster metadata; HAProxy's container is recreated so its static backend
+server list matches the new membership (`_refresh_proxy()`).
 
 ## Proxies (MySQL Router and HAProxy)
 

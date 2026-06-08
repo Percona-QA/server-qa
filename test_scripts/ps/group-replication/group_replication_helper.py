@@ -72,6 +72,7 @@ class GroupReplication:
         self.mysql_extra_args = list(mysql_extra_args or [])
         self.containers: list[str] = []
         self.active_nodes: list[str] = []
+        self.node_index: dict[str, int] = {}
         self.networks: list[str] = []
 
     def log(self, msg: str) -> None:
@@ -93,8 +94,8 @@ class GroupReplication:
         return f"{name}:{self.gr_port}"
 
     def _group_seeds(self) -> str:
-        """Build the comma-separated group_replication_group_seeds list for all nodes."""
-        return ",".join(self._gr_address(self._node_name(i)) for i in range(1, self.num_nodes + 1))
+        """Build the comma-separated group_replication_group_seeds list for all current nodes."""
+        return ",".join(self._gr_address(name) for name in self.containers)
 
     def _node_name(self, index: int) -> str:
         """Build the container/host name for the node at the given 1-based index."""
@@ -205,6 +206,98 @@ class GroupReplication:
         if name not in self.active_nodes:
             self.active_nodes.append(name)
         self.wait_all_online(timeout=timeout)
+
+    def _persist_gr_settings(self, nodes: list[str]) -> None:
+        """Persist start_on_boot and the current group_seeds list on each given node."""
+        start_on_boot = "ON" if self.start_on_boot else "OFF"
+        seeds = self._group_seeds()
+        for name in nodes:
+            self.docker.exec_mysql(
+                name,
+                f"SET PERSIST group_replication_start_on_boot={start_on_boot};"
+                f"SET PERSIST group_replication_group_seeds='{seeds}';",
+            )
+
+    def scale_up(self, count: int = 1) -> list[str]:
+        """Grow the cluster by adding count new instances, then wait for everything ONLINE.
+
+        Mirrors create()'s add path: start a fresh mysqld container, addInstance it via
+        mysqlsh (clone recovery), persist the updated seed list on all nodes, and reconcile
+        the proxy. Returns the names of the added nodes.
+        """
+        if not self.containers:
+            raise RuntimeError("Cluster not created yet")
+        if count < 1:
+            raise ValueError("count must be >= 1")
+        primary = self.primary()
+        added: list[str] = []
+        next_index = max(self.node_index.values())
+        for _ in range(count):
+            next_index += 1
+            node = self._start_mysqld_node(next_index)
+            self._wait_ready(node)
+            self.log(f"add {node} to cluster (clone)")
+            add_script = (
+                f"var c = dba.getCluster('{self.cluster_name}');"
+                f"c.addInstance('root:{self.root_password}@{node}:3306', {{"
+                f"recoveryMethod:'clone',"
+                f"localAddress:'{self._gr_address(node)}'"
+                "});"
+            )
+            self.docker.exec_mysqlsh(primary, add_script)
+            self.active_nodes.append(node)
+            added.append(node)
+
+        self.num_nodes = len(self.containers)
+        self.log("persist GR settings (start_on_boot, group_seeds) on each node")
+        self._persist_gr_settings(self.containers)
+        self.wait_all_online()
+        if self.proxy:
+            self._refresh_proxy()
+            self.wait_proxy_ready()
+        return added
+
+    def scale_down(self, count: int = 1) -> list[str]:
+        """Shrink the cluster by removing count secondaries, then wait for everything ONLINE.
+
+        Never removes the current primary. Removed nodes are taken from the most recently
+        added secondaries, removed from the InnoDB Cluster via mysqlsh, then their container
+        and data volume are destroyed. The seed list is re-persisted and the proxy reconciled.
+        Returns the names of the removed nodes.
+        """
+        if not self.containers:
+            raise RuntimeError("Cluster not created yet")
+        if count < 1:
+            raise ValueError("count must be >= 1")
+        primary = self.get_primary()
+        removable = [n for n in self.active_nodes if n != primary]
+        if count > len(removable):
+            raise ValueError(
+                f"Cannot remove {count} nodes: only {len(removable)} removable secondaries"
+            )
+        # Remove most-recently-added secondaries first.
+        to_remove = list(reversed(removable))[:count]
+        for node in to_remove:
+            self.log(f"remove {node} from cluster")
+            remove_script = (
+                f"var c = dba.getCluster('{self.cluster_name}');"
+                f"c.removeInstance('root:{self.root_password}@{node}:3306');"
+            )
+            self.docker.exec_mysqlsh(primary, remove_script)
+            self.docker.destroy(node)
+            self.docker.volume_remove(self._volume_name(self.node_index[node]))
+            self.containers.remove(node)
+            self.active_nodes.remove(node)
+            del self.node_index[node]
+
+        self.num_nodes = len(self.containers)
+        self.log("persist GR settings (start_on_boot, group_seeds) on each node")
+        self._persist_gr_settings(self.containers)
+        if self.proxy:
+            self._refresh_proxy()
+            self.wait_proxy_ready()
+        self.wait_all_online()
+        return to_remove
 
     def rw_endpoint(self) -> tuple[str, int]:
         """Return the (host, port) for read/write traffic: the proxy when enabled, else the live primary."""
@@ -365,6 +458,18 @@ class GroupReplication:
         elif self.proxy == "haproxy":
             self._start_haproxy()
 
+    def _refresh_proxy(self) -> None:
+        """Reconcile the proxy with the current membership after a scale operation.
+
+        MySQL Router auto-discovers members from the cluster metadata, so it needs nothing.
+        HAProxy's backend server list is baked into the config at start time (see
+        _haproxy_config), so the container is recreated to pick up the new node set.
+        """
+        if self.proxy == "haproxy":
+            self.log(f"refresh HAProxy {self.haproxy_name} for new membership")
+            self.docker.destroy(self.haproxy_name)
+            self._start_haproxy()
+
     def wait_proxy_ready(self, timeout: int = 120) -> None:
         """Wait until the proxy accepts connections and routes the read/write endpoint to the current primary.
 
@@ -399,6 +504,29 @@ class GroupReplication:
             f"{self.proxy} {self.proxy_name} not ready / not routing to primary in {timeout}s (last: {last!r})"
         )
 
+    def _start_mysqld_node(self, index: int) -> str:
+        """Create and start a single mysqld container for the node at the given index.
+
+        Records the node in self.containers and self.node_index and returns its name.
+        Does not add it to the InnoDB Cluster (the caller bootstraps or addInstance).
+        """
+        name = self._node_name(index)
+        self.log(f"start node {name} (server-id={index}, {self.base_host_port + index}->3306)")
+        self.docker.create(
+            image=self.image,
+            name=name,
+            hostname=name,
+            environment={"MYSQL_ROOT_PASSWORD": self.root_password},
+            volumes=[f"{self._volume_name(index)}:/var/lib/mysql"],
+            networks=[self.network],
+            ports=[f"{self.base_host_port + index}:3306"],
+            command=self._mysqld_args(server_id=index, hostname=name),
+            restart="always",
+        )
+        self.containers.append(name)
+        self.node_index[name] = index
+        return name
+
     def create(self) -> None:
         """Create the network and nodes, bootstrap the cluster, add instances, and persist GR settings."""
         self.log(f"create network {self.network}")
@@ -406,20 +534,7 @@ class GroupReplication:
         self.networks.append(self.network)
 
         for i in range(1, self.num_nodes + 1):
-            name = self._node_name(i)
-            self.log(f"start node {name} (server-id={i}, {self.base_host_port + i}->3306)")
-            self.docker.create(
-                image=self.image,
-                name=name,
-                hostname=name,
-                environment={"MYSQL_ROOT_PASSWORD": self.root_password},
-                volumes=[f"{self._volume_name(i)}:/var/lib/mysql"],
-                networks=[self.network],
-                ports=[f"{self.base_host_port + i}:3306"],
-                command=self._mysqld_args(server_id=i, hostname=name),
-                restart="always",
-            )
-            self.containers.append(name)
+            self._start_mysqld_node(i)
 
         self.active_nodes = list(self.containers)
 
@@ -461,15 +576,8 @@ class GroupReplication:
             )
         self.log("cluster is ONLINE")
 
-        start_on_boot = "ON" if self.start_on_boot else "OFF"
-        seeds = self._group_seeds()
         self.log("persist GR settings (start_on_boot, group_seeds) on each node")
-        for name in self.containers:
-            self.docker.exec_mysql(
-                name,
-                f"SET PERSIST group_replication_start_on_boot={start_on_boot};"
-                f"SET PERSIST group_replication_group_seeds='{seeds}';",
-            )
+        self._persist_gr_settings(self.containers)
 
         if self.proxy:
             self._start_proxy()
@@ -657,13 +765,15 @@ class GroupReplication:
             self.log(f"remove {self.proxy} {self.proxy_name}")
             self.docker.destroy(self.proxy_name)
             self._proxy_started = False
+        volumes = [self._volume_name(self.node_index[name]) for name in self.containers]
         for name in reversed(self.containers):
             self.docker.destroy(name)
         if remove_volumes:
-            for i in range(1, self.num_nodes + 1):
-                self.docker.volume_remove(self._volume_name(i))
+            for volume in volumes:
+                self.docker.volume_remove(volume)
         for net in self.networks:
             self.docker.network_remove(net)
         self.containers.clear()
         self.active_nodes.clear()
+        self.node_index.clear()
         self.networks.clear()

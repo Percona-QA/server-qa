@@ -1,16 +1,16 @@
 #!/bin/bash
 
-#############################################################################
-# Created By Manish Chawla, Percona LLC                                     #
-# This script tests backup during upgrade from previous to current version  #
-# Assumption: PS8.0 and PXB8.0 are already installed                        #
-# Usage:                                                                    #
-# 1. Set paths in this script:                                              #
-#    xtrabackup_dir, previous_xtrabackup_dir, backup_dir, mysqldir,         #
-#    datadir, qascripts, logdir                                             #
-# 2. Run the script as: ./upgrade_backup_tests.sh                           #
-# 3. Logs are available in: logdir                                          #
-#############################################################################
+#################################################################################
+# Created By Manish Chawla, Percona LLC                                         #
+# This script tests backup during upgrade from previous to current pxb version  #
+# Assumption: PS8.0 and PXB8.0 are already installed as tarballs                #
+# Usage:                                                                        #
+# 1. Set paths in this script:                                                  #
+#    xtrabackup_dir, previous_xtrabackup_dir, backup_dir, mysqldir,             #
+#    datadir, qascripts, logdir                                                 #
+# 2. Run the script as: ./upgrade_backup_tests.sh                               #
+# 3. Logs are available in: logdir                                              #
+#################################################################################
 
 # Set script variables
 export xtrabackup_dir="$HOME/pxb_8_0_25_debug/bin"
@@ -329,7 +329,7 @@ test_upgrade_backup_encrypt() {
     elif "${mysqldir}"/bin/mysqld --version | grep "8.0" >/dev/null 2>&1 ; then
 
         # Server is PS 8.0
-        server_options="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --innodb_sys_tablespace_encrypt --innodb_parallel_dblwr_encrypt --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --innodb-default-encryption-key-id=4294967295"
+        server_options="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --innodb_sys_tablespace_encrypt --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON"
 
     else
 

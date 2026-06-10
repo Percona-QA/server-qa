@@ -90,7 +90,8 @@ removes the most recently added secondaries via `removeInstance`, never the prim
 and destroys their containers/volumes) and re-verify. Expect ~3-4 minutes.
 
 Relevant `GroupReplication` helpers: `scale_up(count)`, `scale_down(count)`,
-`verify()`, and `verify_checksums()`. New nodes are named `ps4`, `ps5`, … and the
+`verify()`, and `verify_checksums()`. New nodes follow the same naming pattern as the
+original members (i.e. `<node_prefix><index>` — e.g. `ps0-4`, `ps0-5`, … with the default fixture).
 proxy is reconciled automatically after each change — MySQL Router auto-discovers
 members from cluster metadata; HAProxy's container is recreated so its static backend
 server list matches the new membership (`_refresh_proxy()`).

@@ -28,10 +28,9 @@ class GroupReplication:
         router_rw_port: int = 6446,
         router_ro_port: int = 6447,
         haproxy: bool = False,
-        haproxy_image: str = "perconalab/percona-server-mysql-operator:main-haproxy",
+        haproxy_image: str = "percona/haproxy:2",
         haproxy_write_port: int = 3307,
         haproxy_read_port: int = 3308,
-        haproxy_platform: str | None = "linux/amd64",
         mysql_extra_args: list[str] | None = None,
         verbose: bool | None = None,
     ):
@@ -65,7 +64,6 @@ class GroupReplication:
         self.haproxy_name = f"{node_prefix}haproxy"
         self.haproxy_write_port = haproxy_write_port
         self.haproxy_read_port = haproxy_read_port
-        self.haproxy_platform = haproxy_platform
         # The active proxy in front of the cluster, if any.
         self.proxy = "router" if mysql_router else "haproxy" if haproxy else None
         self._proxy_started = False
@@ -452,7 +450,6 @@ class GroupReplication:
             entrypoint="bash",
             command=["-c", command],
             restart="on-failure",
-            platform=self.haproxy_platform,
         )
 
     def _start_proxy(self) -> None:

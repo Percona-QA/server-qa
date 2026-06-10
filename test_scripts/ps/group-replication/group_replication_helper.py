@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shlex
@@ -91,6 +92,27 @@ class GroupReplication:
     def _gr_address(self, name: str) -> str:
         """Build the GR communication address (host:gr_port) for a node."""
         return f"{name}:{self.gr_port}"
+
+    @staticmethod
+    def _js_str(value: str) -> str:
+        """Encode a Python string as a JavaScript string literal for mysqlsh --js scripts.
+
+        JSON encoding yields a valid JS string literal with quotes, backslashes, and
+        control/non-ASCII characters escaped, so values like cluster_name or the
+        connection URI (which contains root_password) can't break the script or inject.
+        """
+        return json.dumps(value)
+
+    def _add_instance_script(self, node: str) -> str:
+        """Build the mysqlsh AdminAPI script to add a node to the cluster (clone recovery)."""
+        uri = f"root:{self.root_password}@{node}:3306"
+        return (
+            f"var c = dba.getCluster({self._js_str(self.cluster_name)});"
+            f"c.addInstance({self._js_str(uri)}, {{"
+            f"recoveryMethod:'clone',"
+            f"localAddress:{self._js_str(self._gr_address(node))}"
+            "});"
+        )
 
     def _group_seeds(self) -> str:
         """Build the comma-separated group_replication_group_seeds list for all current nodes."""
@@ -244,14 +266,9 @@ class GroupReplication:
             node = self._start_mysqld_node(next_index)
             self._wait_ready(node)
             self.log(f"add {node} to cluster (clone)")
-            add_script = (
-                f"var c = dba.getCluster('{self.cluster_name}');"
-                f"c.addInstance('root:{self.root_password}@{node}:3306', {{"
-                f"recoveryMethod:'clone',"
-                f"localAddress:'{self._gr_address(node)}'"
-                "});"
+            self.docker.exec_mysqlsh(
+                primary, self._add_instance_script(node), password=self.root_password
             )
-            self.docker.exec_mysqlsh(primary, add_script, password=self.root_password)
             self.active_nodes.append(node)
             added.append(node)
 
@@ -286,9 +303,10 @@ class GroupReplication:
         to_remove = list(reversed(removable))[:count]
         for node in to_remove:
             self.log(f"remove {node} from cluster")
+            uri = f"root:{self.root_password}@{node}:3306"
             remove_script = (
-                f"var c = dba.getCluster('{self.cluster_name}');"
-                f"c.removeInstance('root:{self.root_password}@{node}:3306');"
+                f"var c = dba.getCluster({self._js_str(self.cluster_name)});"
+                f"c.removeInstance({self._js_str(uri)});"
             )
             self.docker.exec_mysqlsh(primary, remove_script, password=self.root_password)
             self.docker.destroy(node)
@@ -589,31 +607,27 @@ class GroupReplication:
 
         primary = self.primary()
         bootstrap_opts = (
-            f"groupName:'{self.group_name}',"
-            f"communicationStack:'{self.communication_stack}',"
-            f"localAddress:'{self._gr_address(primary)}',"
+            f"groupName:{self._js_str(self.group_name)},"
+            f"communicationStack:{self._js_str(self.communication_stack)},"
+            f"localAddress:{self._js_str(self._gr_address(primary))},"
             f"multiPrimary:{'false' if self.single_primary else 'true'}"
         )
         bootstrap_script = (
-            f"var c = dba.createCluster('{self.cluster_name}', {{{bootstrap_opts}}});"
+            f"var c = dba.createCluster({self._js_str(self.cluster_name)}, {{{bootstrap_opts}}});"
         )
         self.log(f"bootstrap cluster on {primary}")
         self.docker.exec_mysqlsh(primary, bootstrap_script, password=self.root_password)
         for i in range(2, self.num_nodes + 1):
             node = self._node_name(i)
             self.log(f"add {node} to cluster (clone)")
-            add_script = (
-                f"var c = dba.getCluster('{self.cluster_name}');"
-                f"c.addInstance('root:{self.root_password}@{node}:3306', {{"
-                f"recoveryMethod:'clone',"
-                f"localAddress:'{self._gr_address(node)}'"
-                "});"
+            self.docker.exec_mysqlsh(
+                primary, self._add_instance_script(node), password=self.root_password
             )
-            self.docker.exec_mysqlsh(primary, add_script, password=self.root_password)
 
         status = self.docker.exec_mysqlsh(
             primary,
-            f"var c = dba.getCluster('{self.cluster_name}'); print(JSON.stringify(c.status()));",
+            f"var c = dba.getCluster({self._js_str(self.cluster_name)}); "
+            "print(JSON.stringify(c.status()));",
             password=self.root_password,
         )
         if '"status": "ONLINE"' not in status.stdout and '"status":"ONLINE"' not in status.stdout:

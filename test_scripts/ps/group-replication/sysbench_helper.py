@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable
 
 from docker_helper import DockerHelper
@@ -9,7 +10,7 @@ class Sysbench:
         docker: DockerHelper,
         network: str,
         name: str,
-        image: str = "pingwinator/sysbench:latest",
+        image: str | None = None,
         mysql_user: str = "sysbench",
         mysql_password: str = "sysbench",
         database: str = "sbtest",
@@ -21,7 +22,7 @@ class Sysbench:
         self.docker = docker
         self.network = network
         self.name = name
-        self.image = image
+        self.image = image or os.environ.get("SYSBENCH_IMAGE") or "pingwinator/sysbench:latest"
         self.mysql_user = mysql_user
         self.mysql_password = mysql_password
         self.database = database

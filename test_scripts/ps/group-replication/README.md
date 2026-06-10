@@ -248,6 +248,24 @@ CONTAINER_CLI=podman pytest -v test_basic.py
 > only have podman installed under that alias, set `CONTAINER_CLI=podman`
 > explicitly.
 
+### Overriding container images
+
+Each component's image can be overridden via an environment variable; if unset, the
+default below is used. Useful for testing a release candidate, a custom tag, or an
+internal registry mirror without editing code.
+
+| Env var            | Component      | Default image                       |
+|--------------------|----------------|-------------------------------------|
+| `SERVER_IMAGE`     | Percona Server | `percona/percona-server:8.4`        |
+| `HAPROXY_IMAGE`    | HAProxy        | `percona/haproxy:2`                 |
+| `ROUTER_IMAGE`     | MySQL Router   | `percona/percona-mysql-router:8.4`  |
+| `XTRABACKUP_IMAGE` | XtraBackup     | `percona/percona-xtrabackup:8.4`    |
+| `SYSBENCH_IMAGE`   | sysbench       | `pingwinator/sysbench:latest`       |
+
+```bash
+SERVER_IMAGE=percona/percona-server:8.4.5 pytest -v test_basic.py
+```
+
 ### Output verbosity
 
 ```bash

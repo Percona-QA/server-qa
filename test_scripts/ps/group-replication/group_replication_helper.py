@@ -13,7 +13,7 @@ class GroupReplication:
         docker: DockerHelper,
         num_nodes: int = 3,
         network: str = "grnet",
-        server_image: str = "percona/percona-server:8.4",
+        server_image: str | None = None,
         node_prefix: str = "ps",
         root_password: str = "rootpass",
         base_host_port: int = 33060,
@@ -24,11 +24,11 @@ class GroupReplication:
         single_primary: bool = True,
         start_on_boot: bool = True,
         mysql_router: bool = False,
-        router_image: str = "percona/percona-mysql-router:8.4",
+        router_image: str | None = None,
         router_rw_port: int = 6446,
         router_ro_port: int = 6447,
         haproxy: bool = False,
-        haproxy_image: str = "percona/haproxy:2",
+        haproxy_image: str | None = None,
         haproxy_write_port: int = 3307,
         haproxy_read_port: int = 3308,
         mysql_extra_args: list[str] | None = None,
@@ -44,7 +44,7 @@ class GroupReplication:
         self.docker = docker
         self.num_nodes = num_nodes
         self.network = network
-        self.server_image = server_image
+        self.server_image = server_image or os.environ.get("SERVER_IMAGE") or "percona/percona-server:8.4"
         self.node_prefix = node_prefix
         self.root_password = root_password
         self.base_host_port = base_host_port
@@ -55,12 +55,12 @@ class GroupReplication:
         self.single_primary = single_primary
         self.start_on_boot = start_on_boot
         self.mysql_router = mysql_router
-        self.router_image = router_image
+        self.router_image = router_image or os.environ.get("ROUTER_IMAGE") or "percona/percona-mysql-router:8.4"
         self.router_name = f"{node_prefix}router"
         self.router_rw_port = router_rw_port
         self.router_ro_port = router_ro_port
         self.haproxy = haproxy
-        self.haproxy_image = haproxy_image
+        self.haproxy_image = haproxy_image or os.environ.get("HAPROXY_IMAGE") or "percona/haproxy:2"
         self.haproxy_name = f"{node_prefix}haproxy"
         self.haproxy_write_port = haproxy_write_port
         self.haproxy_read_port = haproxy_read_port

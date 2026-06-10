@@ -1,4 +1,5 @@
 import os
+import shlex
 from collections.abc import Callable
 
 from docker_helper import DockerHelper
@@ -56,7 +57,8 @@ class XtraBackup:
         self.log(f"xtrabackup full backup of {source_node} -> {self.full_dir}")
         command = (
             f"xtrabackup --backup --datadir=/var/lib/mysql --target-dir={self.full_dir} "
-            f"--host={source_node} --port=3306 --user=root --password={self.root_password}"
+            f"--host={source_node} --port=3306 --user=root "
+            f"--password={shlex.quote(self.root_password)}"
         )
         return self._run(
             "full",
@@ -71,7 +73,8 @@ class XtraBackup:
         command = (
             f"xtrabackup --backup --datadir=/var/lib/mysql --target-dir={self.inc_dir} "
             f"--incremental-basedir={self.full_dir} "
-            f"--host={source_node} --port=3306 --user=root --password={self.root_password}"
+            f"--host={source_node} --port=3306 --user=root "
+            f"--password={shlex.quote(self.root_password)}"
         )
         return self._run(
             "inc",

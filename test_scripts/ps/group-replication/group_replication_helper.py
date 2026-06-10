@@ -119,15 +119,18 @@ class GroupReplication:
         return args
 
     def _wait_ready(self, name: str, timeout: int = 180) -> None:
-        """Wait until a node accepts MySQL connections (responds to ping), or time out."""
+        """Wait until a node accepts MySQL connections (runs a trivial query), or time out."""
         self.log(f"wait for {name} to accept connections")
         deadline = time.time() + timeout
         last_err = ""
         while time.time() < deadline:
-            result = self.docker.exec_command(
-                name, f"mysqladmin -uroot -p{self.root_password} ping --silent"
+            # Probe via exec_mysql (no shell) rather than mysqladmin via sh -c, so a
+            # root_password with shell metacharacters/spaces can't break the loop or be
+            # mangled by shell parsing.
+            result = self.docker.exec_mysql(
+                name, "SELECT 1;", password=self.root_password, check=False, timeout=15
             )
-            if result.ok and "mysqld is alive" in result.stdout:
+            if result.ok:
                 return
             last_err = (result.stderr or result.stdout).strip()
             time.sleep(2)

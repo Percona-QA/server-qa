@@ -187,6 +187,8 @@ class GroupReplication:
 
     def wait_all_online(self, timeout: int = 180) -> None:
         """Wait until every expected member reports the ONLINE state, or time out."""
+        if not self.active_nodes:
+            raise RuntimeError("No active nodes")
         self.log("wait for all members ONLINE")
         deadline = time.time() + timeout
         last: dict[str, str] = {}

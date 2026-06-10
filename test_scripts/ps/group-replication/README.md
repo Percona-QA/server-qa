@@ -287,9 +287,9 @@ timestamped to help debug timing/hangs):
 
 ```
 2026-05-27 14:24:09.512 [GR] create network grnet
-2026-05-27 14:24:09.981 [GR] start node ps1 (server-id=1, 33061->3306)
-2026-05-27 14:24:11.400 [GR] wait for ps1 to accept connections
-2026-05-27 14:24:30.210 [GR] bootstrap cluster on ps1
+2026-05-27 14:24:09.981 [GR] start node ps0-1 (server-id=1, 33061->3306)
+2026-05-27 14:24:11.400 [GR] wait for ps0-1 to accept connections
+2026-05-27 14:24:30.210 [GR] bootstrap cluster on ps0-1
 2026-05-27 14:24:33.005 [GR] add ps2 to cluster (clone)
 2026-05-27 14:24:48.117 [GR] add ps3 to cluster (clone)
 2026-05-27 14:25:02.640 [GR] cluster is ONLINE
@@ -386,24 +386,24 @@ terminal and use `docker exec`:
 
 ```bash
 # Cluster status
-docker exec ps1 mysqlsh --uri root:rootpass@localhost:3306 --js -e "print(dba.getCluster().status())"
+docker exec ps0-1 mysqlsh --uri root:rootpass@localhost:3306 --js -e "print(dba.getCluster().status())"
 
 # Quick SQL on the primary
-docker exec ps1 mysql -uroot -prootpass -e "SELECT @@hostname, @@server_id;"
+docker exec ps0-1 mysql -uroot -prootpass -e "SELECT @@hostname, @@server_id;"
 
 # Same on a replica
-docker exec ps2 mysql -uroot -prootpass -e "SELECT * FROM performance_schema.replication_group_members;"
+docker exec ps0-2 mysql -uroot -prootpass -e "SELECT * FROM performance_schema.replication_group_members;"
 
 # Interactive mysqlsh session
-docker exec -it ps1 mysqlsh --uri root:rootpass@localhost:3306
+docker exec -it ps0-1 mysqlsh --uri root:rootpass@localhost:3306
 
 # Tail mysqld error log
-docker logs -f ps1
+docker logs -f ps0-1
 ```
 
 ### Connect from the host
 
-The fixture publishes host ports `33061` (ps1), `33062` (ps2), `33063` (ps3) →
+The fixture publishes host ports `33061` (ps0-1), `33062` (ps0-2), `33063` (ps0-3) →
 container `3306`. So while the cluster is up:
 
 ```bash
@@ -441,7 +441,7 @@ fixture and use:
   instead of targeting a node directly, so the test is proxy-agnostic.
 - `gr_cluster.rw_endpoint()` / `gr_cluster.ro_endpoint()` — `(host, port)` for
   read/write or read-only client traffic (e.g. to point sysbench at).
-- `gr_cluster.primary()` — name of the bootstrap node (`"ps1"`).
+- `gr_cluster.primary()` — name of the bootstrap node (`"ps0-1"`).
 - `gr_cluster.containers` — list of all node names in start order.
 - `gr_cluster.docker` — the `DockerHelper`. Common methods:
   - `docker.exec_mysql(node, "SQL;", database=None)` → returns `ExecResult` with `.stdout`, `.stderr`, `.returncode`, `.ok`.

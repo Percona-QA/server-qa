@@ -40,9 +40,9 @@ cd test_scripts/ps/group-replication
 pytest -v test_basic.py
 ```
 
-The fixture brings up 3 containers (`ps1`, `ps2`, `ps3`) on the `grnet` network,
-bootstraps the cluster via mysqlsh, runs the tests, then removes containers,
-volumes, and the network. Expect ~1 minute end-to-end.
+The fixture brings up 3 containers (by default `ps0-1`, `ps0-2`, `ps0-3`) on a per-worker
+`grnet-<workerid>` network (e.g. `grnet-master`), bootstraps the cluster via mysqlsh, runs the tests,
+then removes containers, volumes, and the network. Expect ~1 minute end-to-end.
 
 ## Failover test (sysbench)
 
@@ -426,9 +426,9 @@ If a previous run aborted before the fixture's teardown, you'll have leftover
 containers/network/volumes. Clean them up:
 
 ```bash
-docker rm -f ps1 ps2 ps3 psrouter pshaproxy
-docker volume rm ps1-data ps2-data ps3-data
-docker network rm grnet
+docker rm -f <node_prefix>1 <node_prefix>2 <node_prefix>3 <node_prefix>router <node_prefix>haproxy
+docker volume rm <node_prefix>1-data <node_prefix>2-data <node_prefix>3-data
+docker network rm grnet-<workerid>
 ```
 
 ## Writing more tests

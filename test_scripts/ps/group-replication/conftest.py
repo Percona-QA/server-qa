@@ -72,6 +72,7 @@ def xtrabackup(request, gr_cluster):
         gr_cluster.docker,
         network=gr_cluster.network,
         backup_volume=backup_volume,
+        root_password=gr_cluster.root_password,
         name_prefix=f"xtrabackup_{safe_node}",
         log=gr_cluster.log,
     )

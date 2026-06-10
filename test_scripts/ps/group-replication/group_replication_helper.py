@@ -174,6 +174,7 @@ class GroupReplication:
             node,
             "SELECT MEMBER_HOST, MEMBER_STATE "
             "FROM performance_schema.replication_group_members;",
+            password=self.root_password,
             check=False,
         )
         states: dict[str, str] = {}
@@ -215,6 +216,7 @@ class GroupReplication:
                 name,
                 f"SET PERSIST group_replication_start_on_boot={start_on_boot};"
                 f"SET PERSIST group_replication_group_seeds='{seeds}';",
+                password=self.root_password,
             )
 
     def scale_up(self, count: int = 1) -> list[str]:
@@ -243,7 +245,7 @@ class GroupReplication:
                 f"localAddress:'{self._gr_address(node)}'"
                 "});"
             )
-            self.docker.exec_mysqlsh(primary, add_script)
+            self.docker.exec_mysqlsh(primary, add_script, password=self.root_password)
             self.active_nodes.append(node)
             added.append(node)
 
@@ -282,7 +284,7 @@ class GroupReplication:
                 f"var c = dba.getCluster('{self.cluster_name}');"
                 f"c.removeInstance('root:{self.root_password}@{node}:3306');"
             )
-            self.docker.exec_mysqlsh(primary, remove_script)
+            self.docker.exec_mysqlsh(primary, remove_script, password=self.root_password)
             self.docker.destroy(node)
             self.docker.volume_remove(self._volume_name(self.node_index[node]))
             self.containers.remove(node)
@@ -327,12 +329,19 @@ class GroupReplication:
             return self.docker.exec_mysql(
                 self.active_nodes[0],
                 sql,
+                password=self.root_password,
                 database=database,
                 host=host,
                 port=port,
                 check=check,
             )
-        return self.docker.exec_mysql(self.get_primary(), sql, database=database, check=check)
+        return self.docker.exec_mysql(
+            self.get_primary(),
+            sql,
+            password=self.root_password,
+            database=database,
+            check=check,
+        )
 
     def _start_router(self) -> None:
         """Start a MySQL Router container, bootstrapping it against the live InnoDB Cluster.
@@ -492,6 +501,7 @@ class GroupReplication:
             result = self.docker.exec_mysql(
                 self.active_nodes[0],
                 "SELECT @@hostname;",
+                password=self.root_password,
                 host=host,
                 port=port,
                 check=False,
@@ -587,11 +597,12 @@ class GroupReplication:
                 f"localAddress:'{self._gr_address(node)}'"
                 "});"
             )
-            self.docker.exec_mysqlsh(primary, add_script)
+            self.docker.exec_mysqlsh(primary, add_script, password=self.root_password)
 
         status = self.docker.exec_mysqlsh(
             primary,
             f"var c = dba.getCluster('{self.cluster_name}'); print(JSON.stringify(c.status()));",
+            password=self.root_password,
         )
         if '"status": "ONLINE"' not in status.stdout and '"status":"ONLINE"' not in status.stdout:
             raise RuntimeError(
@@ -613,6 +624,7 @@ class GroupReplication:
         result = self.docker.exec_mysql(
             name,
             f"SHOW GLOBAL VARIABLES WHERE Variable_name IN ({in_clause});",
+            password=self.root_password,
         )
         actual: dict[str, str] = {}
         for line in result.stdout.strip().splitlines():
@@ -665,6 +677,7 @@ class GroupReplication:
             primary,
             "SELECT MEMBER_HOST, MEMBER_PORT, MEMBER_STATE, MEMBER_ROLE "
             "FROM performance_schema.replication_group_members;",
+            password=self.root_password,
         )
         members: list[tuple[str, str, str, str]] = []
         for line in result.stdout.strip().splitlines():
@@ -706,6 +719,7 @@ class GroupReplication:
             result = self.docker.exec_mysql(
                 self.active_nodes[0],
                 "SELECT @@hostname;",
+                password=self.root_password,
                 host=host,
                 port=port,
                 check=False,
@@ -726,13 +740,14 @@ class GroupReplication:
             "SELECT TABLE_NAME FROM information_schema.TABLES "
             f"WHERE TABLE_SCHEMA='{database}' AND TABLE_TYPE='BASE TABLE' "
             "ORDER BY TABLE_NAME;",
+            password=self.root_password,
         )
         return [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
 
     def _table_checksum(self, node: str, database: str, table: str) -> str:
         """Return the CHECKSUM TABLE value for a single table on the given node."""
         result = self.docker.exec_mysql(
-            node, f"CHECKSUM TABLE `{database}`.`{table}`;"
+            node, f"CHECKSUM TABLE `{database}`.`{table}`;", password=self.root_password
         )
         # Output is "<database>.<table>\t<checksum>" (or NULL if the table is missing).
         parts = result.stdout.strip().split("\t")

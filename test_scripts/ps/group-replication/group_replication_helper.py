@@ -366,7 +366,7 @@ class GroupReplication:
             image=self.router_image,
             name=self.router_name,
             hostname=self.router_name,
-            networks=[self.network],
+            network=self.network,
             ports=[
                 f"{self.base_host_port + 90}:{self.router_rw_port}",
                 f"{self.base_host_port + 91}:{self.router_ro_port}",
@@ -456,7 +456,7 @@ class GroupReplication:
             name=self.haproxy_name,
             hostname=self.haproxy_name,
             environment={"HAPROXY_CFG": self._haproxy_config()},
-            networks=[self.network],
+            network=self.network,
             ports=[
                 f"{self.base_host_port + 92}:{self.haproxy_write_port}",
                 f"{self.base_host_port + 93}:{self.haproxy_read_port}",
@@ -534,7 +534,7 @@ class GroupReplication:
             hostname=name,
             environment={"MYSQL_ROOT_PASSWORD": self.root_password},
             volumes=[f"{self._volume_name(index)}:/var/lib/mysql"],
-            networks=[self.network],
+            network=self.network,
             ports=[f"{self.base_host_port + index}:3306"],
             command=self._mysqld_args(server_id=index, hostname=name),
             restart="always",

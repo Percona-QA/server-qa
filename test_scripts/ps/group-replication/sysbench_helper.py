@@ -48,7 +48,7 @@ class Sysbench:
         return self.docker.run(
             self.image,
             name=self.name,
-            networks=[self.network],
+            network=self.network,
             entrypoint="sysbench",
             command=command,
             remove=True,

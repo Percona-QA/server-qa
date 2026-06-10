@@ -41,7 +41,7 @@ class XtraBackup:
         return self.docker.run(
             self.image,
             name=f"{self.name_prefix}_{suffix}",
-            networks=[network] if network else [],
+            network=network,
             entrypoint="bash",
             command=["-c", command],
             volumes=volumes,

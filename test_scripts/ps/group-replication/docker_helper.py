@@ -72,7 +72,7 @@ class DockerHelper:
         hostname: str | None = None,
         environment: dict[str, str] | None = None,
         volumes: list[str] | None = None,
-        networks: list[str] | None = None,
+        network: str | None = None,
         ports: list[str] | None = None,
         entrypoint: str | None = None,
         command: list[str] | None = None,
@@ -99,8 +99,8 @@ class DockerHelper:
             args.extend(["-e", f"{k}={v}"])
         for vol in volumes or []:
             args.extend(["-v", vol])
-        for net in networks or []:
-            args.extend(["--network", net])
+        if network:
+            args.extend(["--network", network])
         for port in ports or []:
             args.extend(["-p", port])
         args.append(image)
@@ -112,7 +112,7 @@ class DockerHelper:
         self,
         image: str,
         name: str | None = None,
-        networks: list[str] | None = None,
+        network: str | None = None,
         entrypoint: str | None = None,
         command: list[str] | None = None,
         volumes: list[str] | None = None,
@@ -135,8 +135,8 @@ class DockerHelper:
             args.extend(["--entrypoint", entrypoint])
         for vol in volumes or []:
             args.extend(["-v", vol])
-        for net in networks or []:
-            args.extend(["--network", net])
+        if network:
+            args.extend(["--network", network])
         args.append(image)
         if command:
             args.extend(command)

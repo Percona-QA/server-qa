@@ -102,7 +102,7 @@ with Percona XtraBackup. It runs **behind HAProxy only** (the proxy is irrelevan
 backup/restore):
 
 ```bash
-GR_VERBOSE=1 /Users/plavi/Development/percona/server-qa/.venv/bin/pytest -v test_backup_restore.py
+GR_VERBOSE=1 pytest -v test_backup_restore.py
 ```
 
 What it does: load data with sysbench, take a **full** backup of a secondary

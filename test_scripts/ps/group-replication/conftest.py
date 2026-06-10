@@ -34,6 +34,7 @@ def gr_cluster(request):
         base_host_port=33060 + offset * 100,
         **PROXIES[request.param],
     )
+    try:
         # create() is inside the try so a partially-built cluster (e.g. a failed
         # proxy bring-up) is still torn down instead of leaking containers.
         cluster.create()

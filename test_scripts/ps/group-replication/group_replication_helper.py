@@ -230,7 +230,7 @@ class GroupReplication:
             raise RuntimeError("Cluster not created yet")
         if count < 1:
             raise ValueError("count must be >= 1")
-        primary = self.primary()
+        primary = self.get_primary()
         added: list[str] = []
         next_index = max(self.node_index.values())
         for _ in range(count):

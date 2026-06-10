@@ -146,6 +146,7 @@ class GroupReplication:
         deadline = time.time() + timeout
         last = ""
         while time.time() < deadline:
+            node = self.active_nodes[0]
             result = self.docker.exec_mysql(
                 node,
                 "SELECT MEMBER_HOST FROM performance_schema.replication_group_members "

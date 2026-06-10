@@ -307,15 +307,19 @@ class GroupReplication:
             return (self.haproxy_name, self.haproxy_write_port)
         return (self.get_primary(), 3306)
 
+    def secondaries(self) -> list[str]:
+        """Return the active secondary node names (every active node except the current primary)."""
+        primary = self.get_primary()
+        return [n for n in self.active_nodes if n != primary]
+
     def ro_endpoint(self) -> tuple[str, int]:
         """Return the (host, port) for read-only traffic: the proxy when enabled, else an active secondary."""
         if self.proxy == "router":
             return (self.router_name, self.router_ro_port)
         if self.proxy == "haproxy":
             return (self.haproxy_name, self.haproxy_read_port)
-        primary = self.get_primary()
-        secondaries = [n for n in self.active_nodes if n != primary]
-        return ((secondaries[0] if secondaries else primary), 3306)
+        secondaries = self.secondaries()
+        return ((secondaries[0] if secondaries else self.get_primary()), 3306)
 
     def exec_sql(self, sql: str, database: str | None = None, check: bool = True):
         """Run application SQL through the read/write endpoint (via the proxy when enabled, else direct to the primary)."""
@@ -527,6 +531,28 @@ class GroupReplication:
         self.node_index[name] = index
         return name
 
+    def start_standalone_node(self, name: str, data_volume: str, server_id: int = 99) -> str:
+        """Start a standalone PS container on a pre-populated (e.g. restored) data volume.
+
+        The node is NOT attached to the cluster network and group replication is kept off
+        (--group-replication-start-on-boot=OFF overrides the persisted ON), so it never
+        contacts the live group. The GR plugin is still loaded, so the datadir's persisted
+        group_replication_* variables remain valid. Useful for inspecting restored data in
+        isolation. Returns the container name; it is not tracked in self.containers.
+        """
+        self.log(f"start standalone node {name} (restored data, GR off)")
+        self.docker.create(
+            image=self.image,
+            name=name,
+            hostname=name,
+            volumes=[f"{data_volume}:/var/lib/mysql"],
+            command=self._mysqld_args(server_id=server_id, hostname=name)
+            + ["--group-replication-start-on-boot=OFF"],
+            restart="on-failure",
+        )
+        self._wait_ready(name)
+        return name
+
     def create(self) -> None:
         """Create the network and nodes, bootstrap the cluster, add instances, and persist GR settings."""
         self.log(f"create network {self.network}")
@@ -714,6 +740,13 @@ class GroupReplication:
         # Output is "<database>.<table>\t<checksum>" (or NULL if the table is missing).
         parts = result.stdout.strip().split("\t")
         return parts[-1] if parts else ""
+
+    def table_checksums(self, node: str, database: str) -> dict[str, str]:
+        """Return the CHECKSUM TABLE value of every base table in a database on one node."""
+        tables = self._list_tables(node, database)
+        if not tables:
+            raise AssertionError(f"No base tables found in database {database!r} on {node}")
+        return {table: self._table_checksum(node, database, table) for table in tables}
 
     def verify_checksums(
         self, database: str, nodes: list[str] | None = None, timeout: int = 30

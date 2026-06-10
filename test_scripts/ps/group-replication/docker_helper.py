@@ -115,6 +115,9 @@ class DockerHelper:
         networks: list[str] | None = None,
         entrypoint: str | None = None,
         command: list[str] | None = None,
+        volumes: list[str] | None = None,
+        user: str | None = None,
+        platform: str | None = None,
         remove: bool = True,
         check: bool = True,
     ) -> ExecResult:
@@ -124,8 +127,14 @@ class DockerHelper:
             args.append("--rm")
         if name:
             args.extend(["--name", name])
+        if platform:
+            args.extend(["--platform", platform])
+        if user:
+            args.extend(["--user", user])
         if entrypoint:
             args.extend(["--entrypoint", entrypoint])
+        for vol in volumes or []:
+            args.extend(["-v", vol])
         for net in networks or []:
             args.extend(["--network", net])
         args.append(image)

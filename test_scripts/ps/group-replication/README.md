@@ -13,9 +13,11 @@ group-replication/
 ├── docker_helper.py         # DockerHelper — wraps docker/podman CLI
 ├── group_replication.py     # GroupReplication — N-node cluster lifecycle
 ├── sysbench_helper.py       # Sysbench — ephemeral sysbench load container
+├── xtrabackup_helper.py     # XtraBackup — full/incremental backup + restore
 ├── test_basic.py            # smoke test: write on primary, read on every node
 ├── test_failover.py         # primary failover + recovery under sysbench load
 ├── test_scaling.py          # scale up 3->5 and down 5->3 under sysbench load
+├── test_backup_restore.py   # XtraBackup full+incremental backup and restore
 └── templates/
     └── docker-compose.yaml  # equivalent 3-node topology, for reference
 ```
@@ -94,6 +96,41 @@ Relevant `GroupReplication` helpers: `scale_up(count)`, `scale_down(count)`,
 proxy is reconciled automatically after each change — MySQL Router auto-discovers
 members from cluster metadata; HAProxy's container is recreated so its static backend
 server list matches the new membership (`_refresh_proxy()`).
+
+## Backup / restore test (XtraBackup)
+
+`test_backup_restore.py` exercises a full + incremental physical backup and restore
+with Percona XtraBackup. It runs **behind HAProxy only** (the proxy is irrelevant to
+backup/restore):
+
+```bash
+GR_VERBOSE=1 /Users/plavi/Development/percona/server-qa/.venv/bin/pytest -v test_backup_restore.py
+```
+
+What it does: load data with sysbench, take a **full** backup of a secondary
+(`full_backup` — XtraBackup reads the node's data volume directly while it keeps
+serving, using `LOCK INSTANCE FOR BACKUP`), run more load, take an **incremental**
+backup (`incremental_backup`) and snapshot the cluster's table checksums at that
+point, then run yet more load. It then prepares the chain (`prepare` — base with
+`--apply-log-only`, then the incremental merged without it) and restores it
+(`copy_back` — `--copy-back` then `chown -R mysql:mysql`) into a fresh **standalone**
+node started with group replication off (`start_standalone_node`). Finally it asserts
+the restored tables match the incremental-backup-time snapshot (a point-in-time check —
+the data is the state *before* the last load), and that the live cluster is untouched
+and still healthy. Expect ~4-5 minutes.
+
+XtraBackup notes:
+- Uses `percona/percona-xtrabackup:8.4`, a multi-arch image that runs natively on both
+  arm64 and amd64 (matching the Percona Server containers — XtraBackup must match the
+  server version). Override `image`/`platform` on the `XtraBackup` helper if needed.
+- Each XtraBackup step is its own one-shot `--rm` root container; backups live in a
+  per-test `grbackup_<test>` volume mounted at `/backup` (`/backup/full`, `/backup/inc1`).
+- The `xtrabackup` fixture owns the backup volume and the restore container/volume and
+  removes all of them on teardown.
+
+Relevant helpers: `XtraBackup.{full_backup,incremental_backup,prepare,copy_back}`
+(`xtrabackup_helper.py`), `GroupReplication.start_standalone_node()` and
+`table_checksums()`.
 
 ## Proxies (MySQL Router and HAProxy)
 

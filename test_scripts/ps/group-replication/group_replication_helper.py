@@ -13,7 +13,7 @@ class GroupReplication:
         docker: DockerHelper,
         num_nodes: int = 3,
         network: str = "grnet",
-        image: str = "percona/percona-server:8.4",
+        server_image: str = "percona/percona-server:8.4",
         node_prefix: str = "ps",
         root_password: str = "rootpass",
         base_host_port: int = 33060,
@@ -44,7 +44,7 @@ class GroupReplication:
         self.docker = docker
         self.num_nodes = num_nodes
         self.network = network
-        self.image = image
+        self.server_image = server_image
         self.node_prefix = node_prefix
         self.root_password = root_password
         self.base_host_port = base_host_port
@@ -514,7 +514,7 @@ class GroupReplication:
         name = self._node_name(index)
         self.log(f"start node {name} (server-id={index}, {self.base_host_port + index}->3306)")
         self.docker.create(
-            image=self.image,
+            image=self.server_image,
             name=name,
             hostname=name,
             environment={"MYSQL_ROOT_PASSWORD": self.root_password},
@@ -539,7 +539,7 @@ class GroupReplication:
         """
         self.log(f"start standalone node {name} (restored data, GR off)")
         self.docker.create(
-            image=self.image,
+            image=self.server_image,
             name=name,
             hostname=name,
             volumes=[f"{data_volume}:/var/lib/mysql"],

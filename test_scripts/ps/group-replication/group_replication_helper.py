@@ -1,5 +1,6 @@
 import logging
 import os
+import shlex
 import time
 
 from docker_helper import DockerHelper
@@ -358,8 +359,12 @@ class GroupReplication:
         """
         seed = self.active_nodes[0]
         self.log(f"start MySQL Router {self.router_name} (bootstrap from {seed})")
+        # The command runs via bash -c (it chains bootstrap && exec), so shell-quote the
+        # connection URI: a root_password with spaces/$/quotes/etc. would otherwise break
+        # the command or be shell-injected.
+        bootstrap_uri = shlex.quote(f"root:{self.root_password}@{seed}:3306")
         bootstrap = (
-            f"mysqlrouter --bootstrap root:{self.root_password}@{seed}:3306 "
+            f"mysqlrouter --bootstrap {bootstrap_uri} "
             "--directory /tmp/mysqlrouter "
             "--conf-set-option=DEFAULT.unknown_config_option=warning "
             "--conf-bind-address=0.0.0.0 --force "

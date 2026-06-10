@@ -49,7 +49,7 @@ volumes, and the network. Expect ~1 minute end-to-end.
 `test_failover.py` drives real load and exercises a primary outage:
 
 ```bash
-GR_VERBOSE=1 /Users/plavi/Development/percona/server-qa/.venv/bin/pytest -v test_failover.py
+GR_VERBOSE=1 pytest -v test_failover.py
 ```
 
 What it does: load initial data with sysbench (`prepare`, 4 tables × 10000 rows),

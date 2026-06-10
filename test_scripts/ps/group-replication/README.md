@@ -62,7 +62,7 @@ full cluster and compare checksums across all three. Expect ~2-3 minutes.
 Sysbench notes:
 - Runs from the multi-arch image `pingwinator/sysbench:latest` (pulled on first
   use). Each sysbench command is its own one-shot `--rm` container named
-  `sysbench_<test-name>` on `grnet` — nothing persists between calls.
+  `sysbench_<workerid>_<test-name>` on `grnet-<workerid>` — nothing persists between calls.
 - The `sysbench` fixture creates the `sbtest` database and a `sysbench`@`'%'`
   MySQL user (replicated cluster-wide, so it survives failover).
 - sysbench targets the cluster's **read/write endpoint**, resolved dynamically

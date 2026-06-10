@@ -146,11 +146,11 @@ class GroupReplication:
         deadline = time.time() + timeout
         last = ""
         while time.time() < deadline:
-            node = self.active_nodes[0]
             result = self.docker.exec_mysql(
                 node,
                 "SELECT MEMBER_HOST FROM performance_schema.replication_group_members "
                 "WHERE MEMBER_ROLE='PRIMARY' AND MEMBER_STATE='ONLINE';",
+                password=self.root_password,
                 check=False,
             )
             host = result.stdout.strip()
@@ -572,11 +572,8 @@ class GroupReplication:
             f"multiPrimary:{'false' if self.single_primary else 'true'}"
         )
         bootstrap_script = (
-            f"var c = dba.createCluster('{self.cluster_name}', {{{bootstrap_opts}}});"
-        )
         self.log(f"bootstrap cluster on {primary}")
-        self.docker.exec_mysqlsh(primary, bootstrap_script)
-
+        self.docker.exec_mysqlsh(primary, bootstrap_script, password=self.root_password)
         for i in range(2, self.num_nodes + 1):
             node = self._node_name(i)
             self.log(f"add {node} to cluster (clone)")

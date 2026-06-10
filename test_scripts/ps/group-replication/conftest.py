@@ -19,11 +19,21 @@ PROXIES = {
 }
 
 
+def _worker_id(request) -> str:
+    """Return the pytest-xdist worker id (e.g. 'gw0'), or 'master' when running serially.
+
+    Used to make Docker container/volume names unique per worker — names are global on
+    the Docker host, so resources derived only from the test id collide across workers
+    running the same test under pytest-xdist.
+    """
+    return getattr(request.config, "workerinput", {}).get("workerid", "master")
+
+
 @pytest.fixture(scope="module")
 def gr_cluster(request):
     # request.param is supplied by each test's @pytest.mark.parametrize(..., indirect=True).
     helper = DockerHelper()
-    workerid = getattr(request.config, "workerinput", {}).get("workerid", "master")
+    workerid = _worker_id(request)
     m = re.search(r"\d+$", workerid)
     offset = int(m.group()) if m else 0
     cluster = GroupReplication(
@@ -46,9 +56,10 @@ def gr_cluster(request):
 @pytest.fixture
 def sysbench(request, gr_cluster):
     # Container names allow only [a-zA-Z0-9_.-]; the parametrized "[router]" suffix in the
-    # test node name would otherwise be rejected, so sanitize it.
+    # test node name would otherwise be rejected, so sanitize it. The worker id keeps the
+    # name unique across parallel pytest-xdist workers running the same test.
     safe_node = re.sub(r"[^a-zA-Z0-9_.-]", "_", request.node.name)
-    name = f"sysbench_{safe_node}"
+    name = f"sysbench_{_worker_id(request)}_{safe_node}"
     sb = Sysbench(gr_cluster.docker, network=gr_cluster.network, name=name, log=gr_cluster.log)
     gr_cluster.exec_sql(
         f"CREATE DATABASE IF NOT EXISTS {sb.database};"
@@ -63,17 +74,20 @@ def sysbench(request, gr_cluster):
 
 @pytest.fixture
 def xtrabackup(request, gr_cluster):
-    # Per-test resource names (container names allow only [a-zA-Z0-9_.-]).
+    # Per-test resource names (container names allow only [a-zA-Z0-9_.-]). The worker id
+    # keeps every container/volume unique across parallel pytest-xdist workers running the
+    # same test — these names are global on the Docker host.
     safe_node = re.sub(r"[^a-zA-Z0-9_.-]", "_", request.node.name)
-    backup_volume = f"grbackup_{safe_node}"
-    restore_container = f"psrestore_{safe_node}"
+    prefix = f"{_worker_id(request)}_{safe_node}"
+    backup_volume = f"grbackup_{prefix}"
+    restore_container = f"psrestore_{prefix}"
     restore_volume = f"{restore_container}-data"
     helper = XtraBackup(
         gr_cluster.docker,
         network=gr_cluster.network,
         backup_volume=backup_volume,
         root_password=gr_cluster.root_password,
-        name_prefix=f"xtrabackup_{safe_node}",
+        name_prefix=f"xtrabackup_{prefix}",
         log=gr_cluster.log,
     )
     bundle = SimpleNamespace(

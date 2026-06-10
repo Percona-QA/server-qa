@@ -26,9 +26,9 @@ group-replication/
   back to `podman` if `docker` isn't installed). Make sure the Docker daemon
   is running.
 - The `percona/percona-server:8.4` image. First run will pull it automatically.
-- Python venv with `pytest` and `pytest-timeout`:
+- Python 3.10+ venv with `pytest` and `pytest-timeout`:
   ```bash
-  /Users/plavi/Development/percona/server-qa/.venv/bin/pip install -r requirements.txt
+  python -m pip install -r requirements.txt
   ```
 
 ## Running the test

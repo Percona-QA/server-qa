@@ -36,8 +36,8 @@ group-replication/
 From the `group-replication/` directory:
 
 ```bash
-cd /Users/plavi/Development/percona/server-qa/test_scripts/ps/group-replication
-/Users/plavi/Development/percona/server-qa/.venv/bin/pytest -v test_basic.py
+cd test_scripts/ps/group-replication
+pytest -v test_basic.py
 ```
 
 The fixture brings up 3 containers (`ps1`, `ps2`, `ps3`) on the `grnet` network,

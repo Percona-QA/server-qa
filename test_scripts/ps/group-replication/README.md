@@ -79,7 +79,7 @@ Relevant `GroupReplication` helpers: `get_primary()`, `stop_node()`,
 `test_scaling.py` exercises elastic membership changes under load:
 
 ```bash
-GR_VERBOSE=1 /Users/plavi/Development/percona/server-qa/.venv/bin/pytest -v test_scaling.py
+GR_VERBOSE=1 pytest -v test_scaling.py
 ```
 
 What it does: load initial data with sysbench, **scale up** the cluster from 3 to 5

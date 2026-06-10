@@ -143,8 +143,14 @@ class DockerHelper:
         return self._run(args, check=check)
 
     def destroy(self, name: str) -> ExecResult:
-        """Force-remove a container, ignoring errors if it does not exist."""
-        return self._run(["rm", "-f", name], check=False)
+        """Force-remove a container and its anonymous volumes, ignoring errors if absent.
+
+        The -v flag drops anonymous volumes the image declares (e.g. /var/log/mysql on
+        the server image, /etc/haproxy/pxc on the HAProxy image) that we never bind to a
+        named volume — otherwise they leak on every run. Named volumes (mounted by name)
+        are not affected and are removed explicitly via volume_remove.
+        """
+        return self._run(["rm", "-f", "-v", name], check=False)
 
     def start(self, name: str) -> ExecResult:
         """Start an existing stopped container."""

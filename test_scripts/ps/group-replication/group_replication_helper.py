@@ -3,6 +3,7 @@ import logging
 import os
 import shlex
 import time
+from urllib.parse import quote
 
 from docker_helper import DockerHelper
 
@@ -103,12 +104,20 @@ class GroupReplication:
         """
         return json.dumps(value)
 
+    def _instance_uri(self, node: str) -> str:
+        """Build the AdminAPI connection URI for a node, percent-encoding the credentials.
+
+        Even though the URI is embedded as an escaped JS string, mysqlsh then parses it
+        as a connection string, so a password with URI-reserved characters (@ : / # ?)
+        must be encoded or AdminAPI misparses it.
+        """
+        return f"root:{quote(self.root_password, safe='')}@{node}:3306"
+
     def _add_instance_script(self, node: str) -> str:
         """Build the mysqlsh AdminAPI script to add a node to the cluster (clone recovery)."""
-        uri = f"root:{self.root_password}@{node}:3306"
         return (
             f"var c = dba.getCluster({self._js_str(self.cluster_name)});"
-            f"c.addInstance({self._js_str(uri)}, {{"
+            f"c.addInstance({self._js_str(self._instance_uri(node))}, {{"
             f"recoveryMethod:'clone',"
             f"localAddress:{self._js_str(self._gr_address(node))}"
             "});"
@@ -303,10 +312,9 @@ class GroupReplication:
         to_remove = list(reversed(removable))[:count]
         for node in to_remove:
             self.log(f"remove {node} from cluster")
-            uri = f"root:{self.root_password}@{node}:3306"
             remove_script = (
                 f"var c = dba.getCluster({self._js_str(self.cluster_name)});"
-                f"c.removeInstance({self._js_str(uri)});"
+                f"c.removeInstance({self._js_str(self._instance_uri(node))});"
             )
             self.docker.exec_mysqlsh(primary, remove_script, password=self.root_password)
             self.docker.destroy(node)
@@ -377,10 +385,10 @@ class GroupReplication:
         """
         seed = self.active_nodes[0]
         self.log(f"start MySQL Router {self.router_name} (bootstrap from {seed})")
-        # The command runs via bash -c (it chains bootstrap && exec), so shell-quote the
-        # connection URI: a root_password with spaces/$/quotes/etc. would otherwise break
-        # the command or be shell-injected.
-        bootstrap_uri = shlex.quote(f"root:{self.root_password}@{seed}:3306")
+        # _instance_uri percent-encodes the credentials so mysqlrouter parses the URI
+        # correctly; shlex.quote then protects the surrounding bash -c command (it chains
+        # bootstrap && exec) from a password with spaces/$/quotes/etc.
+        bootstrap_uri = shlex.quote(self._instance_uri(seed))
         bootstrap = (
             f"mysqlrouter --bootstrap {bootstrap_uri} "
             "--directory /tmp/mysqlrouter "

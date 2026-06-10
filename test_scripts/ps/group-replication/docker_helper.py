@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+from urllib.parse import quote
 
 
 @dataclass
@@ -205,7 +206,9 @@ class DockerHelper:
         check: bool = True,
     ) -> ExecResult:
         """Run a MySQL Shell (mysqlsh) script inside a container against the given URI."""
-        uri = f"{user}:{password}@{host}:{port}"
+        # Percent-encode the credentials so a user/password containing URI-reserved
+        # characters (@ : / # ?) doesn't make mysqlsh misparse the connection string.
+        uri = f"{quote(user, safe='')}:{quote(password, safe='')}@{host}:{port}"
         args = [
             "exec",
             "-i",

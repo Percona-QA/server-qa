@@ -427,13 +427,15 @@ class GroupReplication:
         Uses HAProxy's runtime API over the stats socket, so writes only reach the primary even though
         mysql-check alone cannot distinguish it. Errors are ignored (e.g. before the socket is up).
         """
-        cmds = "; ".join(
-            f"set server be_write/{n} state {'ready' if n == primary else 'maint'}"
+        # HAProxy's runtime API is line-oriented: one command per line, each terminated
+        # by a newline. Joining with ';' would be sent as a single command and ignored.
+        cmds = "".join(
+            f"set server be_write/{n} state {'ready' if n == primary else 'maint'}\n"
             for n in self.containers
         )
         self.docker.exec_command(
             self.haproxy_name,
-            f"echo '{cmds}' | socat - UNIX-CONNECT:/tmp/haproxy.sock",
+            f"printf '%s' '{cmds}' | socat - UNIX-CONNECT:/tmp/haproxy.sock",
             check=False,
         )
 

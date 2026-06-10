@@ -7,19 +7,17 @@ in containers (Percona Server 8.4) and runs tests against it.
 
 ```
 group-replication/
-├── conftest.py              # gr_cluster + sysbench fixtures
-├── pytest.ini               # python_files = test_*.py
-├── requirements.txt         # pytest, pytest-timeout
-├── docker_helper.py         # DockerHelper — wraps docker/podman CLI
-├── group_replication.py     # GroupReplication — N-node cluster lifecycle
-├── sysbench_helper.py       # Sysbench — ephemeral sysbench load container
-├── xtrabackup_helper.py     # XtraBackup — full/incremental backup + restore
-├── test_basic.py            # smoke test: write on primary, read on every node
-├── test_failover.py         # primary failover + recovery under sysbench load
-├── test_scaling.py          # scale up 3->5 and down 5->3 under sysbench load
-├── test_backup_restore.py   # XtraBackup full+incremental backup and restore
-└── templates/
-    └── docker-compose.yaml  # equivalent 3-node topology, for reference
+├── conftest.py                 # gr_cluster + sysbench + xtrabackup fixtures
+├── pytest.ini                  # python_files = test_*.py
+├── requirements.txt            # pytest, pytest-timeout
+├── docker_helper.py            # DockerHelper — wraps docker/podman CLI
+├── group_replication_helper.py # GroupReplication — N-node cluster lifecycle
+├── sysbench_helper.py          # Sysbench — ephemeral sysbench load container
+├── xtrabackup_helper.py        # XtraBackup — full/incremental backup + restore
+├── test_basic.py               # smoke test: write on primary, read on every node
+├── test_failover.py            # primary failover + recovery under sysbench load
+├── test_scaling.py             # scale up 3->5 and down 5->3 under sysbench load
+└── test_backup_restore.py      # XtraBackup full+incremental backup and restore
 ```
 
 ## Prerequisites
@@ -176,8 +174,7 @@ Host ports `33150` → `6446`, `33151` → `6447` (for manual debugging:
 
 ### HAProxy (`pshaproxy`)
 
-Image `perconalab/percona-server-mysql-operator:main-haproxy` (ships `haproxy` +
-a MySQL client, amd64-only — pulled with `--platform linux/amd64`). Two frontends:
+Image `percona/haproxy:2`. Two frontends:
 
 - `3307` — read/write, `balance first` → the current **primary**,
 - `3308` — read-only, `balance roundrobin` across live members.
@@ -187,9 +184,7 @@ use the built-in `mysql-check` only for **liveness**; the framework then pins th
 write backend to the current primary via HAProxy's **runtime API** over the stats
 socket (`set server be_write/<node> state ready|maint`) — the same external-management
 model the Percona operator uses. On failover, `wait_proxy_ready()` re-pins the write
-backend to the newly elected primary. (An autonomous `external-check` script keyed on
-`super_read_only` was tried first but is pathologically slow under the amd64-on-arm64
-**emulation** this image runs in, where each forked check can stall for minutes.)
+backend to the newly elected primary.
 
 Host ports `33152` → `3307`, `33153` → `3308`. The config is injected via an
 environment variable (no host bind mounts), and the container runs as the image's

@@ -20,13 +20,13 @@ PROXIES = {
 
 
 def _worker_id(request) -> str:
-    """Return the pytest-xdist worker id (e.g. 'gw0'), or 'master' when running serially.
+    """Return the pytest-xdist worker id (e.g. 'gw0'), or '0' when running serially.
 
     Used to make Docker container/volume names unique per worker — names are global on
     the Docker host, so resources derived only from the test id collide across workers
     running the same test under pytest-xdist.
     """
-    return getattr(request.config, "workerinput", {}).get("workerid", "master")
+    return getattr(request.config, "workerinput", {}).get("workerid", "0")
 
 
 @pytest.fixture(scope="module")

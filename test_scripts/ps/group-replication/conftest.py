@@ -23,8 +23,17 @@ PROXIES = {
 def gr_cluster(request):
     # request.param is supplied by each test's @pytest.mark.parametrize(..., indirect=True).
     helper = DockerHelper()
-    cluster = GroupReplication(helper, num_nodes=3, **PROXIES[request.param])
-    try:
+    workerid = getattr(request.config, "workerinput", {}).get("workerid", "master")
+    m = re.search(r"\d+$", workerid)
+    offset = int(m.group()) if m else 0
+    cluster = GroupReplication(
+        helper,
+        num_nodes=3,
+        network=f"grnet-{workerid}",
+        node_prefix=f"ps{offset}-",
+        base_host_port=33060 + offset * 100,
+        **PROXIES[request.param],
+    )
         # create() is inside the try so a partially-built cluster (e.g. a failed
         # proxy bring-up) is still torn down instead of leaking containers.
         cluster.create()

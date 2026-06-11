@@ -204,8 +204,13 @@ class DockerHelper:
         port: int = 3306,
         language: str = "js",
         check: bool = True,
+        timeout: float | None = None,
     ) -> ExecResult:
-        """Run a MySQL Shell (mysqlsh) script inside a container against the given URI."""
+        """Run a MySQL Shell (mysqlsh) script inside a container against the given URI.
+
+        A timeout (seconds) bounds the call so a stuck mysqlsh (e.g. waiting on a
+        connection) can't hang the run until an outer pytest timeout.
+        """
         # Percent-encode the credentials so a user/password containing URI-reserved
         # characters (@ : / # ?) doesn't make mysqlsh misparse the connection string.
         uri = f"{quote(user, safe='')}:{quote(password, safe='')}@{host}:{port}"
@@ -221,7 +226,7 @@ class DockerHelper:
             "-e",
             script,
         ]
-        return self._run(args, check=check)
+        return self._run(args, check=check, timeout=timeout)
 
     def network_create(self, name: str) -> ExecResult:
         """Create a container network, reusing it if one with the same name already exists."""

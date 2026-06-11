@@ -192,6 +192,7 @@ class GroupReplication:
                 "WHERE MEMBER_ROLE='PRIMARY' AND MEMBER_STATE='ONLINE';",
                 password=self.root_password,
                 check=False,
+                timeout=15,
             )
             host = result.stdout.strip()
             if result.ok and host and "\n" not in host:
@@ -215,6 +216,7 @@ class GroupReplication:
             "FROM performance_schema.replication_group_members;",
             password=self.root_password,
             check=False,
+            timeout=15,
         )
         states: dict[str, str] = {}
         if result.ok:

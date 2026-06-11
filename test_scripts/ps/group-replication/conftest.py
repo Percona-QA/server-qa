@@ -29,6 +29,16 @@ def _worker_id(request) -> str:
     return getattr(request.config, "workerinput", {}).get("workerid", "0")
 
 
+def _sql_ident(name: str) -> str:
+    """Quote a MySQL identifier (e.g. a database name), escaping embedded backticks."""
+    return "`" + name.replace("`", "``") + "`"
+
+
+def _sql_str(value: str) -> str:
+    """Quote a MySQL string literal, escaping backslashes and single quotes (default sql_mode)."""
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
 @pytest.fixture(scope="module")
 def gr_cluster(request):
     # request.param is supplied by each test's @pytest.mark.parametrize(..., indirect=True).
@@ -61,10 +71,13 @@ def sysbench(request, gr_cluster):
     safe_node = re.sub(r"[^a-zA-Z0-9_.-]", "_", request.node.name)
     name = f"sysbench_{_worker_id(request)}_{safe_node}"
     sb = Sysbench(gr_cluster.docker, network=gr_cluster.network, name=name, log=gr_cluster.log)
+    db = _sql_ident(sb.database)
+    user = _sql_str(sb.mysql_user)
+    password = _sql_str(sb.mysql_password)
     gr_cluster.exec_sql(
-        f"CREATE DATABASE IF NOT EXISTS {sb.database};"
-        f"CREATE USER IF NOT EXISTS '{sb.mysql_user}'@'%' IDENTIFIED BY '{sb.mysql_password}';"
-        f"GRANT ALL ON {sb.database}.* TO '{sb.mysql_user}'@'%';",
+        f"CREATE DATABASE IF NOT EXISTS {db};"
+        f"CREATE USER IF NOT EXISTS {user}@'%' IDENTIFIED BY {password};"
+        f"GRANT ALL ON {db}.* TO {user}@'%';",
     )
     try:
         yield sb

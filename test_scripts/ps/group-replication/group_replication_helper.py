@@ -546,7 +546,13 @@ class GroupReplication:
             # left, so a missing primary can't push total wall time far past our timeout
             # (get_primary alone can otherwise block up to 60s, and was called twice/iter).
             remaining = max(1, int(deadline - time.time()))
-            primary = self.get_primary(timeout=remaining)
+            try:
+                primary = self.get_primary(timeout=remaining)
+            except RuntimeError as exc:
+                # No PRIMARY elected yet (e.g. mid-failover): keep polling until our own
+                # deadline rather than aborting on get_primary()'s error.
+                last = str(exc)
+                continue
             # HAProxy can't detect the primary itself; (re-)pin the write backend to the
             # current primary each iteration. Idempotent, and self-heals after failover.
             if self.proxy == "haproxy":

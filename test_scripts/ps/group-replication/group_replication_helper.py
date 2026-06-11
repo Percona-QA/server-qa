@@ -740,45 +740,56 @@ class GroupReplication:
         # intentionally stopped during failover testing while other members are ONLINE.
         query_node = self.active_nodes[0]
         self.log("check membership via replication_group_members")
+        # check=False so a transient query failure becomes a structured verify error
+        # rather than raising and bypassing the collected errors; bounded so a hung mysql
+        # client can't stall verify().
         result = self.docker.exec_mysql(
             query_node,
             "SELECT MEMBER_HOST, MEMBER_PORT, MEMBER_STATE, MEMBER_ROLE "
             "FROM performance_schema.replication_group_members;",
             password=self.root_password,
+            check=False,
+            timeout=15,
         )
-        members: list[tuple[str, str, str, str]] = []
-        for line in result.stdout.strip().splitlines():
-            parts = line.split("\t")
-            if len(parts) >= 4:
-                members.append((parts[0], parts[1], parts[2], parts[3]))
-
-        if len(members) != self.num_nodes:
+        if not result.ok:
             errors.append(
-                f"Expected {self.num_nodes} members in replication_group_members, "
-                f"got {len(members)}: {members}"
+                f"Failed to query replication_group_members on {query_node}: "
+                f"{(result.stderr or result.stdout).strip()!r}"
             )
+        else:
+            members: list[tuple[str, str, str, str]] = []
+            for line in result.stdout.strip().splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 4:
+                    members.append((parts[0], parts[1], parts[2], parts[3]))
 
-        hosts = sorted(m[0] for m in members)
-        expected_hosts = sorted(self.containers)
-        if hosts != expected_hosts:
-            errors.append(f"Member hosts mismatch: got {hosts}, expected {expected_hosts}")
-
-        bad_state = [m for m in members if m[2] != "ONLINE"]
-        if bad_state:
-            errors.append(f"Members not ONLINE: {bad_state}")
-
-        primaries = [m for m in members if m[3] == "PRIMARY"]
-        secondaries = [m for m in members if m[3] == "SECONDARY"]
-        primary_hosts = ", ".join(sorted(m[0] for m in primaries)) or "none"
-        secondary_hosts = ", ".join(sorted(m[0] for m in secondaries)) or "none"
-        self.log(f"primary: {primary_hosts}; secondaries: {secondary_hosts}")
-        if self.single_primary:
-            if len(primaries) != 1:
-                errors.append(f"Expected exactly 1 PRIMARY, got {len(primaries)}: {members}")
-            if len(secondaries) != self.num_nodes - 1:
+            if len(members) != self.num_nodes:
                 errors.append(
-                    f"Expected {self.num_nodes - 1} SECONDARY, got {len(secondaries)}: {members}"
+                    f"Expected {self.num_nodes} members in replication_group_members, "
+                    f"got {len(members)}: {members}"
                 )
+
+            hosts = sorted(m[0] for m in members)
+            expected_hosts = sorted(self.containers)
+            if hosts != expected_hosts:
+                errors.append(f"Member hosts mismatch: got {hosts}, expected {expected_hosts}")
+
+            bad_state = [m for m in members if m[2] != "ONLINE"]
+            if bad_state:
+                errors.append(f"Members not ONLINE: {bad_state}")
+
+            primaries = [m for m in members if m[3] == "PRIMARY"]
+            secondaries = [m for m in members if m[3] == "SECONDARY"]
+            primary_hosts = ", ".join(sorted(m[0] for m in primaries)) or "none"
+            secondary_hosts = ", ".join(sorted(m[0] for m in secondaries)) or "none"
+            self.log(f"primary: {primary_hosts}; secondaries: {secondary_hosts}")
+            if self.single_primary:
+                if len(primaries) != 1:
+                    errors.append(f"Expected exactly 1 PRIMARY, got {len(primaries)}: {members}")
+                if len(secondaries) != self.num_nodes - 1:
+                    errors.append(
+                        f"Expected {self.num_nodes - 1} SECONDARY, got {len(secondaries)}: {members}"
+                    )
 
         if check_proxy and self.proxy:
             self.log(f"verify {self.proxy} routes read/write traffic to the primary")

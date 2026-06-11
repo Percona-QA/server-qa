@@ -653,12 +653,18 @@ class GroupReplication:
             self.wait_proxy_ready()
 
     def _read_variables(self, name: str, variables: list[str]) -> dict[str, str]:
-        """Read the given global variables from a node as a name->value map."""
+        """Read the given global variables from a node as a name->value map.
+
+        Uses check=False so a transient failure (node down/restarting) yields an empty
+        map rather than raising — verify() then records the missing values as structured
+        mismatches instead of crashing before it can report the collected errors.
+        """
         in_clause = ",".join(f"'{v}'" for v in variables)
         result = self.docker.exec_mysql(
             name,
             f"SHOW GLOBAL VARIABLES WHERE Variable_name IN ({in_clause});",
             password=self.root_password,
+            check=False,
         )
         actual: dict[str, str] = {}
         for line in result.stdout.strip().splitlines():

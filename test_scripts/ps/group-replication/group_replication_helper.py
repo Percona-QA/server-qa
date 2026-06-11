@@ -41,6 +41,11 @@ class GroupReplication:
             raise ValueError("num_nodes must be >= 1")
         if mysql_router and haproxy:
             raise ValueError("mysql_router and haproxy are mutually exclusive")
+        if not single_primary:
+            # Multi-primary mode is not currently supported by this framework: several
+            # helpers (notably get_primary(), the proxy write-endpoint routing, and the
+            # single-PRIMARY assertions in verify()) assume exactly one ONLINE primary.
+            raise ValueError("multi-primary mode (single_primary=False) is not supported")
         if verbose is None:
             verbose = os.environ.get("GR_VERBOSE", "").lower() in ("1", "true", "yes", "on")
         self.verbose = verbose

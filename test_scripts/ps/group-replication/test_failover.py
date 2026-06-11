@@ -1,7 +1,7 @@
 """Group Replication primary failover and recovery test.
 
 Loads data via sysbench, stops the current primary to force the election of a new one,
-and keeps writing through the failover. Then brings the stopped node back, confirms it
+then resumes writes after the failover. Brings the stopped node back, confirms it
 auto-rejoins and the cluster is whole again, verifying data stays consistent across all
 online nodes (matching checksums) at every stage.
 """

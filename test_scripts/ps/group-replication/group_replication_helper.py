@@ -711,10 +711,14 @@ class GroupReplication:
                     f"expected {expected_local!r}"
                 )
 
-        primary = self.primary()
+        if not self.active_nodes:
+            raise RuntimeError("No active nodes to query membership")
+        # Query a currently-active node, not self.primary() (the bootstrap node), which may
+        # be intentionally stopped during failover testing while other members are ONLINE.
+        query_node = self.active_nodes[0]
         self.log("check membership via replication_group_members")
         result = self.docker.exec_mysql(
-            primary,
+            query_node,
             "SELECT MEMBER_HOST, MEMBER_PORT, MEMBER_STATE, MEMBER_ROLE "
             "FROM performance_schema.replication_group_members;",
             password=self.root_password,

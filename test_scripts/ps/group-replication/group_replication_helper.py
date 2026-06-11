@@ -536,10 +536,15 @@ class GroupReplication:
         deadline = time.time() + timeout
         last = ""
         while time.time() < deadline:
+            # Resolve the primary once per iteration and bound get_primary() by the time
+            # left, so a missing primary can't push total wall time far past our timeout
+            # (get_primary alone can otherwise block up to 60s, and was called twice/iter).
+            remaining = max(1, int(deadline - time.time()))
+            primary = self.get_primary(timeout=remaining)
             # HAProxy can't detect the primary itself; (re-)pin the write backend to the
             # current primary each iteration. Idempotent, and self-heals after failover.
             if self.proxy == "haproxy":
-                self._haproxy_set_write_primary(self.get_primary())
+                self._haproxy_set_write_primary(primary)
             result = self.docker.exec_mysql(
                 self.active_nodes[0],
                 "SELECT @@hostname;",
@@ -550,7 +555,7 @@ class GroupReplication:
                 timeout=15,
             )
             routed = result.stdout.strip()
-            if result.ok and routed and routed == self.get_primary():
+            if result.ok and routed and routed == primary:
                 return
             last = routed or (result.stderr or "").strip()
             time.sleep(2)

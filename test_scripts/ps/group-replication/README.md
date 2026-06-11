@@ -162,7 +162,11 @@ def test_haproxy_specific(gr_cluster): ...
 def test_router_specific(gr_cluster): ...
 ```
 
-### MySQL Router (`psrouter`)
+### MySQL Router (`<node_prefix>router`)
+
+The container name is derived from `node_prefix` (e.g. `ps0-router` with the default
+fixture, `psrouter` for a class constructed with the default `node_prefix="ps"`).
+
 
 Image `percona/percona-mysql-router:8.4`, bootstrapped against a live member. Exposes:
 
@@ -173,7 +177,11 @@ Image `percona/percona-mysql-router:8.4`, bootstrapped against a live member. Ex
 Host ports `33150` → `6446`, `33151` → `6447` (for manual debugging:
 `mysql -h 127.0.0.1 -P 33150 -uroot -prootpass`).
 
-### HAProxy (`pshaproxy`)
+### HAProxy (`<node_prefix>haproxy`)
+
+The container name is derived from `node_prefix` (e.g. `ps0-haproxy` with the default
+fixture, `pshaproxy` for a class constructed with the default `node_prefix="ps"`).
+
 
 Image `percona/haproxy:2`. Two frontends:
 
@@ -287,12 +295,12 @@ Sample output (appears in pytest's live log — no `-s` needed; each line is
 timestamped to help debug timing/hangs):
 
 ```
-2026-05-27 14:24:09.512 [GR] create network grnet
+2026-05-27 14:24:09.512 [GR] create network grnet-0
 2026-05-27 14:24:09.981 [GR] start node ps0-1 (server-id=1, 33061->3306)
 2026-05-27 14:24:11.400 [GR] wait for ps0-1 to accept connections
 2026-05-27 14:24:30.210 [GR] bootstrap cluster on ps0-1
-2026-05-27 14:24:33.005 [GR] add ps2 to cluster (clone)
-2026-05-27 14:24:48.117 [GR] add ps3 to cluster (clone)
+2026-05-27 14:24:33.005 [GR] add ps0-2 to cluster (clone)
+2026-05-27 14:24:48.117 [GR] add ps0-3 to cluster (clone)
 2026-05-27 14:25:02.640 [GR] cluster is ONLINE
 2026-05-27 14:25:02.900 [GR] verify GR variables on each node
 2026-05-27 14:25:03.330 [GR] create database gr_test

@@ -181,13 +181,16 @@ class GroupReplication:
         last = ""
         while time.time() < deadline:
             node = self.active_nodes[0]
+            # Cap the per-query timeout at the time left so a single probe can't overrun
+            # the caller-provided deadline (callers may pass less than the usual 15s).
+            query_timeout = min(15, max(1, int(deadline - time.time())))
             result = self.docker.exec_mysql(
                 node,
                 "SELECT MEMBER_HOST FROM performance_schema.replication_group_members "
                 "WHERE MEMBER_ROLE='PRIMARY' AND MEMBER_STATE='ONLINE';",
                 password=self.root_password,
                 check=False,
-                timeout=15,
+                timeout=query_timeout,
             )
             host = result.stdout.strip()
             if result.ok and host and "\n" not in host:
@@ -560,6 +563,9 @@ class GroupReplication:
             # current primary each iteration. Idempotent, and self-heals after failover.
             if self.proxy == "haproxy":
                 self._haproxy_set_write_primary(primary)
+            # Cap the probe timeout at the time left (get_primary above may have consumed
+            # part of the budget) so a stuck probe can't overrun our own timeout.
+            probe_timeout = min(15, max(1, int(deadline - time.time())))
             result = self.docker.exec_mysql(
                 self.active_nodes[0],
                 "SELECT @@hostname;",
@@ -567,7 +573,7 @@ class GroupReplication:
                 host=host,
                 port=port,
                 check=False,
-                timeout=15,
+                timeout=probe_timeout,
             )
             routed = result.stdout.strip()
             if result.ok and routed and routed == primary:

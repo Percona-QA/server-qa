@@ -460,7 +460,9 @@ class GroupReplication:
         """Pin the write backend to the given primary: mark it ready and every other node in maintenance.
 
         Uses HAProxy's runtime API over the stats socket, so writes only reach the primary even though
-        mysql-check alone cannot distinguish it. Errors are ignored (e.g. before the socket is up).
+        mysql-check alone cannot distinguish it. Failures are not raised (this is polled before the
+        socket is up), but they're logged in verbose mode so routing problems (missing socat, wrong
+        socket path, permissions, or a rejected command) are diagnosable.
         """
         # HAProxy's runtime API is line-oriented: one command per line, each terminated
         # by a newline. Joining with ';' would be sent as a single command and ignored.
@@ -468,11 +470,18 @@ class GroupReplication:
             f"set server be_write/{n} state {'ready' if n == primary else 'maint'}\n"
             for n in self.containers
         )
-        self.docker.exec_command(
+        result = self.docker.exec_command(
             self.haproxy_name,
             f"printf '%s' '{cmds}' | socat - UNIX-CONNECT:/tmp/haproxy.sock",
             check=False,
         )
+        # A successful "set server" prints nothing; any non-zero exit or output indicates
+        # a socket/socat problem or an HAProxy-rejected command worth surfacing.
+        if not result.ok or result.stdout.strip() or result.stderr.strip():
+            self.log(
+                f"HAProxy runtime API (pin write -> {primary}) exit={result.returncode} "
+                f"stdout={result.stdout.strip()!r} stderr={result.stderr.strip()!r}"
+            )
 
     def _start_haproxy(self) -> None:
         """Start a Percona HAProxy container fronting the cluster (write :3307, read :3308).

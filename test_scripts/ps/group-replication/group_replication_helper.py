@@ -554,6 +554,7 @@ class GroupReplication:
                 # No PRIMARY elected yet (e.g. mid-failover): keep polling until our own
                 # deadline rather than aborting on get_primary()'s error.
                 last = str(exc)
+                time.sleep(2)
                 continue
             # HAProxy can't detect the primary itself; (re-)pin the write backend to the
             # current primary each iteration. Idempotent, and self-heals after failover.

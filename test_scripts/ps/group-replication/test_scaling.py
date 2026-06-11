@@ -1,7 +1,7 @@
 """Group Replication scale up / scale down test.
 
-Starts from a 3-node cluster, loads data via sysbench, then grows the cluster to 5
-nodes and shrinks it back to 3 while a workload runs. Confirms membership and cluster
+Starts from a 3-node cluster, loads data via sysbench, scales the cluster up to 5
+nodes, runs a workload, then scales it back down to 3. Confirms membership and cluster
 configuration are correct after each change and that data stays consistent (matching
 checksums) across all online nodes at every stage, behind both proxy backends.
 """

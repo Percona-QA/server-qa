@@ -767,6 +767,10 @@ class GroupReplication:
         if check_proxy and self.proxy:
             self.log(f"verify {self.proxy} routes read/write traffic to the primary")
             host, port = self.rw_endpoint()
+            # Capture the primary once (a failover between the check and the message could
+            # otherwise disagree) and bound the proxy probe with a timeout so a misbehaving
+            # proxy can't hang the run until an outer pytest timeout.
+            primary = self.get_primary()
             result = self.docker.exec_mysql(
                 self.active_nodes[0],
                 "SELECT @@hostname;",
@@ -774,11 +778,12 @@ class GroupReplication:
                 host=host,
                 port=port,
                 check=False,
+                timeout=15,
             )
             routed = result.stdout.strip()
-            if not result.ok or routed != self.get_primary():
+            if not result.ok or routed != primary:
                 errors.append(
-                    f"{self.proxy} RW endpoint routes to {routed!r}, expected primary {self.get_primary()!r}"
+                    f"{self.proxy} RW endpoint routes to {routed!r}, expected primary {primary!r}"
                 )
 
         if errors:

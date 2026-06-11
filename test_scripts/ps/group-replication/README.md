@@ -11,6 +11,7 @@ group-replication/
 ├── pytest.ini                  # python_files = test_*.py
 ├── requirements.txt            # pytest, pytest-timeout
 ├── docker_helper.py            # DockerHelper — wraps docker/podman CLI
+├── generic_helper.py           # shared SQL/JS string-escaping helpers
 ├── group_replication_helper.py # GroupReplication — N-node cluster lifecycle
 ├── sysbench_helper.py          # Sysbench — ephemeral sysbench load container
 ├── xtrabackup_helper.py        # XtraBackup — full/incremental backup + restore

@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import shlex
@@ -6,6 +5,7 @@ import time
 from urllib.parse import quote
 
 from docker_helper import DockerHelper
+from generic_helper import js_str, sql_ident, sql_str
 
 _logger = logging.getLogger("GR")
 
@@ -99,26 +99,6 @@ class GroupReplication:
         """Build the GR communication address (host:gr_port) for a node."""
         return f"{name}:{self.gr_port}"
 
-    @staticmethod
-    def _js_str(value: str) -> str:
-        """Encode a Python string as a JavaScript string literal for mysqlsh --js scripts.
-
-        JSON encoding yields a valid JS string literal with quotes, backslashes, and
-        control/non-ASCII characters escaped, so values like cluster_name or the
-        connection URI (which contains root_password) can't break the script or inject.
-        """
-        return json.dumps(value)
-
-    @staticmethod
-    def _sql_str(value: str) -> str:
-        """Quote a MySQL string literal, escaping backslashes and single quotes."""
-        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
-
-    @staticmethod
-    def _sql_ident(name: str) -> str:
-        """Quote a MySQL identifier (e.g. schema/table), escaping embedded backticks."""
-        return "`" + name.replace("`", "``") + "`"
-
     def _instance_uri(self, node: str) -> str:
         """Build the AdminAPI connection URI for a node, percent-encoding the credentials.
 
@@ -131,10 +111,10 @@ class GroupReplication:
     def _add_instance_script(self, node: str) -> str:
         """Build the mysqlsh AdminAPI script to add a node to the cluster (clone recovery)."""
         return (
-            f"var c = dba.getCluster({self._js_str(self.cluster_name)});"
-            f"c.addInstance({self._js_str(self._instance_uri(node))}, {{"
+            f"var c = dba.getCluster({js_str(self.cluster_name)});"
+            f"c.addInstance({js_str(self._instance_uri(node))}, {{"
             f"recoveryMethod:'clone',"
-            f"localAddress:{self._js_str(self._gr_address(node))}"
+            f"localAddress:{js_str(self._gr_address(node))}"
             "});"
         )
 
@@ -334,8 +314,8 @@ class GroupReplication:
         for node in to_remove:
             self.log(f"remove {node} from cluster")
             remove_script = (
-                f"var c = dba.getCluster({self._js_str(self.cluster_name)});"
-                f"c.removeInstance({self._js_str(self._instance_uri(node))});"
+                f"var c = dba.getCluster({js_str(self.cluster_name)});"
+                f"c.removeInstance({js_str(self._instance_uri(node))});"
             )
             self.docker.exec_mysqlsh(primary, remove_script, password=self.root_password)
             self.docker.destroy(node)
@@ -641,13 +621,13 @@ class GroupReplication:
 
         bootstrap_node = self.get_bootstrap_node()
         bootstrap_opts = (
-            f"groupName:{self._js_str(self.group_name)},"
-            f"communicationStack:{self._js_str(self.communication_stack)},"
-            f"localAddress:{self._js_str(self._gr_address(bootstrap_node))},"
+            f"groupName:{js_str(self.group_name)},"
+            f"communicationStack:{js_str(self.communication_stack)},"
+            f"localAddress:{js_str(self._gr_address(bootstrap_node))},"
             f"multiPrimary:{'false' if self.single_primary else 'true'}"
         )
         bootstrap_script = (
-            f"var c = dba.createCluster({self._js_str(self.cluster_name)}, {{{bootstrap_opts}}});"
+            f"var c = dba.createCluster({js_str(self.cluster_name)}, {{{bootstrap_opts}}});"
         )
         self.log(f"bootstrap cluster on {bootstrap_node}")
         self.docker.exec_mysqlsh(bootstrap_node, bootstrap_script, password=self.root_password)
@@ -809,7 +789,7 @@ class GroupReplication:
         result = self.docker.exec_mysql(
             node,
             "SELECT TABLE_NAME FROM information_schema.TABLES "
-            f"WHERE TABLE_SCHEMA={self._sql_str(database)} AND TABLE_TYPE='BASE TABLE' "
+            f"WHERE TABLE_SCHEMA={sql_str(database)} AND TABLE_TYPE='BASE TABLE' "
             "ORDER BY TABLE_NAME;",
             password=self.root_password,
         )
@@ -819,7 +799,7 @@ class GroupReplication:
         """Return the CHECKSUM TABLE value for a single table on the given node."""
         result = self.docker.exec_mysql(
             node,
-            f"CHECKSUM TABLE {self._sql_ident(database)}.{self._sql_ident(table)};",
+            f"CHECKSUM TABLE {sql_ident(database)}.{sql_ident(table)};",
             password=self.root_password,
         )
         # Output is "<database>.<table>\t<checksum>" (or NULL if the table is missing).

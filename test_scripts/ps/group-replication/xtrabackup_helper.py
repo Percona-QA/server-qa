@@ -53,9 +53,16 @@ class XtraBackup:
         )
 
     def full_backup(self, source_node: str, source_volume: str):
-        """Take a full backup of source_node, reading its data via the shared volume."""
+        """Take a full backup of source_node, reading its data via the shared volume.
+
+        xtrabackup --backup aborts if --target-dir exists and is non-empty. The backup
+        volume name is deterministic per test, so a previously-crashed run can leave
+        full/incremental dirs behind; clear and recreate them here (the start of the chain)
+        to keep reruns idempotent.
+        """
         self.log(f"xtrabackup full backup of {source_node} -> {self.full_dir}")
         command = (
+            f"rm -rf {self.full_dir} {self.inc_dir} && mkdir -p {self.full_dir} {self.inc_dir} && "
             f"xtrabackup --backup --datadir=/var/lib/mysql --target-dir={self.full_dir} "
             f"--host={source_node} --port=3306 --user=root "
             f"--password={shlex.quote(self.root_password)}"

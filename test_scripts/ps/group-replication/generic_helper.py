@@ -18,8 +18,14 @@ def js_str(value: str) -> str:
 
 
 def sql_str(value: str) -> str:
-    """Quote a MySQL string literal, escaping backslashes and single quotes."""
-    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+    """Quote a MySQL string literal safely regardless of sql_mode.
+
+    Single quotes are doubled ('') — the ANSI-standard form that works whether or not
+    NO_BACKSLASH_ESCAPES is set (a backslash escape like \\' would break/inject under
+    NO_BACKSLASH_ESCAPES). Backslashes are still doubled so a value ending in one can't
+    escape the closing quote under MySQL's default (backslash-enabled) mode.
+    """
+    return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
 
 
 def sql_ident(name: str) -> str:

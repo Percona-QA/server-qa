@@ -123,6 +123,11 @@ class DockerHelper:
         check: bool = True,
     ) -> ExecResult:
         """Run a one-off (by default --rm) container, e.g. an ephemeral helper task."""
+        # --rm only cleans up on a clean exit; an interrupted prior run can leave a
+        # container with this name behind, making `run --name` fail with a conflict.
+        # Remove any leftover first so reruns are idempotent.
+        if name:
+            self.destroy(name)
         args = ["run"]
         if remove:
             args.append("--rm")

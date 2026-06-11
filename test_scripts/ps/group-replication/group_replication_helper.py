@@ -104,6 +104,16 @@ class GroupReplication:
         """
         return json.dumps(value)
 
+    @staticmethod
+    def _sql_str(value: str) -> str:
+        """Quote a MySQL string literal, escaping backslashes and single quotes."""
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    @staticmethod
+    def _sql_ident(name: str) -> str:
+        """Quote a MySQL identifier (e.g. schema/table), escaping embedded backticks."""
+        return "`" + name.replace("`", "``") + "`"
+
     def _instance_uri(self, node: str) -> str:
         """Build the AdminAPI connection URI for a node, percent-encoding the credentials.
 
@@ -794,7 +804,7 @@ class GroupReplication:
         result = self.docker.exec_mysql(
             node,
             "SELECT TABLE_NAME FROM information_schema.TABLES "
-            f"WHERE TABLE_SCHEMA='{database}' AND TABLE_TYPE='BASE TABLE' "
+            f"WHERE TABLE_SCHEMA={self._sql_str(database)} AND TABLE_TYPE='BASE TABLE' "
             "ORDER BY TABLE_NAME;",
             password=self.root_password,
         )
@@ -803,7 +813,9 @@ class GroupReplication:
     def _table_checksum(self, node: str, database: str, table: str) -> str:
         """Return the CHECKSUM TABLE value for a single table on the given node."""
         result = self.docker.exec_mysql(
-            node, f"CHECKSUM TABLE `{database}`.`{table}`;", password=self.root_password
+            node,
+            f"CHECKSUM TABLE {self._sql_ident(database)}.{self._sql_ident(table)};",
+            password=self.root_password,
         )
         # Output is "<database>.<table>\t<checksum>" (or NULL if the table is missing).
         parts = result.stdout.strip().split("\t")

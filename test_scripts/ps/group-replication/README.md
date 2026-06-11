@@ -375,7 +375,7 @@ Insert `breakpoint()` anywhere in the test or in `conftest.py` to stop there:
 
 ```python
 def test_replicates_table_across_nodes(gr_cluster):
-    primary = gr_cluster.primary()
+    primary = gr_cluster.get_bootstrap_node()
     docker = gr_cluster.docker
     breakpoint()       # <-- stops here; cluster is fully up
     docker.exec_mysql(primary, "CREATE DATABASE IF NOT EXISTS gr_test;")
@@ -450,7 +450,8 @@ fixture and use:
   instead of targeting a node directly, so the test is proxy-agnostic.
 - `gr_cluster.rw_endpoint()` / `gr_cluster.ro_endpoint()` — `(host, port)` for
   read/write or read-only client traffic (e.g. to point sysbench at).
-- `gr_cluster.primary()` — name of the bootstrap node (`"ps0-1"`).
+- `gr_cluster.get_bootstrap_node()` — name of the bootstrap node (`"ps0-1"`); for the
+  currently-elected primary (which differs after failover) use `gr_cluster.get_primary()`.
 - `gr_cluster.containers` — list of all node names in start order.
 - `gr_cluster.docker` — the `DockerHelper`. Common methods:
   - `docker.exec_mysql(node, "SQL;", database=None)` → returns `ExecResult` with `.stdout`, `.stderr`, `.returncode`, `.ok`.
@@ -462,7 +463,7 @@ Skeleton:
 
 ```python
 def test_my_thing(gr_cluster):
-    primary = gr_cluster.primary()
+    primary = gr_cluster.get_bootstrap_node()
     docker = gr_cluster.docker
     docker.exec_mysql(primary, "CREATE DATABASE demo;")
     for node in gr_cluster.containers:

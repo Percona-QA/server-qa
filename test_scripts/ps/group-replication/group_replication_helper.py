@@ -168,8 +168,12 @@ class GroupReplication:
             time.sleep(2)
         raise RuntimeError(f"Container {name} did not become ready in {timeout}s. Last: {last_err}")
 
-    def primary(self) -> str:
-        """Return the bootstrap node name (the first container created)."""
+    def get_bootstrap_node(self) -> str:
+        """Return the bootstrap node name (the first container created).
+
+        This is a fixed node, distinct from get_primary(), which queries the cluster for
+        the currently-elected ONLINE primary (they differ after a failover).
+        """
         if not self.containers:
             raise RuntimeError("Cluster not created yet")
         return self.containers[0]
@@ -613,27 +617,27 @@ class GroupReplication:
         for name in self.containers:
             self._wait_ready(name)
 
-        primary = self.primary()
+        bootstrap_node = self.get_bootstrap_node()
         bootstrap_opts = (
             f"groupName:{self._js_str(self.group_name)},"
             f"communicationStack:{self._js_str(self.communication_stack)},"
-            f"localAddress:{self._js_str(self._gr_address(primary))},"
+            f"localAddress:{self._js_str(self._gr_address(bootstrap_node))},"
             f"multiPrimary:{'false' if self.single_primary else 'true'}"
         )
         bootstrap_script = (
             f"var c = dba.createCluster({self._js_str(self.cluster_name)}, {{{bootstrap_opts}}});"
         )
-        self.log(f"bootstrap cluster on {primary}")
-        self.docker.exec_mysqlsh(primary, bootstrap_script, password=self.root_password)
+        self.log(f"bootstrap cluster on {bootstrap_node}")
+        self.docker.exec_mysqlsh(bootstrap_node, bootstrap_script, password=self.root_password)
         for i in range(2, self.num_nodes + 1):
             node = self._node_name(i)
             self.log(f"add {node} to cluster (clone)")
             self.docker.exec_mysqlsh(
-                primary, self._add_instance_script(node), password=self.root_password
+                bootstrap_node, self._add_instance_script(node), password=self.root_password
             )
 
         status = self.docker.exec_mysqlsh(
-            primary,
+            bootstrap_node,
             f"var c = dba.getCluster({self._js_str(self.cluster_name)}); "
             "print(JSON.stringify(c.status()));",
             password=self.root_password,
@@ -713,8 +717,8 @@ class GroupReplication:
 
         if not self.active_nodes:
             raise RuntimeError("No active nodes to query membership")
-        # Query a currently-active node, not self.primary() (the bootstrap node), which may
-        # be intentionally stopped during failover testing while other members are ONLINE.
+        # Query a currently-active node, not self.get_bootstrap_node(), which may be
+        # intentionally stopped during failover testing while other members are ONLINE.
         query_node = self.active_nodes[0]
         self.log("check membership via replication_group_members")
         result = self.docker.exec_mysql(

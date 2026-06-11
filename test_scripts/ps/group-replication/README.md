@@ -26,6 +26,7 @@ group-replication/
   back to `podman` if `docker` isn't installed). Make sure the Docker daemon
   is running.
 - The `percona/percona-server:8.4` image. First run will pull it automatically.
+- `mysqlsh` (MySQL Shell) must be available in the chosen `SERVER_IMAGE` (used via `docker exec` for AdminAPI bootstrap).
 - Python 3.10+ venv with `pytest` and `pytest-timeout`:
   ```bash
   python -m pip install -r requirements.txt

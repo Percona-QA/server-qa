@@ -327,10 +327,12 @@ class GroupReplication:
         self.num_nodes = len(self.containers)
         self.log("persist GR settings (start_on_boot, group_seeds) on each node")
         self._persist_gr_settings(self.containers)
+        # Let the membership settle before touching the proxy (mirrors scale_up), so proxy
+        # pinning/polling doesn't run against the transient state right after removeInstance.
+        self.wait_all_online()
         if self.proxy:
             self._refresh_proxy()
             self.wait_proxy_ready()
-        self.wait_all_online()
         return to_remove
 
     def rw_endpoint(self) -> tuple[str, int]:

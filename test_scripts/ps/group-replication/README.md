@@ -76,7 +76,7 @@ Relevant `GroupReplication` helpers: `get_primary()`, `stop_node()`,
 
 ## Scaling test (sysbench)
 
-`test_scaling.py` exercises elastic membership changes under load:
+`test_scaling.py` exercises elastic membership changes and data consistency checks, with a workload phase between scale operations:
 
 ```bash
 GR_VERBOSE=1 pytest -v test_scaling.py

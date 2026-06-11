@@ -43,13 +43,19 @@ def gr_cluster(request):
     # request.param is supplied by each test's @pytest.mark.parametrize(..., indirect=True).
     helper = DockerHelper()
     workerid = _worker_id(request)
+    # Use the full worker id (sanitized to [a-zA-Z0-9]) for the globally-unique resource
+    # names: deriving node_prefix from offset alone collapses "0" (serial) and "gw0"
+    # (xdist) to the same "ps0-" prefix, which would clash across execution modes. offset
+    # (the numeric suffix) is used only to give concurrent xdist workers distinct host
+    # port ranges.
+    safe_workerid = re.sub(r"[^a-zA-Z0-9]", "", workerid) or "0"
     m = re.search(r"\d+$", workerid)
     offset = int(m.group()) if m else 0
     cluster = GroupReplication(
         helper,
         num_nodes=3,
-        network=f"grnet-{workerid}",
-        node_prefix=f"ps{offset}-",
+        network=f"grnet-{safe_workerid}",
+        node_prefix=f"ps{safe_workerid}-",
         base_host_port=33060 + offset * 100,
         **PROXIES[request.param],
     )

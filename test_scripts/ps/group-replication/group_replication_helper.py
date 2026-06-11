@@ -597,6 +597,10 @@ class GroupReplication:
             image=self.server_image,
             name=name,
             hostname=name,
+            # Ignored for a pre-populated (restored) datadir, but lets the image's
+            # entrypoint initialize successfully if the volume is empty/partial — otherwise
+            # init fails, mysqld never starts, and _wait_ready hangs until it times out.
+            environment={"MYSQL_ROOT_PASSWORD": self.root_password},
             volumes=[f"{data_volume}:/var/lib/mysql"],
             command=self._mysqld_args(server_id=server_id, hostname=name)
             + ["--group-replication-start-on-boot=OFF"],

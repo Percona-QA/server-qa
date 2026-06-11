@@ -1,12 +1,20 @@
+import os
 import re
+import sys
 from types import SimpleNamespace
 
 import pytest
 
-from docker_helper import DockerHelper
-from group_replication_helper import GroupReplication
-from sysbench_helper import Sysbench
-from xtrabackup_helper import XtraBackup
+# The helper modules below are imported as top-level modules. This directory can't be a
+# package (the 'group-replication' hyphen is not a valid identifier), so add it to
+# sys.path explicitly — otherwise importing them fails when pytest is invoked from a
+# different working directory (e.g. the repo root in CI).
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from docker_helper import DockerHelper  # noqa: E402
+from group_replication_helper import GroupReplication  # noqa: E402
+from sysbench_helper import Sysbench  # noqa: E402
+from xtrabackup_helper import XtraBackup  # noqa: E402
 
 
 # Proxy modes the suite can run a test behind. There is intentionally no "direct"

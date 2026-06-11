@@ -636,16 +636,12 @@ class GroupReplication:
                 bootstrap_node, self._add_instance_script(node), password=self.root_password
             )
 
-        status = self.docker.exec_mysqlsh(
-            bootstrap_node,
-            f"var c = dba.getCluster({self._js_str(self.cluster_name)}); "
-            "print(JSON.stringify(c.status()));",
-            password=self.root_password,
-        )
-        if '"status": "ONLINE"' not in status.stdout and '"status":"ONLINE"' not in status.stdout:
-            raise RuntimeError(
-                f"Cluster did not reach ONLINE state. mysqlsh output:\n{status.stdout}\n{status.stderr}"
-            )
+        # Wait on the actual GR member states rather than string-matching c.status()
+        # output: that JSON has a per-instance "status": "ONLINE" for every member, so a
+        # substring check passes as soon as the bootstrap node is ONLINE — before clone
+        # recovery of the freshly added members has finished. wait_all_online() instead
+        # polls replication_group_members until all num_nodes members report ONLINE.
+        self.wait_all_online()
         self.log("cluster is ONLINE")
 
         self.log("persist GR settings (start_on_boot, group_seeds) on each node")

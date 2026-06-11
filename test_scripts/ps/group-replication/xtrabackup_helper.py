@@ -102,13 +102,17 @@ class XtraBackup:
         )
 
     def copy_back(self, target_volume: str):
-        """Restore the prepared backup into an empty target volume and fix ownership.
+        """Restore the prepared backup into the target volume and fix ownership.
 
-        chown to mysql:mysql works because the XtraBackup and Percona Server images
-        share the same mysql user, so the restored datadir is readable by the server.
+        The named target volume may survive a crashed run (teardown didn't remove it), and
+        --copy-back requires an empty datadir, so the mount's contents are cleared first
+        (including dotfiles, while keeping the mountpoint) to keep restores idempotent.
+        chown to mysql:mysql works because the XtraBackup and Percona Server images share
+        the same mysql user, so the restored datadir is readable by the server.
         """
         self.log(f"xtrabackup copy-back {self.full_dir} -> {target_volume}")
         command = (
+            "find /var/lib/mysql -mindepth 1 -maxdepth 1 -exec rm -rf {} + && "
             f"xtrabackup --copy-back --target-dir={self.full_dir} --datadir=/var/lib/mysql && "
             "chown -R mysql:mysql /var/lib/mysql"
         )

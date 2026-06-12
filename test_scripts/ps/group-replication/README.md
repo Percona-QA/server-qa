@@ -190,12 +190,12 @@ Image `percona/haproxy:2`. Two frontends:
 - `3307` — read/write, `balance first` → the current **primary**,
 - `3308` — read-only, `balance roundrobin` across live members.
 
-HAProxy is not SQL-aware and can't tell which member is the primary. Both backends
-use the built-in `mysql-check` only for **liveness**; the framework then pins the
-write backend to the current primary via HAProxy's **runtime API** over the stats
-socket (`set server be_write/<node> state ready|maint`) — the same external-management
-model the Percona operator uses. On failover, `wait_proxy_ready()` re-pins the write
-backend to the newly elected primary.
+HAProxy is not SQL-aware and can't tell which member is the primary. Health checks are
+just a plain TCP-connect **liveness** probe (enabled cluster-wide via `default-server
+check`); the framework then pins the write backend to the current primary via HAProxy's
+**runtime API** over the stats socket (`set server be_write/<node> state ready|maint`) —
+the same external-management model the Percona operator uses. On failover,
+`wait_proxy_ready()` re-pins the write backend to the newly elected primary.
 
 Host ports `33152` → `3307`, `33153` → `3308`. The config is injected via an
 environment variable (no host bind mounts), and the container runs as the image's

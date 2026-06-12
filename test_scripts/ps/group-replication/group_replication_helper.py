@@ -422,11 +422,11 @@ class GroupReplication:
     def _haproxy_config(self) -> str:
         """Build the haproxy.cfg: write frontend (:3307) to the primary, read frontend (:3308) round-robin.
 
-        HAProxy is not SQL-aware and cannot tell which member is the primary, so both backends use the
-        built-in mysql-check only for liveness (no forking external-check, which is pathologically slow
-        under the amd64-on-arm64 emulation this operator image runs in). The write backend lists every
-        node but the framework keeps only the current primary in the ready state via the runtime API
-        (see _haproxy_set_write_primary) — the same external-management model the Percona operator uses.
+        HAProxy is not SQL-aware and cannot tell which member is the primary, so health checks are
+        only a plain TCP-connect liveness probe (enabled cluster-wide via `default-server check`).
+        The write backend lists every node but the framework keeps only the current primary in the
+        ready state via the runtime API (see _haproxy_set_write_primary) — the same external-management
+        model the Percona operator uses.
         """
         servers = "\n".join(f"  server {n} {n}:3306" for n in self.containers)
         return (
@@ -447,12 +447,10 @@ class GroupReplication:
             "\n"
             "backend be_write\n"
             "  balance first\n"
-            "  option mysql-check\n"
             f"{servers}\n"
             "\n"
             "backend be_read\n"
             "  balance roundrobin\n"
-            "  option mysql-check\n"
             f"{servers}\n"
             "\n"
             "frontend fe_write\n"

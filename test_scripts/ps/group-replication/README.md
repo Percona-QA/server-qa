@@ -452,7 +452,7 @@ fixture and use:
   instead of targeting a node directly, so the test is proxy-agnostic.
 - `gr_cluster.rw_endpoint()` / `gr_cluster.ro_endpoint()` — `(host, port)` for
   read/write or read-only client traffic (e.g. to point sysbench at).
-- `gr_cluster.get_bootstrap_node()` — name of the bootstrap node (`"ps0-1"`); for the
+- `gr_cluster.get_bootstrap_node()` — name of the bootstrap node (e.g. `"ps0-1"` when running serially, or `"psgw0-1"` under pytest-xdist); for the
   currently-elected primary (which differs after failover) use `gr_cluster.get_primary()`.
 - `gr_cluster.containers` — list of all node names in start order.
 - `gr_cluster.docker` — the `DockerHelper`. Common methods:

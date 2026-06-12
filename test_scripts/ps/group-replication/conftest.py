@@ -41,7 +41,12 @@ def _worker_id(request) -> str:
 @pytest.fixture(scope="module")
 def gr_cluster(request):
     # request.param is supplied by each test's @pytest.mark.parametrize(..., indirect=True).
-    helper = DockerHelper()
+    try:
+        helper = DockerHelper()
+    except RuntimeError as exc:
+        # No docker/podman on PATH: skip rather than error the whole run (e.g. when the
+        # suite is collected in an environment without a container runtime).
+        pytest.skip(f"no container runtime available: {exc}")
     workerid = _worker_id(request)
     # Use the full worker id (sanitized to [a-zA-Z0-9]) for the globally-unique resource
     # names: deriving node_prefix from offset alone collapses "0" (serial) and "gw0"

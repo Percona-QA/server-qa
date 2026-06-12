@@ -19,8 +19,17 @@ class ExecResult:
 class DockerHelper:
     def __init__(self, cli: str | None = None):
         if cli is None:
-            cli = os.environ.get("CONTAINER_CLI")
-        if cli is None:
+            # Treat an empty CONTAINER_CLI as unset so it falls back to auto-detection.
+            cli = os.environ.get("CONTAINER_CLI") or None
+        if cli is not None:
+            # An explicitly chosen CLI (argument or CONTAINER_CLI) must actually exist on
+            # PATH, otherwise every command later fails with an opaque FileNotFoundError.
+            if not shutil.which(cli):
+                raise RuntimeError(
+                    f"Container CLI {cli!r} (from the cli argument or CONTAINER_CLI) was "
+                    "not found on PATH. Install it or set CONTAINER_CLI correctly."
+                )
+        else:
             for candidate in ("docker", "podman"):
                 if shutil.which(candidate):
                     cli = candidate

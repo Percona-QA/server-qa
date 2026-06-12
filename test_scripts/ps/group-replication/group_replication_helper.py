@@ -618,10 +618,13 @@ class GroupReplication:
         isolation. Returns the container name; it is not tracked in self.containers.
         """
         self.log(f"start standalone node {name} (restored data, GR off)")
+        # No --hostname: the caller's container name (derived from the test id) may contain
+        # underscores or exceed the 63-char hostname limit, which would make container
+        # creation fail. The node isn't on the cluster network and nothing addresses it by
+        # hostname (it's reached by container name), so the default hostname is fine.
         self.docker.create(
             image=self.server_image,
             name=name,
-            hostname=name,
             # Ignored for a pre-populated (restored) datadir, but lets the image's
             # entrypoint initialize successfully if the volume is empty/partial — otherwise
             # init fails, mysqld never starts, and _wait_ready hangs until it times out.

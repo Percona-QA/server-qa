@@ -63,7 +63,7 @@ class DockerHelper:
         except subprocess.TimeoutExpired as exc:
             result = ExecResult(
                 stdout=exc.stdout or "",
-                stderr=f"timed out after {timeout}s",
+                stderr=(exc.stderr or "").strip() or f"timed out after {timeout}s",
                 returncode=124,
             )
         else:

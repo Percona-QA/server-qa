@@ -22,8 +22,10 @@ def test_full_and_incremental_backup_restore(gr_cluster, sysbench, xtrabackup):
     gr_cluster.verify_checksums("sbtest", timeout=120)
 
     # Back up a secondary (never the primary); XtraBackup reads its data volume directly.
+    # The data volume follows the "<container>-data" convention, so derive it from the node
+    # name rather than reaching into GroupReplication internals.
     secondary = gr_cluster.secondaries()[0]
-    src_vol = gr_cluster._volume_name(gr_cluster.node_index[secondary])
+    src_vol = f"{secondary}-data"
 
     # Full backup of the current data (set A).
     xtrabackup.helper.full_backup(secondary, src_vol)

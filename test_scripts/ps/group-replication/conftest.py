@@ -40,7 +40,20 @@ def _worker_id(request) -> str:
 
 @pytest.fixture(scope="module")
 def gr_cluster(request):
-    # request.param is supplied by each test's @pytest.mark.parametrize(..., indirect=True).
+    # request.param is the proxy, supplied by each test's
+    # @pytest.mark.parametrize("gr_cluster", [...], indirect=True). Validate it explicitly
+    # so a test that forgets the decorator fails with a clear message instead of an opaque
+    # AttributeError (no param) / KeyError (unknown proxy).
+    proxy = getattr(request, "param", None)
+    if proxy is None:
+        raise pytest.UsageError(
+            'gr_cluster requires a proxy via indirect parametrization, e.g. '
+            '@pytest.mark.parametrize("gr_cluster", ["haproxy"], indirect=True)'
+        )
+    if proxy not in PROXIES:
+        raise pytest.UsageError(
+            f"unknown gr_cluster proxy {proxy!r}; valid options: {sorted(PROXIES)}"
+        )
     try:
         helper = DockerHelper()
     except RuntimeError as exc:
@@ -62,7 +75,7 @@ def gr_cluster(request):
         network=f"grnet-{safe_workerid}",
         node_prefix=f"ps{safe_workerid}-",
         base_host_port=33060 + offset * 100,
-        **PROXIES[request.param],
+        **PROXIES[proxy],
     )
     try:
         # create() is inside the try so a partially-built cluster (e.g. a failed

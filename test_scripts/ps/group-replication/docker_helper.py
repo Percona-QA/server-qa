@@ -82,6 +82,11 @@ class DockerHelper:
         platform: str | None = None,
     ) -> ExecResult:
         """Create and start a long-lived (detached) container with the given config."""
+        # These containers are long-lived (no --rm), so a run that crashed before teardown
+        # leaves one with this name behind, making `run --name` fail with a conflict.
+        # Remove any leftover first so reruns are idempotent (named data volumes survive
+        # `rm -f -v`, so this only drops the stale container, not its data).
+        self.destroy(name)
         args = ["run"]
         if detach:
             args.append("-d")

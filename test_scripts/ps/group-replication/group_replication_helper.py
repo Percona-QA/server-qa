@@ -53,6 +53,9 @@ class GroupReplication:
         self.num_nodes = num_nodes
         self.network = network
         self.server_image = server_image or os.environ.get("SERVER_IMAGE") or "percona/percona-server:8.4"
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
+        if not node_prefix or not node_prefix[0].isalnum() or any(c not in allowed for c in node_prefix):
+            raise ValueError("node_prefix must start with an alphanumeric and contain only [A-Za-z0-9_.-]")
         self.node_prefix = node_prefix
         self.root_password = root_password
         self.base_host_port = base_host_port

@@ -537,8 +537,8 @@ class GroupReplication:
     def wait_proxy_ready(self, timeout: int = 120) -> None:
         """Wait until the proxy accepts connections and routes the read/write endpoint to the current primary.
 
-        The default is generous because HAProxy's external health checks can take tens of seconds to
-        first stabilize when the operator image runs under CPU emulation.
+        The default is generous because HAProxy health checks can take tens of seconds to first stabilize when
+        the operator image runs under CPU emulation.
         """
         if not self.proxy:
             return

@@ -42,8 +42,8 @@ cd test_scripts/ps/group-replication
 pytest -v test_basic.py
 ```
 
-The fixture brings up 3 containers (by default `ps0-1`, `ps0-2`, `ps0-3`) on a per-worker
-`grnet-<workerid>` network (e.g. `grnet-0` when running serially, or `grnet-gw0` under pytest-xdist), bootstraps the cluster via mysqlsh, runs the tests,
+The fixture brings up 3 containers (by default `ps<workerid>-1`, `ps<workerid>-2`, `ps<workerid>-3`) on a per-worker
+`grnet-<workerid>` network (e.g. `grnet-0` / `ps0-1..3` when running serially, or `grnet-gw0` / `psgw0-1..3` under pytest-xdist), bootstraps the cluster via mysqlsh, runs the tests,
 then removes containers, volumes, and the network. Expect ~1 minute end-to-end.
 
 ## Failover test (sysbench)

@@ -21,15 +21,21 @@ def test_primary_failover_and_recovery(gr_cluster, sysbench):
     # Stop the primary and confirm a secondary is promoted.
     old_primary = gr_cluster.get_primary()
     gr_cluster.stop_node(old_primary)
+
+    # The remaining two members keep majority; confirm the group settles to exactly
+    # 2 ONLINE members (the stopped node dropping out) before a new primary is elected.
+    states = gr_cluster.wait_online_count(2)
+    online_hosts = [host for host, (state, _) in states.items() if state == "ONLINE"]
+    assert old_primary not in online_hosts, f"stopped node {old_primary} still ONLINE: {states}"
+
     new_primary = gr_cluster.get_primary()
     assert new_primary != old_primary, f"primary did not change after stopping {old_primary}"
     assert new_primary in gr_cluster.active_nodes
 
-    # With the third node stopped on purpose, exactly 2 members must remain:
-    # both ONLINE, one PRIMARY (the newly elected one) and one SECONDARY.
+    # The two surviving members must be exactly one PRIMARY (the newly elected one)
+    # and one SECONDARY.
     members = gr_cluster.member_states(new_primary)
     online = {host: role for host, (state, role) in members.items() if state == "ONLINE"}
-    assert len(online) == 2, f"expected 2 ONLINE members after failover, got {members}"
     assert sorted(online.values()) == ["PRIMARY", "SECONDARY"], (
         f"expected one PRIMARY and one SECONDARY, got {members}"
     )

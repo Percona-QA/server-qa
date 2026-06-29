@@ -242,6 +242,26 @@ class GroupReplication:
             time.sleep(2)
         raise RuntimeError(f"Not all members ONLINE within {timeout}s (last: {last})")
 
+    def wait_online_count(self, expected: int, timeout: int = 120) -> dict[str, tuple[str, str]]:
+        """Wait until exactly `expected` group members report ONLINE, returning their state map.
+
+        Used after intentionally stopping a node: failure detection and expulsion take a
+        few seconds, so the group needs a moment to settle to the smaller size before its
+        membership is inspected. Polls a surviving node; raises on timeout.
+        """
+        if not self.active_nodes:
+            raise RuntimeError("No active nodes")
+        self.log(f"wait for exactly {expected} members ONLINE")
+        deadline = time.time() + timeout
+        last: dict[str, tuple[str, str]] = {}
+        while time.time() < deadline:
+            states = self.member_states(self.active_nodes[0])
+            last = states
+            if sum(1 for state, _ in states.values() if state == "ONLINE") == expected:
+                return states
+            time.sleep(2)
+        raise RuntimeError(f"Expected {expected} ONLINE members within {timeout}s (last: {last})")
+
     def rejoin_node(self, name: str, timeout: int = 180) -> None:
         """Restart a stopped node and wait for it to auto-rejoin and all members to be ONLINE."""
         self.log(f"start node {name} (auto-rejoin)")

@@ -209,22 +209,22 @@ class GroupReplication:
         if name in self.active_nodes:
             self.active_nodes.remove(name)
 
-    def _member_states(self, node: str) -> dict[str, str]:
-        """Read the host->state map of all group members as seen from the given node."""
+    def member_states(self, node: str) -> dict[str, tuple[str, str]]:
+        """Read the host->(state, role) map of all group members as seen from the given node."""
         result = self.docker.exec_mysql(
             node,
-            "SELECT MEMBER_HOST, MEMBER_STATE "
+            "SELECT MEMBER_HOST, MEMBER_STATE, MEMBER_ROLE "
             "FROM performance_schema.replication_group_members;",
             password=self.root_password,
             check=False,
             timeout=15,
         )
-        states: dict[str, str] = {}
+        states: dict[str, tuple[str, str]] = {}
         if result.ok:
             for line in result.stdout.strip().splitlines():
                 parts = line.split("\t")
-                if len(parts) >= 2:
-                    states[parts[0]] = parts[1]
+                if len(parts) >= 3:
+                    states[parts[0]] = (parts[1], parts[2])
         return states
 
     def wait_all_online(self, timeout: int = 180) -> None:
@@ -233,11 +233,11 @@ class GroupReplication:
             raise RuntimeError("No active nodes")
         self.log("wait for all members ONLINE")
         deadline = time.time() + timeout
-        last: dict[str, str] = {}
+        last: dict[str, tuple[str, str]] = {}
         while time.time() < deadline:
-            states = self._member_states(self.active_nodes[0])
+            states = self.member_states(self.active_nodes[0])
             last = states
-            if len(states) == self.num_nodes and all(s == "ONLINE" for s in states.values()):
+            if len(states) == self.num_nodes and all(s == "ONLINE" for s, _ in states.values()):
                 return
             time.sleep(2)
         raise RuntimeError(f"Not all members ONLINE within {timeout}s (last: {last})")

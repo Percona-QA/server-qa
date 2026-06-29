@@ -25,6 +25,16 @@ def test_primary_failover_and_recovery(gr_cluster, sysbench):
     assert new_primary != old_primary, f"primary did not change after stopping {old_primary}"
     assert new_primary in gr_cluster.active_nodes
 
+    # With the third node stopped on purpose, exactly 2 members must remain:
+    # both ONLINE, one PRIMARY (the newly elected one) and one SECONDARY.
+    members = gr_cluster.member_states(new_primary)
+    online = {host: role for host, (state, role) in members.items() if state == "ONLINE"}
+    assert len(online) == 2, f"expected 2 ONLINE members after failover, got {members}"
+    assert sorted(online.values()) == ["PRIMARY", "SECONDARY"], (
+        f"expected one PRIMARY and one SECONDARY, got {members}"
+    )
+    assert online.get(new_primary) == "PRIMARY"
+
     # The read/write endpoint must follow the failover before we load again
     # (the proxy needs a moment to repoint at the new primary).
     if gr_cluster.proxy:

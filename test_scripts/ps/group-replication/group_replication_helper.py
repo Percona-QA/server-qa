@@ -637,6 +637,21 @@ class GroupReplication:
         self._wait_ready(name)
         return name
 
+    def mysqlsh_available(self) -> bool:
+        """Return True if the MySQL Shell (mysqlsh) binary ships in the server image.
+
+        Cluster bootstrap and instance-add go through mysqlsh's AdminAPI (see create()),
+        so a server build without it cannot run this suite. Probed with a throwaway
+        --rm container running `mysqlsh --version` (no node startup, no connection).
+        """
+        result = self.docker.run(
+            image=self.server_image,
+            entrypoint="mysqlsh",
+            command=["--version"],
+            check=False,
+        )
+        return result.ok
+
     def create(self) -> None:
         """Create the network and nodes, bootstrap the cluster, add instances, and persist GR settings."""
         self.log(f"create network {self.network}")

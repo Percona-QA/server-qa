@@ -77,6 +77,11 @@ def gr_cluster(request):
         base_host_port=33060 + offset * 100,
         **PROXIES[proxy],
     )
+    # The cluster is bootstrapped via mysqlsh's AdminAPI; skip rather than fail the whole
+    # suite when the server image ships without MySQL Shell. Checked before create() so no
+    # nodes are started when it's missing.
+    if not cluster.mysqlsh_available():
+        pytest.skip(f"mysqlsh not available in server image {cluster.server_image!r}")
     try:
         # create() is inside the try so a partially-built cluster (e.g. a failed
         # proxy bring-up) is still torn down instead of leaking containers.

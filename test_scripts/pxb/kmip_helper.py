@@ -38,7 +38,7 @@ class KMIPHelper:
     DEFAULT_KMIP_CONFIGS = {
         "pykmip": "addr=127.0.0.1,image=satyapercona/kmip:latest,port=5696,name=kmip_pykmip",
         # "fortanix": "addr=216.180.120.88,port=5696,name=kmip_fortanix,setup_script=fortanix_kmip_setup.py",
-        # "hashicorp": "addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp-kmip-setup.sh",
+        # "hashicorp": "addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp_kmip_setup.py",
         # "ciphertrust": "addr=127.0.0.1,port=5696,name=kmip_ciphertrust,setup_script=setup_kmip_api.py",
     }
 
@@ -397,7 +397,7 @@ class KMIPHelper:
         try:
             import urllib.request
 
-            url = f"https://raw.githubusercontent.com/Percona-QA/percona-qa/refs/heads/master/{setup_script}"
+            url = f"https://raw.githubusercontent.com/Percona-QA/server-qa/refs/heads/main/{setup_script}"
             with urllib.request.urlopen(url) as response:
                 script_content = response.read().decode("utf-8")
 
@@ -511,7 +511,7 @@ class KMIPHelper:
             print(f"Local script not found: {script_path}, downloading from GitHub...")
             try:
                 import urllib.request
-                url = f"https://raw.githubusercontent.com/Percona-QA/percona-qa/refs/heads/master/{setup_script}"
+                url = f"https://raw.githubusercontent.com/Percona-QA/server-qa/refs/heads/main/{setup_script}"
                 with urllib.request.urlopen(url) as response:
                     script_content = response.read().decode("utf-8")
                 if not script_content:

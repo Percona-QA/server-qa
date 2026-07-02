@@ -5,7 +5,6 @@ BackupTestHelper can be imported and used from inc_backup_load_tests.py and othe
 """
 
 import os
-import sys
 import subprocess
 import time
 import shutil

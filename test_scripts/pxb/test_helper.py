@@ -2676,7 +2676,7 @@ class BackupTestHelper:
         if page_tracking:
             self.backup_params += " --page-tracking"
         self.prepare_params = f"{self.backup_params} --component-keyring-config={config_file}"
-        self.restore_params = self.backup_params
+        self.restore_params = f"{self.backup_params} --component-keyring-config={config_file}"
 
         if self.server_type == "MS":
             self.mysqld_options = "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
@@ -2741,7 +2741,7 @@ class BackupTestHelper:
 
         self.backup_params = f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT}"
         self.prepare_params = f"{self.backup_params} --component-keyring-config={kmip_cnf_dst}"
-        self.restore_params = self.backup_params
+        self.restore_params = f"{self.backup_params} --component-keyring-config={kmip_cnf_dst}"
 
         self.mysqld_options = "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
         tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --undo-tbs-sql 0"
@@ -2787,7 +2787,7 @@ class BackupTestHelper:
             if page_tracking:
                 self.backup_params += " --page-tracking"
             self.prepare_params = f"{self.backup_params} --component-keyring-config={config_file}"
-            self.restore_params = self.backup_params
+            self.restore_params = f"{self.backup_params} --component-keyring-config={config_file}"
 
             self.mysqld_options = (
                 "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON "
@@ -2965,7 +2965,9 @@ class BackupTestHelper:
                 self.prepare_params = (
                     f"{self.backup_params} --component-keyring-config={keyring_config_file}"
                 )
-                self.restore_params = self.backup_params
+                self.restore_params = (
+                    f"{self.backup_params} --component-keyring-config={keyring_config_file}"
+                )
                 if self.server_type == "MS":
                     self.mysqld_options = (
                         "--innodb-undo-log-encrypt --innodb-redo-log-encrypt "
@@ -3025,7 +3027,9 @@ class BackupTestHelper:
                 self.prepare_params = (
                     f"{self.backup_params} --component-keyring-config={keyring_config_file}"
                 )
-                self.restore_params = self.backup_params
+                self.restore_params = (
+                    f"{self.backup_params} --component-keyring-config={keyring_config_file}"
+                )
                 self.mysqld_options = (
                     "--innodb-undo-log-encrypt --innodb-redo-log-encrypt "
                     "--default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON "

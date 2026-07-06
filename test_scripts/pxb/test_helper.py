@@ -543,7 +543,13 @@ class BackupTestHelper:
 
     @staticmethod
     def normalize_xtrabackup_version(version_str: str) -> int:
-        """Normalize PXB version for comparison (e.g. ``8.4.0-6`` -> ``8040006``)."""
+        """Normalize PXB version for comparison (e.g. ``8.4.0-6`` -> ``8040006``).
+
+        Separate from ``normalize_version`` even though both PS (e.g. ``8.4.10-10``)
+        and PXB (e.g. ``8.4.0-6``) use a suffix after ``-``: for PS we compare
+        server semver only, while for PXB some fixes are gated on the release
+        number after the dash, so it must be included in the normalized value.
+        """
         match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:-(\d+))?$", version_str)
         if not match:
             return 0

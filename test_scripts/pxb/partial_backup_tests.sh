@@ -16,6 +16,8 @@ export mysqldir="$HOME/mysql-8.4/bld_8.4/install"
 export datadir="${mysqldir}/data"
 export backup_dir="$HOME/dbbackup_$(date +"%d_%m_%Y")"
 export PATH="$PATH:$xtrabackup_dir"
+source "$(dirname "${BASH_SOURCE[0]}")/pxb_helper.sh"
+init_pxb_version
 export qascripts="$HOME/percona-qa"
 export logdir="$HOME/backuplogs"
 export mysql_random_data_load_tool="$HOME/mysql_random_data_load"
@@ -159,7 +161,8 @@ take_partial_backup() {
     sleep 1
 
     echo "Preparing backup with --export option"
-    "${xtrabackup_dir}"/xtrabackup --prepare --export --target_dir="${backup_dir}"/full ${PREPARE_PARAMS} 2>"${logdir}"/prepare_full_backup_"${log_date}"_log
+    PREPARE_PARAMS=$(prepare_args_for_pxb_version "$PREPARE_PARAMS")
+    rr "${xtrabackup_dir}"/xtrabackup --prepare --export --target_dir="${backup_dir}"/full ${PREPARE_PARAMS} 2>"${logdir}"/prepare_full_backup_"${log_date}"_log
     if [ "$?" -ne 0 ]; then
         echo "ERR: Prepare of full backup failed. Please check the log at: ${logdir}/prepare_full_backup_${log_date}_log"
         exit 1

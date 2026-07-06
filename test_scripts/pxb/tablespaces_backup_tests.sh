@@ -16,6 +16,8 @@ export mysqldir="$HOME/mysql-8.0/bld_8.0.37/install"
 export datadir="${mysqldir}/data"
 export backup_dir="$HOME/dbbackup_$(date +"%d_%m_%Y")"
 export PATH="$PATH:$xtrabackup_dir"
+source "$(dirname "${BASH_SOURCE[0]}")/pxb_helper.sh"
+init_pxb_version
 export qascripts="$HOME/percona-qa"
 export logdir="$HOME/backuplogs"
 
@@ -96,6 +98,8 @@ take_backup() {
     local RESTORE_PARAMS="$3"
     local MYSQLD_OPTIONS="$4"
     local BACKUP_TYPE="$5"
+
+    PREPARE_PARAMS=$(prepare_args_for_pxb_version "$PREPARE_PARAMS")
 
     log_date=$(date +"%d_%m_%Y_%M")
 

@@ -23,6 +23,7 @@ export qascripts="$HOME/server-qa"
 export logdir="$HOME/backuplogs"
 export cloud_config="$HOME/aws.cnf"  # Only required for cloud backup tests
 export PATH="$PATH:$xtrabackup_dir"
+source "$(dirname "${BASH_SOURCE[0]}")/../pxb_helper.sh"
 rocksdb="disabled" # Set this to disabled for PXB2.4 and MySQL versions
 server_type="PS" # Default server PS
 install_type="tarball" # Set value to tarball/package
@@ -100,9 +101,8 @@ normalize_version(){
   printf %02d%02d%02d $major $minor $patch
 }
 VER=$($mysqldir/bin/mysqld --version | awk -F 'Ver ' '{print $2}' | grep -oe '[0-9]\.[0-9][\.0-9]*' | head -n1)
-PXB_VER=$($xtrabackup_dir/xtrabackup --no-defaults --version 2>&1 |  awk -F 'version' '{print $2}' | grep -oe '[0-9]\.[0-9][\.0-9]*' | head -n1)
+init_pxb_version
 VERSION=$(normalize_version $VER)
-PXB_VERSION=$(normalize_version $PXB_VER)
 
 #set -o pipefail
 start_server() {
@@ -242,6 +242,8 @@ incremental_backup() {
     local MYSQLD_OPTIONS="$4"
     local BACKUP_TYPE="$5"
     local CLOUD_PARAMS="$6"
+
+    PREPARE_PARAMS=$(prepare_args_for_pxb_version "$PREPARE_PARAMS")
 
     log_date=$(date +"%d_%m_%Y_%M")
     if [ -d ${backup_dir} ]; then

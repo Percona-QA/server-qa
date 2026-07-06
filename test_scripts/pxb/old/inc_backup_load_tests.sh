@@ -25,7 +25,7 @@ export logdir="$HOME/backuplogs"
 export mysql_start_timeout=60
 declare -gA KMIP_CONFIGS=(
     # Hashicorp Docker Setup Configuration
-    ["hashicorp"]="addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp-kmip-setup.sh"
+    ["hashicorp"]="addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp-kmip-setup.py"
 
     # Fortanix Setup Configuration
     ["fortanix"]="addr=216.180.120.88,port=5696,name=kmip_fortanix,setup_script=fortanix_kmip_setup.py"

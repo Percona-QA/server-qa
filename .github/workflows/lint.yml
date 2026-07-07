@@ -43,6 +43,11 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Changed Python files:"
             printf '  %s\n' "${CHANGED[@]}"
+            {
+              echo "files<<EOF"
+              printf '%s\n' "${CHANGED[@]}"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - uses: reviewdog/action-setup@v1
@@ -58,12 +63,17 @@ jobs:
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          { ruff check --output-format=rdjson . || true; } \
+          mapfile -t FILES <<EOF
+          ${{ steps.py-changes.outputs.files }}
+          EOF
+
+          { ruff check --output-format=rdjson "${FILES[@]}" || true; } \
             | reviewdog \
                 -f=rdjson \
+                -name=ruff \
                 -reporter=github-check \
                 -filter-mode=added \
-                -fail-on-error=true \
+                -fail-level=error \
                 -level=error
 
       - name: Run ruff on all Python files

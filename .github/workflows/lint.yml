@@ -43,11 +43,6 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "Changed Python files:"
             printf '  %s\n' "${CHANGED[@]}"
-            {
-              echo "files<<EOF"
-              printf '%s\n' "${CHANGED[@]}"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
           fi
 
       - uses: reviewdog/action-setup@v1
@@ -63,17 +58,42 @@ jobs:
           REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mapfile -t FILES <<EOF
-          ${{ steps.py-changes.outputs.files }}
-          EOF
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
 
-          { ruff check --output-format=rdjson "${FILES[@]}" || true; } \
-            | reviewdog \
-                -f=rdjson \
-                -reporter=github-pr-annotations \
-                -filter-mode=added \
-                -fail-level=error \
-                -level=error
+          mapfile -t FILES < <(
+            git diff --diff-filter=ACMRTUXB --name-only "${BASE_SHA}...${HEAD_SHA}" -- '*.py'
+          )
+
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "No changed Python files."
+            exit 0
+          fi
+
+          echo "Linting changed Python files:"
+          printf '  %s\n' "${FILES[@]}"
+
+          RDJSON="$(mktemp)"
+          ruff check --output-format=rdjson "${FILES[@]}" > "$RDJSON" || true
+
+          # Post PR annotations on this job (uses workflow commands, not a separate Check).
+          # Token is required for reviewdog to build the PR diff for -filter-mode=added.
+          # Non-fatal: the local reporter below is the pass/fail gate.
+          reviewdog \
+            -f=rdjson \
+            -reporter=github-pr-annotations \
+            -filter-mode=added \
+            -level=error \
+            < "$RDJSON" || true
+
+          # Fail the Python lint job when added-line errors exist.
+          reviewdog \
+            -f=rdjson \
+            -reporter=local \
+            -filter-mode=added \
+            -fail-level=error \
+            -level=error \
+            < "$RDJSON"
 
       - name: Run ruff on all Python files
         if: github.event_name != 'pull_request'

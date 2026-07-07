@@ -21,6 +21,8 @@ export datadir="${mysqldir}/data"
 export qascripts="$HOME/percona-qa"
 export logdir="$HOME/backuplogs"
 export PATH="$PATH:$xtrabackup_dir"
+source "$(dirname "${BASH_SOURCE[0]}")/../pxb_helper.sh"
+init_pxb_version
 rocksdb="enabled" # Set this to disabled for PXB2.4 and MySQL versions
 
 
@@ -129,6 +131,8 @@ prepare_restore_backup() {
     local RESTORE_PARAMS="$2"
     local MYSQLD_OPTIONS="$3"
     local BACKUP_TYPE="$4"
+
+    PREPARE_PARAMS=$(prepare_args_for_pxb_version "$PREPARE_PARAMS")
 
     if [[ "${BACKUP_TYPE}" = "incremental" ]]; then
         echo "Preparing full backup"

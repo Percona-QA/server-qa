@@ -23,6 +23,7 @@ export qascripts="$HOME/server-qa"
 export logdir="$HOME/backuplogs"
 export cloud_config="$HOME/aws.cnf"  # Only required for cloud backup tests
 export PATH="$PATH:$xtrabackup_dir"
+source "$(dirname "${BASH_SOURCE[0]}")/../pxb_helper.sh"
 rocksdb="disabled" # Set this to disabled for PXB2.4 and MySQL versions
 server_type="PS" # Default server PS
 install_type="tarball" # Set value to tarball/package
@@ -100,9 +101,8 @@ normalize_version(){
   printf %02d%02d%02d $major $minor $patch
 }
 VER=$($mysqldir/bin/mysqld --version | awk -F 'Ver ' '{print $2}' | grep -oe '[0-9]\.[0-9][\.0-9]*' | head -n1)
-PXB_VER=$($xtrabackup_dir/xtrabackup --no-defaults --version 2>&1 |  awk -F 'version' '{print $2}' | grep -oe '[0-9]\.[0-9][\.0-9]*' | head -n1)
+init_pxb_version
 VERSION=$(normalize_version $VER)
-PXB_VERSION=$(normalize_version $PXB_VER)
 
 #set -o pipefail
 start_server() {
@@ -190,7 +190,7 @@ process_backup() {
     local EXT_DIR="$3"
 
     if [[ "${BK_TYPE}" = "stream" ]]; then
-        if [ -z "${backup_dir}/${backup_stream}" ]; then
+        if [ ! -f "${backup_dir}/${backup_stream}" ]; then
             echo "ERR: The backup stream file was not created in ${backup_dir}/${backup_stream}. Please check the backup logs in ${logdir} for errors."
             exit 1
         else
@@ -243,6 +243,8 @@ incremental_backup() {
     local BACKUP_TYPE="$5"
     local CLOUD_PARAMS="$6"
 
+    PREPARE_PARAMS=$(prepare_args_for_pxb_version "$PREPARE_PARAMS")
+
     log_date=$(date +"%d_%m_%Y_%M")
     if [ -d ${backup_dir} ]; then
         rm -r ${backup_dir}
@@ -288,7 +290,7 @@ incremental_backup() {
     fi
 
     if [ "${BACKUP_TYPE}" = "tar" ]; then
-        if [ -z "${backup_dir}/${backup_tar}" ]; then
+        if [ ! -f "${backup_dir}/${backup_tar}" ]; then
             echo "ERR: The backup tar file was not created in ${backup_dir}/${backup_tar}. Please check the backup logs in ${logdir} for errors."
             exit 1
         else

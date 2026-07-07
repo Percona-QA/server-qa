@@ -16,6 +16,8 @@ export mysqldir="$HOME/mysql-8.0/bld_8.0.37/install"
 export datadir="${mysqldir}/data"
 export backup_dir="$HOME/dbbackup_$(date +"%d_%m_%Y")"
 export PATH="$PATH:$xtrabackup_dir"
+source "$(dirname "${BASH_SOURCE[0]}")/pxb_helper.sh"
+init_pxb_version
 export qascripts="$HOME/percona-qa"
 export logdir="$HOME/backuplogs"
 
@@ -96,6 +98,8 @@ take_backup() {
     local RESTORE_PARAMS="$3"
     local MYSQLD_OPTIONS="$4"
     local BACKUP_TYPE="$5"
+
+    PREPARE_PARAMS=$(prepare_args_for_pxb_version "$PREPARE_PARAMS")
 
     log_date=$(date +"%d_%m_%Y_%M")
 
@@ -360,9 +364,9 @@ test_tablespaces_encrypt() {
         mkdir "${dir}"
     done
 
-    if [ "$server_type"="MS" ]; then
+    if [ "$server_type" = "MS" ]; then
         server_options="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --table-encryption-privilege-check=ON"
-    elif [ "$server_type"="PS" ]; then
+    elif [ "$server_type" = "PS" ]; then
         server_options="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --innodb_sys_tablespace_encrypt --table-encryption-privilege-check=ON"
     fi
 

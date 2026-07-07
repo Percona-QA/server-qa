@@ -541,6 +541,24 @@ class BackupTestHelper:
         # Format: %02d%02d%02d means 2 digits each, so max is 99.99.99
         return int(f"{major:02d}{minor:02d}{patch:02d}")
 
+    @staticmethod
+    def normalize_xtrabackup_version(version_str: str) -> int:
+        """Normalize PXB version for comparison (e.g. ``8.4.0-6`` -> ``8040006``).
+
+        Separate from ``normalize_version`` even though both PS (e.g. ``8.4.10-10``)
+        and PXB (e.g. ``8.4.0-6``) use a suffix after ``-``: for PS we compare
+        server semver only, while for PXB some fixes are gated on the release
+        number after the dash, so it must be included in the normalized value.
+        """
+        match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:-(\d+))?$", version_str)
+        if not match:
+            return 0
+        major = int(match.group(1))
+        minor = int(match.group(2))
+        patch = int(match.group(3))
+        release = int(match.group(4)) if match.group(4) else 0
+        return major * 1_000_000 + minor * 10_000 + patch * 100 + release
+
     def get_mysql_version(self) -> Tuple[str, int]:
         """Get MySQL version and normalized version. Also sets server_type from version output."""
         try:
@@ -564,11 +582,9 @@ class BackupTestHelper:
     def get_xtrabackup_version(self) -> Tuple[str, int]:
         """Get xtrabackup version and normalized version.
 
-        Parses the first version token in ``xtrabackup --version`` output, e.g.
-        ``xtrabackup version 8.4.0-1 based on MySQL server 8.4.0 ...`` ->
-        ``('8.4.0', 80400)``. The regex anchors on ``xtrabackup version`` so the
-        trailing ``based on MySQL server X.Y.Z`` segment cannot be picked up by
-        accident.
+        Parses ``xtrabackup --version`` output, e.g.
+        ``xtrabackup version 8.4.0-6 based on MySQL server 8.4.0 ...`` ->
+        ``('8.4.0-6', 8040006)``.
         """
         try:
             result = subprocess.run(
@@ -578,13 +594,38 @@ class BackupTestHelper:
                 check=False,
             )
             out = (result.stdout or "") + (result.stderr or "")
-            m = re.search(r"xtrabackup\s+version\s+(\d+\.\d+\.\d+)", out, re.IGNORECASE)
+            m = re.search(
+                r"xtrabackup\s+version\s+(\d+)\.(\d+)\.(\d+)(?:-(\d+))?",
+                out,
+                re.IGNORECASE,
+            )
             if m:
-                ver = m.group(1)
-                return ver, self.normalize_version(ver)
+                major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                release = int(m.group(4)) if m.group(4) else 0
+                ver = (
+                    f"{major}.{minor}.{patch}"
+                    if release == 0
+                    else f"{major}.{minor}.{patch}-{release}"
+                )
+                return ver, self.normalize_xtrabackup_version(ver)
         except (OSError, subprocess.SubprocessError) as exc:
             print(f"Error getting xtrabackup version: {exc}")
         return "0.0.0", 0
+
+    def _prepare_args_for_pxb_version(self, prepare_params: str) -> List[str]:
+        """Split ``prepare_params`` and append PXB-version-specific prepare flags (e.g. ``--check-tables`` on PXB >= 8.4.0-6)."""
+        args = prepare_params.split() if prepare_params else []
+        if self.xtrabackup_version_normalized is None:
+            self.xtrabackup_version, self.xtrabackup_version_normalized = (
+                self.get_xtrabackup_version()
+            )
+        if (
+            self.xtrabackup_version_normalized
+            >= self.normalize_xtrabackup_version("8.4.0-6")
+            and "--check-tables" not in args
+        ):
+            args.append("--check-tables")
+        return args
 
     def get_mysql_type(self) -> str:
         """Get server type (PS or MS). Uses version output; does not require server to be running."""
@@ -819,7 +860,7 @@ class BackupTestHelper:
             "--no-defaults",
             "--prepare",
             f"--target-dir={target}",
-        ] + prepare_params.split()
+        ] + self._prepare_args_for_pxb_version(prepare_params)
         log_file = os.path.join(self.logdir, f"prepare_full_backup_{log_date}_log")
         result = self.run_command(cmd, check=False, log_file=log_file)
         if result.returncode != 0:
@@ -1461,7 +1502,7 @@ class BackupTestHelper:
         cmd = self._xtrabackup_cmd_prefix() + [
             "--no-defaults", "--prepare", "--apply-log-only",
             f"--target_dir={full_target}",
-        ] + self.prepare_params.split()
+        ] + self._prepare_args_for_pxb_version(self.prepare_params)
 
         log_file = os.path.join(self.logdir, f"prepare_full_backup_{log_date}_log")
         result = self.run_command(cmd, check=False, log_file=log_file)
@@ -1478,13 +1519,13 @@ class BackupTestHelper:
                     "--no-defaults", "--prepare",
                     f"--target_dir={full_target}",
                     f"--incremental-dir={self.backup_dir}/inc{i}",
-                ] + self.prepare_params.split()
+                ] + self._prepare_args_for_pxb_version(self.prepare_params)
             else:
                 cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults", "--prepare", "--apply-log-only",
                     f"--target_dir={full_target}",
                     f"--incremental-dir={self.backup_dir}/inc{i}",
-                ] + self.prepare_params.split()
+                ] + self._prepare_args_for_pxb_version(self.prepare_params)
 
             log_file = os.path.join(self.logdir, f"prepare_inc{i}_backup_{log_date}_log")
             result = self.run_command(cmd, check=False, log_file=log_file)
@@ -2571,7 +2612,7 @@ class BackupTestHelper:
             "--prepare",
             "--apply-log-only",
             f"--target_dir={self.backup_dir}/full",
-        ] + self.prepare_params.split()
+        ] + self._prepare_args_for_pxb_version(self.prepare_params)
         log_file = os.path.join(self.logdir, f"prepare_full_backup_{log_date}_log")
         result = self.run_command(cmd, check=False, log_file=log_file)
         if result.returncode != 0:
@@ -2585,7 +2626,7 @@ class BackupTestHelper:
                     "--prepare",
                     f"--target_dir={self.backup_dir}/full",
                     f"--incremental-dir={self.backup_dir}/inc{i}",
-                ] + self.prepare_params.split()
+                ] + self._prepare_args_for_pxb_version(self.prepare_params)
             else:
                 cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults",
@@ -2593,7 +2634,7 @@ class BackupTestHelper:
                     "--apply-log-only",
                     f"--target_dir={self.backup_dir}/full",
                     f"--incremental-dir={self.backup_dir}/inc{i}",
-                ] + self.prepare_params.split()
+                ] + self._prepare_args_for_pxb_version(self.prepare_params)
             log_file = os.path.join(self.logdir, f"prepare_inc{i}_backup_{log_date}_log")
             result = self.run_command(cmd, check=False, log_file=log_file)
             if result.returncode != 0:
@@ -2675,7 +2716,7 @@ class BackupTestHelper:
         if page_tracking:
             self.backup_params += " --page-tracking"
         self.prepare_params = f"{self.backup_params} --component-keyring-config={config_file}"
-        self.restore_params = f"{self.backup_params} --component-keyring-config={config_file}"
+        self.restore_params = self.prepare_params
 
         if self.server_type == "MS":
             self.mysqld_options = "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --binlog-rotate-encryption-master-key-at-startup --table-encryption-privilege-check=ON --max-connections=5000 --binlog-encryption"
@@ -2740,7 +2781,7 @@ class BackupTestHelper:
 
         self.backup_params = f"--xtrabackup-plugin-dir={self.xtrabackup_dir}/../lib/plugin {CORE_FILE_OPT}"
         self.prepare_params = f"{self.backup_params} --component-keyring-config={kmip_cnf_dst}"
-        self.restore_params = f"{self.backup_params} --component-keyring-config={kmip_cnf_dst}"
+        self.restore_params = self.prepare_params
 
         self.mysqld_options = "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --table-encryption-privilege-check=ON --max-connections=5000"
         tool_options = f"--tables {self.num_tables} --records {self.table_size} --threads {self.threads} --seconds {self.seconds} --undo-tbs-sql 0"
@@ -2786,7 +2827,7 @@ class BackupTestHelper:
             if page_tracking:
                 self.backup_params += " --page-tracking"
             self.prepare_params = f"{self.backup_params} --component-keyring-config={config_file}"
-            self.restore_params = f"{self.backup_params} --component-keyring-config={config_file}"
+            self.restore_params = self.prepare_params
 
             self.mysqld_options = (
                 "--innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON "
@@ -2964,9 +3005,7 @@ class BackupTestHelper:
                 self.prepare_params = (
                     f"{self.backup_params} --component-keyring-config={keyring_config_file}"
                 )
-                self.restore_params = (
-                    f"{self.backup_params} --component-keyring-config={keyring_config_file}"
-                )
+                self.restore_params = self.prepare_params
                 if self.server_type == "MS":
                     self.mysqld_options = (
                         "--innodb-undo-log-encrypt --innodb-redo-log-encrypt "
@@ -3026,9 +3065,7 @@ class BackupTestHelper:
                 self.prepare_params = (
                     f"{self.backup_params} --component-keyring-config={keyring_config_file}"
                 )
-                self.restore_params = (
-                    f"{self.backup_params} --component-keyring-config={keyring_config_file}"
-                )
+                self.restore_params = self.prepare_params
                 self.mysqld_options = (
                     "--innodb-undo-log-encrypt --innodb-redo-log-encrypt "
                     "--default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON "

@@ -16,15 +16,20 @@ export mysqldir="$HOME/mysql-8.4/bld_8.4/install"
 export datadir="${mysqldir}/data"
 export backup_dir="$HOME/dbbackup_$(date +"%d_%m_%Y")"
 export PATH="$PATH:$xtrabackup_dir"
+# shellcheck source=pxb_helper.sh
+source "$(dirname "${BASH_SOURCE[0]}")/pxb_helper.sh"
+init_pxb_version
 export qascripts="$HOME/percona-qa"
 export logdir="$HOME/backuplogs"
 export mysql_random_data_load_tool="$HOME/mysql_random_data_load"
 declare -A KMIP_CONFIGS=(
-    # PyKMIP Docker Configuration
-    ["pykmip"]="addr=127.0.0.1,image=mohitpercona/kmip:latest,port=5696,name=kmip_pykmip"
+    ["hashicorp"]="addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp-kmip-setup.py"
 
-    # Hashicorp Docker Setup Configuration
-    ["hashicorp"]="addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp_kmip_setup.py"
+    # Fortanix Setup Configuration
+    ["fortanix"]="addr=216.180.120.88,port=5696,name=kmip_fortanix,setup_script=fortanix_kmip_setup.py"
+
+    # PyKMIP Docker Configuration
+    #["pykmip"]="addr=127.0.0.1,image=satyapercona/kmip:latest,port=5696,name=kmip_pykmip"
 
     # API Configuration
     # ["ciphertrust"]="addr=127.0.0.1,port=5696,name=kmip_ciphertrust,setup_script=setup_kmip_api.py"
@@ -157,6 +162,7 @@ take_partial_backup() {
     sleep 1
 
     echo "Preparing backup with --export option"
+    PREPARE_PARAMS=$(prepare_args_for_pxb_version "$PREPARE_PARAMS")
     "${xtrabackup_dir}"/xtrabackup --prepare --export --target_dir="${backup_dir}"/full ${PREPARE_PARAMS} 2>"${logdir}"/prepare_full_backup_"${log_date}"_log
     if [ "$?" -ne 0 ]; then
         echo "ERR: Prepare of full backup failed. Please check the log at: ${logdir}/prepare_full_backup_${log_date}_log"

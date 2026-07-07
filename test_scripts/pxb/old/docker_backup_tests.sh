@@ -136,6 +136,7 @@ else
     help
 fi
 
+source "$(dirname "${BASH_SOURCE[0]}")/../pxb_helper.sh"
 
 clean_setup() {
     # This function checks and cleans the setup
@@ -156,6 +157,8 @@ clean_setup() {
 
 test_pxb_docker() {
     # This function runs tests for pxb 8.0 and ms 8.0 docker image
+    init_pxb_version_docker "$pxb_docker_image"
+    PREPARE_CHECK_TABLES=$(prepare_args_for_pxb_version "")
     start_mysql_container="sudo docker run --name $container_name $mount_dir -p 3306:3306 -e PERCONA_TELEMETRY_DISABLE=1 -e MYSQL_ROOT_HOST=% -e MYSQL_ROOT_PASSWORD=mysql -d $mysql_docker_image"
 
     mkdir /tmp/mysql_data
@@ -196,7 +199,7 @@ test_pxb_docker() {
 
     echo "Run pxb docker container, take backup and prepare it"
     echo "Using $repo_type repo docker image"
-    sudo docker run --volumes-from $container_name -v $pxb_backup_dir -it --rm --user root $pxb_docker_image /bin/bash -c "rm -rf $target_backup_dir/* ; xtrabackup --backup --datadir=/var/lib/mysql/ --target-dir=$target_backup_dir --user=root --password=mysql ; xtrabackup --prepare --target-dir=$target_backup_dir" >>backup_log 2>&1
+    sudo docker run --volumes-from $container_name -v $pxb_backup_dir -it --rm --user root $pxb_docker_image /bin/bash -c "rm -rf $target_backup_dir/* ; xtrabackup --backup --datadir=/var/lib/mysql/ --target-dir=$target_backup_dir --user=root --password=mysql ; xtrabackup --prepare --target-dir=$target_backup_dir ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"}" >>backup_log 2>&1
 
 
     if [ "$?" -ne 0 ]; then

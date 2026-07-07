@@ -13,6 +13,8 @@
 
 # Set script variables
 export xtrabackup_dir="$HOME/pxb-3034-repo/bld_debug/install/bin"
+source "$(dirname "${BASH_SOURCE[0]}")/../pxb_helper.sh"
+init_pxb_version
 export mysqldir="$HOME/Percona-Server-8.2.0-1-Linux.x86_64.glibc2.31"
 export datadir="${mysqldir}/data"
 export backup_dir="$HOME/dbbackup_$(date +"%d_%m_%Y")"
@@ -74,6 +76,8 @@ incremental_backup() {
     local PREPARE_PARAMS="$2"
     local RESTORE_PARAMS="$3"
     local MYSQLD_OPTIONS="$4"
+
+    PREPARE_PARAMS=$(prepare_args_for_pxb_version "$PREPARE_PARAMS")
 
     log_date=$(date +"%d_%m_%Y_%M")
     echo "Taking full backup"

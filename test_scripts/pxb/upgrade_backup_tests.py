@@ -181,7 +181,7 @@ def _prepare_restore_backup(
             "--prepare",
             f"--target-dir={full_target}",
             f"--incremental-dir={inc_target}",
-        ] + prepare_params.split()
+        ] + helper._prepare_args_for_pxb_version(prepare_params)
         log_file = os.path.join(helper.logdir, f"prepare_inc_backup_{log_date}_log")
         result = helper.run_command(cmd, check=False, log_file=log_file)
         if result.returncode != 0:

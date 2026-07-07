@@ -2,6 +2,9 @@
 
 # Internal Script variables
 XTRABACKUP_DIR=$HOME/pxb-8.3/bld_8.3/install/
+source "$(dirname "${BASH_SOURCE[0]}")/pxb_helper.sh"
+init_pxb_version "$XTRABACKUP_DIR/bin/xtrabackup"
+PREPARE_CHECK_TABLES=$(prepare_args_for_pxb_version "")
 PS_DIR=$HOME/mysql-8.3/bld_8.3/install
 DATADIR=$PS_DIR/data_80
 SOCKET=/tmp/mysql_22000.sock
@@ -9,11 +12,13 @@ BACKUP_DIR=/tmp/backup
 PSTRESS_BIN=$HOME/pstress/src
 ENCRYPTION=0; COMPRESS=0; ENCRYPT=""; DECRYPT=""; ENCRYPT_KEY=""
 declare -A KMIP_CONFIGS=(
-    # PyKMIP Docker Configuration
-    ["pykmip"]="addr=127.0.0.1,image=mohitpercona/kmip:latest,port=5696,name=kmip_pykmip"
+    ["hashicorp"]="addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp-kmip-setup.py"
 
-    # Hashicorp Docker Setup Configuration
-    # ["hashicorp"]="addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp_kmip_setup.py"
+    # Fortanix Setup Configuration
+    ["fortanix"]="addr=216.180.120.88,port=5696,name=kmip_fortanix,setup_script=fortanix_kmip_setup.py"
+
+    # PyKMIP Docker Configuration
+    #["pykmip"]="addr=127.0.0.1,image=satyapercona/kmip:latest,port=5696,name=kmip_pykmip"
 
     # API Configuration
     # ["ciphertrust"]="addr=127.0.0.1,port=5696,name=kmip_ciphertrust,setup_script=setup_kmip_api.py"
@@ -298,9 +303,9 @@ fi
 
 echo "=>Preparing Backup"
 if [ $ENCRYPTION -eq 0 ]; then
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target_dir=$BACKUP_DIR --core-file > $LOGDIR/prepare.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target_dir=$BACKUP_DIR --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare.log 2>&1
 else
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target_dir=$BACKUP_DIR --keyring_file_data=$PS_DIR/mykey --core-file > $LOGDIR/prepare.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target_dir=$BACKUP_DIR --keyring_file_data=$PS_DIR/mykey --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare.log 2>&1
 fi
 echo "..Prepare successful"
 }
@@ -381,38 +386,38 @@ xbcloud_get inc3
 
 echo "=>Preparing Full Backup"
 if [ $ENCRYPTION -eq 0 ]; then
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=$BACKUP_DIR/full --core-file > $LOGDIR/prepare_full.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=$BACKUP_DIR/full --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_full.log 2>&1
 else
   if [ "$keyring_type" = "keyring_kmip" ]; then
     keyring_filename="$PS_DIR/lib/plugin/component_keyring_kmip.cnf"
   elif [ "$keyring_type" = "keyring_file" ]; then
     keyring_filename="$PS_DIR/lib/plugin/component_keyring_file.cnf"
   fi
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=$BACKUP_DIR/full --xtrabackup-plugin-dir=$XTRABACKUP_DIR/lib/plugin --component-keyring-config="$keyring_filename" --core-file > $LOGDIR/prepare_full.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=$BACKUP_DIR/full --xtrabackup-plugin-dir=$XTRABACKUP_DIR/lib/plugin --component-keyring-config="$keyring_filename" --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_full.log 2>&1
 echo "..Prepare successful"
 fi
 
 echo "=>Preparing Incremental Backup 1"
 if [ $ENCRYPTION -eq 0 ]; then
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc1 --core-file > $LOGDIR/prepare_inc1.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc1 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc1.log 2>&1
 else
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc1 --core-file > $LOGDIR/prepare_inc1.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc1 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc1.log 2>&1
 fi
 echo "..Successful"
 
 echo "=>Preparing Incremental Backup 2"
 if [ $ENCRYPTION -eq 0 ]; then
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc2 --core-file > $LOGDIR/prepare_inc2.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc2 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc2.log 2>&1
 else
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc2 --core-file > $LOGDIR/prepare_inc2.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc2 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc2.log 2>&1
 fi
 echo "..Successful"
 
 echo "=>Preparing Incremental Backup 3"
 if [ $ENCRYPTION -eq 0 ]; then
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc3 --core-file > $LOGDIR/prepare_inc3.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc3 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc3.log 2>&1
 else
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc3 --core-file > $LOGDIR/prepare_inc3.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc3 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc3.log 2>&1
 fi
 echo "..Successful"
 }

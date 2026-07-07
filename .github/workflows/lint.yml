@@ -6,112 +6,168 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - "**.py"
-      - "**.sh"
-      - "**.bash"
-      - "**.bats"
-      - ".github/workflows/**"
 
 jobs:
   python-lint:
     name: Python lint
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: write
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install dependencies
-        run: pip install ruff uv
-
-      - name: Get changed Python files
-        id: changed-python
+      - name: Detect changed Python files
+        id: py-changes
         if: github.event_name == 'pull_request'
         run: |
+          set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
-          FILES="$(git diff --diff-filter=ACMRTUXB --name-only "$BASE_SHA" "$HEAD_SHA" -- '*.py' | tr '\n' ' ' || true)"
-          echo "files=$FILES" >> "$GITHUB_OUTPUT"
 
-      - name: Run ruff on changed Python files
-        if: github.event_name == 'pull_request'
+          git rev-parse --verify "${BASE_SHA}^{commit}"
+          git rev-parse --verify "${HEAD_SHA}^{commit}"
+
+          mapfile -t CHANGED < <(
+            git diff --diff-filter=ACMRTUXB --name-only "${BASE_SHA}...${HEAD_SHA}" -- '*.py'
+          )
+
+          if [ "${#CHANGED[@]}" -eq 0 ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changed Python files."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Changed Python files:"
+            printf '  %s\n' "${CHANGED[@]}"
+          fi
+
+      - uses: reviewdog/action-setup@v1
+        if: github.event_name == 'pull_request' && steps.py-changes.outputs.changed == 'true'
+
+      - name: Install ruff
+        if: github.event_name != 'pull_request' || steps.py-changes.outputs.changed == 'true'
+        run: pip install ruff
+
+      - name: Ruff on changed lines (PR)
+        if: github.event_name == 'pull_request' && steps.py-changes.outputs.changed == 'true'
+        env:
+          REVIEWDOG_GITHUB_API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          FILES="${{ steps.changed-python.outputs.files }}"
+          set -euo pipefail
+          BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
 
-          if [ -z "$FILES" ]; then
+          mapfile -t FILES < <(
+            git diff --diff-filter=ACMRTUXB --name-only "${BASE_SHA}...${HEAD_SHA}" -- '*.py'
+          )
+
+          if [ "${#FILES[@]}" -eq 0 ]; then
             echo "No changed Python files."
             exit 0
           fi
 
-          echo "Linting Python files:"
-          echo "$FILES"
+          echo "Linting changed Python files:"
+          printf '  %s\n' "${FILES[@]}"
 
-          uv run ruff check $FILES
+          DIFF_CMD="git diff ${BASE_SHA}...${HEAD_SHA}"
+
+          RDJSON="$(mktemp)"
+          ruff check --output-format=rdjson "${FILES[@]}" > "$RDJSON" || true
+
+          # Post PR annotations on this job (uses workflow commands, not a separate Check).
+          # Non-fatal: the local reporter below is the pass/fail gate.
+          reviewdog \
+            -f=rdjson \
+            -reporter=github-pr-annotations \
+            -filter-mode=added \
+            -level=error \
+            -diff="${DIFF_CMD}" \
+            < "$RDJSON" || true
+
+          # Fail the Python lint job when added-line errors exist.
+          reviewdog \
+            -f=rdjson \
+            -reporter=local \
+            -filter-mode=added \
+            -fail-level=error \
+            -level=error \
+            -diff="${DIFF_CMD}" \
+            < "$RDJSON"
 
       - name: Run ruff on all Python files
         if: github.event_name != 'pull_request'
-        run: |
-          uv run ruff check .
+        run: ruff check .
 
   shell-lint:
     name: Shell lint
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: write
+      security-events: write
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Install ShellCheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-
-      - name: Get changed shell files
-        id: changed-shell
+      - name: Detect changed shell files
+        id: shell-changes
         if: github.event_name == 'pull_request'
         run: |
+          set -euo pipefail
           BASE_SHA="${{ github.event.pull_request.base.sha }}"
           HEAD_SHA="${{ github.event.pull_request.head.sha }}"
 
-          FILES="$(
-            git diff --diff-filter=ACMRTUXB --name-only "$BASE_SHA" "$HEAD_SHA" -- \
+          git rev-parse --verify "${BASE_SHA}^{commit}"
+          git rev-parse --verify "${HEAD_SHA}^{commit}"
+
+          mapfile -t CHANGED < <(
+            git diff --diff-filter=ACMRTUXB --name-only "${BASE_SHA}...${HEAD_SHA}" -- \
               '*.sh' \
               '*.bash' \
-              '*.bats' \
-            | tr '\n' ' ' || true
-          )"
+              '*.bats'
+          )
 
-          echo "files=$FILES" >> "$GITHUB_OUTPUT"
-
-      - name: Run ShellCheck on changed shell files
-        if: github.event_name == 'pull_request'
-        run: |
-          FILES="${{ steps.changed-shell.outputs.files }}"
-
-          if [ -z "$FILES" ]; then
+          if [ "${#CHANGED[@]}" -eq 0 ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No changed shell files."
-            exit 0
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Changed shell files:"
+            printf '  %s\n' "${CHANGED[@]}"
           fi
 
-          echo "Linting shell files:"
-          echo "$FILES"
+      - name: Differential ShellCheck
+        if: github.event_name == 'pull_request' && steps.shell-changes.outputs.changed == 'true'
+        uses: redhat-plumbers-in-action/differential-shellcheck@v5
+        with:
+          severity: error
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-          shellcheck $FILES
+      - name: Install ShellCheck
+        if: github.event_name != 'pull_request'
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: Run ShellCheck on all shell files
         if: github.event_name != 'pull_request'
         run: |
-          FILES="$(find . -type f \( -name '*.sh' -o -name '*.bash' -o -name '*.bats' \) | tr '\n' ' ')"
+          set -euo pipefail
+          mapfile -t FILES < <(
+            find . -type f \( -name '*.sh' -o -name '*.bash' -o -name '*.bats' \)
+          )
 
-          if [ -z "$FILES" ]; then
+          if [ "${#FILES[@]}" -eq 0 ]; then
             echo "No shell files found."
             exit 0
           fi
 
-          echo "Linting shell files:"
-          echo "$FILES"
+          echo "Linting shell files (errors only):"
+          printf '%s\n' "${FILES[@]}"
 
-          shellcheck $FILES
+          shellcheck -S error "${FILES[@]}"

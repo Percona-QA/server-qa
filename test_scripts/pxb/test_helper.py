@@ -17,16 +17,6 @@ from typing import Optional, List, Tuple, Dict
 import psutil
 import pytest
 
-# CI lint failure test (revert before merge): forgot self. when porting pxb_helper version gate (F821)
-def _prepare_args_for_pxb_version_compat(prepare_params: str, pxb_version_normalized: int) -> list:
-    args = prepare_params.split() if prepare_params else []
-    if (
-        pxb_version_normalized >= normalize_xtrabackup_version("8.4.0-6")
-        and "--check-tables" not in args
-    ):
-        args.append("--check-tables")
-    return args
-
 # Import KMIP helper
 try:
     from kmip_helper import KMIPHelper

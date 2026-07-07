@@ -2,15 +2,6 @@
 # PXB version helpers for bash backup test scripts.
 # Usage: source pxb_helper.sh
 
-# CI lint failure test (revert before merge): missing spaces around = (SC2077; same as old tablespaces_backup_tests.sh)
-_uses_ps_defaults() {
-  local server_type="$1"
-  if [ "$server_type"="PS" ]; then
-    return 0
-  fi
-  return 1
-}
-
 # PXB release-aware normalization (NOT the same as normalize_version)
 normalize_xtrabackup_version() {
   local major=0 minor=0 patch=0 release=0

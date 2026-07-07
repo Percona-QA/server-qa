@@ -190,7 +190,7 @@ process_backup() {
     local EXT_DIR="$3"
 
     if [[ "${BK_TYPE}" = "stream" ]]; then
-        if [ -z "${backup_dir}/${backup_stream}" ]; then
+        if [ ! -f "${backup_dir}/${backup_stream}" ]; then
             echo "ERR: The backup stream file was not created in ${backup_dir}/${backup_stream}. Please check the backup logs in ${logdir} for errors."
             exit 1
         else
@@ -290,7 +290,7 @@ incremental_backup() {
     fi
 
     if [ "${BACKUP_TYPE}" = "tar" ]; then
-        if [ -z "${backup_dir}/${backup_tar}" ]; then
+        if [ ! -f "${backup_dir}/${backup_tar}" ]; then
             echo "ERR: The backup tar file was not created in ${backup_dir}/${backup_tar}. Please check the backup logs in ${logdir} for errors."
             exit 1
         else

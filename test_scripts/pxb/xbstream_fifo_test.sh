@@ -303,9 +303,9 @@ fi
 
 echo "=>Preparing Backup"
 if [ $ENCRYPTION -eq 0 ]; then
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target_dir=$BACKUP_DIR --core-file ${PREPARE_CHECK_TABLES} > $LOGDIR/prepare.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target_dir=$BACKUP_DIR --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare.log 2>&1
 else
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target_dir=$BACKUP_DIR --keyring_file_data=$PS_DIR/mykey --core-file ${PREPARE_CHECK_TABLES} > $LOGDIR/prepare.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target_dir=$BACKUP_DIR --keyring_file_data=$PS_DIR/mykey --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare.log 2>&1
 fi
 echo "..Prepare successful"
 }
@@ -386,38 +386,38 @@ xbcloud_get inc3
 
 echo "=>Preparing Full Backup"
 if [ $ENCRYPTION -eq 0 ]; then
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=$BACKUP_DIR/full --core-file ${PREPARE_CHECK_TABLES} > $LOGDIR/prepare_full.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=$BACKUP_DIR/full --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_full.log 2>&1
 else
   if [ "$keyring_type" = "keyring_kmip" ]; then
     keyring_filename="$PS_DIR/lib/plugin/component_keyring_kmip.cnf"
   elif [ "$keyring_type" = "keyring_file" ]; then
     keyring_filename="$PS_DIR/lib/plugin/component_keyring_file.cnf"
   fi
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=$BACKUP_DIR/full --xtrabackup-plugin-dir=$XTRABACKUP_DIR/lib/plugin --component-keyring-config="$keyring_filename" --core-file ${PREPARE_CHECK_TABLES} > $LOGDIR/prepare_full.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=$BACKUP_DIR/full --xtrabackup-plugin-dir=$XTRABACKUP_DIR/lib/plugin --component-keyring-config="$keyring_filename" --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_full.log 2>&1
 echo "..Prepare successful"
 fi
 
 echo "=>Preparing Incremental Backup 1"
 if [ $ENCRYPTION -eq 0 ]; then
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc1 --core-file ${PREPARE_CHECK_TABLES} > $LOGDIR/prepare_inc1.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc1 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc1.log 2>&1
 else
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc1 --core-file ${PREPARE_CHECK_TABLES} > $LOGDIR/prepare_inc1.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc1 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc1.log 2>&1
 fi
 echo "..Successful"
 
 echo "=>Preparing Incremental Backup 2"
 if [ $ENCRYPTION -eq 0 ]; then
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc2 --core-file ${PREPARE_CHECK_TABLES} > $LOGDIR/prepare_inc2.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc2 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc2.log 2>&1
 else
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc2 --core-file ${PREPARE_CHECK_TABLES} > $LOGDIR/prepare_inc2.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --apply-log-only --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc2 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc2.log 2>&1
 fi
 echo "..Successful"
 
 echo "=>Preparing Incremental Backup 3"
 if [ $ENCRYPTION -eq 0 ]; then
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc3 --core-file ${PREPARE_CHECK_TABLES} > $LOGDIR/prepare_inc3.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target-dir=$BACKUP_DIR/full --incremental-dir=$BACKUP_DIR/inc3 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc3.log 2>&1
 else
-  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc3 --core-file ${PREPARE_CHECK_TABLES} > $LOGDIR/prepare_inc3.log 2>&1
+  $XTRABACKUP_DIR/bin/xtrabackup --no-defaults --prepare --target-dir=$BACKUP_DIR/full --component-keyring-config="$keyring_filename" --incremental-dir=$BACKUP_DIR/inc3 --core-file ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"} > $LOGDIR/prepare_inc3.log 2>&1
 fi
 echo "..Successful"
 }

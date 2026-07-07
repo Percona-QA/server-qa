@@ -199,7 +199,7 @@ test_pxb_docker() {
 
     echo "Run pxb docker container, take backup and prepare it"
     echo "Using $repo_type repo docker image"
-    sudo docker run --volumes-from $container_name -v $pxb_backup_dir -it --rm --user root $pxb_docker_image /bin/bash -c "rm -rf $target_backup_dir/* ; xtrabackup --backup --datadir=/var/lib/mysql/ --target-dir=$target_backup_dir --user=root --password=mysql ; xtrabackup --prepare --target-dir=$target_backup_dir ${PREPARE_CHECK_TABLES}" >>backup_log 2>&1
+    sudo docker run --volumes-from $container_name -v $pxb_backup_dir -it --rm --user root $pxb_docker_image /bin/bash -c "rm -rf $target_backup_dir/* ; xtrabackup --backup --datadir=/var/lib/mysql/ --target-dir=$target_backup_dir --user=root --password=mysql ; xtrabackup --prepare --target-dir=$target_backup_dir ${PREPARE_CHECK_TABLES:+"${PREPARE_CHECK_TABLES}"}" >>backup_log 2>&1
 
 
     if [ "$?" -ne 0 ]; then

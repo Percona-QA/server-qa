@@ -364,9 +364,9 @@ test_tablespaces_encrypt() {
         mkdir "${dir}"
     done
 
-    if [ "$server_type"="MS" ]; then
+    if [ "$server_type" = "MS" ]; then
         server_options="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --table-encryption-privilege-check=ON"
-    elif [ "$server_type"="PS" ]; then
+    elif [ "$server_type" = "PS" ]; then
         server_options="--early-plugin-load=keyring_file.so --keyring_file_data=${mysqldir}/keyring --innodb-undo-log-encrypt --innodb-redo-log-encrypt --default-table-encryption=ON --innodb_encrypt_online_alter_logs=ON --innodb_temp_tablespace_encrypt=ON --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --encrypt-tmp-files --innodb_sys_tablespace_encrypt --table-encryption-privilege-check=ON"
     fi
 

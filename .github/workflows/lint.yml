@@ -70,8 +70,7 @@ jobs:
           { ruff check --output-format=rdjson "${FILES[@]}" || true; } \
             | reviewdog \
                 -f=rdjson \
-                -name=ruff \
-                -reporter=github-check \
+                -reporter=github-pr-annotations \
                 -filter-mode=added \
                 -fail-level=error \
                 -level=error

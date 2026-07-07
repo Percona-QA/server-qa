@@ -73,17 +73,19 @@ jobs:
           echo "Linting changed Python files:"
           printf '  %s\n' "${FILES[@]}"
 
+          DIFF_CMD="git diff ${BASE_SHA}...${HEAD_SHA}"
+
           RDJSON="$(mktemp)"
           ruff check --output-format=rdjson "${FILES[@]}" > "$RDJSON" || true
 
           # Post PR annotations on this job (uses workflow commands, not a separate Check).
-          # Token is required for reviewdog to build the PR diff for -filter-mode=added.
           # Non-fatal: the local reporter below is the pass/fail gate.
           reviewdog \
             -f=rdjson \
             -reporter=github-pr-annotations \
             -filter-mode=added \
             -level=error \
+            -diff="${DIFF_CMD}" \
             < "$RDJSON" || true
 
           # Fail the Python lint job when added-line errors exist.
@@ -93,6 +95,7 @@ jobs:
             -filter-mode=added \
             -fail-level=error \
             -level=error \
+            -diff="${DIFF_CMD}" \
             < "$RDJSON"
 
       - name: Run ruff on all Python files

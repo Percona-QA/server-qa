@@ -352,6 +352,91 @@ class GroupReplication:
         self.wait_all_online(timeout=timeout)
         return False
 
+    def wait_node_isolated(self, name: str, timeout: int = 60) -> dict[str, tuple[str, str]]:
+        """Wait until an isolated node sees no group member but itself as ONLINE, returning its view.
+
+        The minority side runs its own suspicion timer, independent of the majority's
+        expulsion, so this still needs polling after wait_online_count() has settled on the
+        surviving side. Returns the last view read, so the caller can assert on it.
+        """
+        self.log(f"wait for {name} to see itself cut off from the group")
+        deadline = time.time() + timeout
+        while True:
+            states = self.member_states(name)
+            reachable = {host for host, (state, _) in states.items() if state == "ONLINE"}
+            if not reachable - {name} or time.time() >= deadline:
+                return states
+            time.sleep(2)
+
+    def clone_status(self, name: str) -> dict[str, str]:
+        """Return the node's current/last clone operation as a column->value map, {} if never cloned.
+
+        performance_schema.clone_status holds at most one row — the latest operation — so
+        this doubles as the before/after snapshot for "did a new clone run?". Note that a
+        node added by create()/scale_up() already carries a completed row from the
+        recoveryMethod:'clone' addInstance, so an empty map is not the healthy default.
+        """
+        columns = ["ID", "STATE", "ERROR_NO", "BEGIN_TIME"]
+        result = self.docker.exec_mysql(
+            name,
+            f"SELECT {', '.join(columns)} FROM performance_schema.clone_status;",
+            password=self.root_password,
+            check=False,
+            timeout=15,
+        )
+        line = result.stdout.strip()
+        if not result.ok or not line:
+            return {}
+        return dict(zip(columns, line.split("\t")))
+
+    def gtid_executed(self, name: str) -> str:
+        """Return the node's @@GLOBAL.gtid_executed as a single-line GTID set."""
+        # The client prints a newline per UUID set; GTID_SUBSET() and friends want one line.
+        result = self.docker.exec_mysql(
+            name, "SELECT @@GLOBAL.gtid_executed;", password=self.root_password, timeout=30
+        )
+        return result.stdout.strip().replace("\n", "")
+
+    def gtid_subset(self, name: str, gtid_set: str) -> bool:
+        """Return True when the node's gtid_executed is a superset of the given GTID set."""
+        result = self.docker.exec_mysql(
+            name,
+            f"SELECT GTID_SUBSET({sql_str(gtid_set)}, @@GLOBAL.gtid_executed);",
+            password=self.root_password,
+            timeout=30,
+        )
+        return result.stdout.strip() == "1"
+
+    def purge_binary_logs(self, nodes: list[str] | None = None) -> dict[str, str]:
+        """Purge the binary logs on each node, returning the resulting gtid_purged per node.
+
+        Defaults to every active node, which is what forcing clone (SST) recovery requires:
+        GR picks its recovery donor from any ONLINE member, so purging only the primary
+        leaves the remaining secondary able to serve an IST instead.
+
+        The returned gtid_purged is the caller's proof that something was actually purged —
+        an empty value means the logs are still there and no IST path has been closed off.
+        """
+        nodes = nodes if nodes is not None else list(self.active_nodes)
+        if not nodes:
+            raise RuntimeError("No nodes to purge binary logs on")
+        self.log(f"purge binary logs on {', '.join(nodes)}")
+        purged: dict[str, str] = {}
+        for name in nodes:
+            # FLUSH first so the log holding the most recent writes stops being the active
+            # one; PURGE never removes the active log. The + INTERVAL 1 SECOND covers the
+            # file just closed by FLUSH, whose mtime is essentially NOW().
+            self.docker.exec_mysql(
+                name,
+                "FLUSH BINARY LOGS; PURGE BINARY LOGS BEFORE NOW() + INTERVAL 1 SECOND;",
+                password=self.root_password,
+            )
+            result = self.docker.exec_mysql(
+                name, "SELECT @@GLOBAL.gtid_purged;", password=self.root_password, timeout=30
+            )
+            purged[name] = result.stdout.strip().replace("\n", "")
+        return purged
+
     def _persist_gr_settings(self, nodes: list[str]) -> None:
         """Persist start_on_boot and the current group_seeds list on each given node."""
         start_on_boot = "ON" if self.start_on_boot else "OFF"

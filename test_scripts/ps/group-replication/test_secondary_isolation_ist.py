@@ -9,37 +9,7 @@ throughout the partition, that no new clone was taken, that the node actually ap
 transactions it missed, and that data is consistent across all three nodes afterwards.
 """
 
-import time
-
 import pytest
-
-from generic_helper import sql_str
-
-
-def _query(gr_cluster, node, sql):
-    """Run a read-only query on one node and return its raw tab-separated output."""
-    return gr_cluster.docker.exec_mysql(
-        node, sql, password=gr_cluster.root_password, timeout=30
-    ).stdout.strip()
-
-
-def _clone_snapshot(gr_cluster, node):
-    """Return the node's clone history, used to detect whether a *new* clone was taken.
-
-    Not simply asserted to be empty: create() adds every secondary with
-    recoveryMethod:'clone', so each one already carries a completed clone row from
-    cluster bootstrap. A rejoin via IST leaves that history untouched.
-    """
-    return _query(
-        gr_cluster, node, "SELECT ID, STATE, BEGIN_TIME FROM performance_schema.clone_status;"
-    )
-
-
-def _gtid_subset(gr_cluster, node, gtid_set):
-    """Return "1" if the node's gtid_executed is a superset of gtid_set, else "0"."""
-    return _query(
-        gr_cluster, node, f"SELECT GTID_SUBSET({sql_str(gtid_set)}, @@GLOBAL.gtid_executed);"
-    )
 
 
 @pytest.mark.parametrize("gr_cluster", ["router", "haproxy"], indirect=True)
@@ -52,9 +22,11 @@ def test_secondary_isolation_ist_recovery(gr_cluster, sysbench):
     gr_cluster.verify_checksums("sbtest", timeout=120)
 
     # Pick a secondary to partition and record its clone history before anything happens,
-    # so the post-rejoin comparison can tell an IST from a fresh clone.
+    # so the post-rejoin comparison can tell an IST from a fresh clone. Not asserted to be
+    # empty: create() adds every secondary with recoveryMethod:'clone', so each already
+    # carries a completed clone row from cluster bootstrap.
     target = gr_cluster.secondaries()[0]
-    clone_before = _clone_snapshot(gr_cluster, target)
+    clone_before = gr_cluster.clone_status(target)
 
     # Sever the network only — mysqld on the target keeps running, unlike stop_node().
     gr_cluster.isolate_node(target)
@@ -68,15 +40,8 @@ def test_secondary_isolation_ist_recovery(gr_cluster, sysbench):
     # The whole point of a network partition versus a stop: the process is untouched.
     assert gr_cluster.node_alive(target), f"mysqld on {target} died during the partition"
 
-    # From the minority side the target must see that it has lost the group. Polled,
-    # because its own suspicion timer runs independently of the majority's expulsion.
-    deadline = time.time() + 60
-    target_view = gr_cluster.member_states(target)
-    while {h for h, (state, _) in target_view.items() if state == "ONLINE"} - {target}:
-        if time.time() >= deadline:
-            break
-        time.sleep(2)
-        target_view = gr_cluster.member_states(target)
+    # From the minority side the target must see that it has lost the group.
+    target_view = gr_cluster.wait_node_isolated(target)
     still_online = {h for h, (state, _) in target_view.items() if state == "ONLINE"} - {target}
     assert not still_online, (
         f"isolated node {target} still sees group members as ONLINE: {target_view}"
@@ -90,12 +55,9 @@ def test_secondary_isolation_ist_recovery(gr_cluster, sysbench):
     # Still alive right before the heal — the partition never touched the process.
     assert gr_cluster.node_alive(target), f"mysqld on {target} died during the partition"
 
-    # The GTID set the target has to catch up on. Newlines are stripped because the
-    # client prints one per UUID set and GTID_SUBSET() wants a single-line set.
-    missed_gtids = _query(
-        gr_cluster, gr_cluster.get_primary(), "SELECT @@GLOBAL.gtid_executed;"
-    ).replace("\n", "")
-    assert _gtid_subset(gr_cluster, target, missed_gtids) == "0", (
+    # The GTID set the target has to catch up on.
+    missed_gtids = gr_cluster.gtid_executed(gr_cluster.get_primary())
+    assert not gr_cluster.gtid_subset(target, missed_gtids), (
         f"{target} was not actually behind at the end of the partition window "
         "— the catch-up check below would prove nothing"
     )
@@ -110,7 +72,7 @@ def test_secondary_isolation_ist_recovery(gr_cluster, sysbench):
     )
 
     # IST, not SST: recovery must not have added a clone to the target's history.
-    clone_after = _clone_snapshot(gr_cluster, target)
+    clone_after = gr_cluster.clone_status(target)
     assert clone_after == clone_before, (
         f"a new clone was taken on {target} (SST instead of IST):\n"
         f"before: {clone_before!r}\nafter: {clone_after!r}"
@@ -120,10 +82,10 @@ def test_secondary_isolation_ist_recovery(gr_cluster, sysbench):
     # Deliberately not the spec's COUNT_TRANSACTIONS_REMOTE_APPLIED: that counter only
     # covers transactions received from the group once a member is already ONLINE, so it
     # reads 0 after a recovery-channel catch-up. The GTID set is the direct evidence.
-    assert _gtid_subset(gr_cluster, target, missed_gtids) == "1", (
+    assert gr_cluster.gtid_subset(target, missed_gtids), (
         f"{target} is still missing transactions from the partition window\n"
         f"expected superset of: {missed_gtids!r}\n"
-        f"has: {_query(gr_cluster, target, 'SELECT @@GLOBAL.gtid_executed;')!r}"
+        f"has: {gr_cluster.gtid_executed(target)!r}"
     )
 
     gr_cluster.verify()

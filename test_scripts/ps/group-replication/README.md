@@ -19,7 +19,8 @@ group-replication/
 ├── test_failover.py            # primary failover + recovery under sysbench load
 ├── test_scaling.py             # scale up 3->5 and down 5->3 under sysbench load
 ├── test_backup_restore.py      # XtraBackup full+incremental backup and restore
-└── test_secondary_isolation_ist.py # secondary network-partitioned, rejoins via IST
+├── test_secondary_isolation_ist.py # secondary network-partitioned, rejoins via IST
+└── test_secondary_isolation_sst.py # same, binlogs purged so it rejoins via clone/SST
 ```
 
 ## Prerequisites
@@ -467,6 +468,23 @@ fixture and use:
   membership — the point of a partition test is that this stays `True`).
 - `gr_cluster.local_member_state(node)` — the node's own `MEMBER_STATE` as it sees itself
   (`ONLINE` / `RECOVERING` / `ERROR` / `OFFLINE`), for the minority side of a partition.
+- `gr_cluster.wait_node_isolated(node)` — block until an isolated node sees no group
+  member but itself as `ONLINE`, and return its view. The minority side runs its own
+  suspicion timer, so this is still needed after `wait_online_count()` has settled.
+- `gr_cluster.clone_status(node)` — the node's current/last clone operation as a
+  column→value map (`ID`, `STATE`, `ERROR_NO`, `BEGIN_TIME`), `{}` if it never cloned.
+  Every secondary already carries a completed row from the clone-based `addInstance` in
+  `create()`, so to tell an IST from an SST compare snapshots taken before and after,
+  rather than checking whether a row exists.
+- `gr_cluster.gtid_executed(node)` / `gr_cluster.gtid_subset(node, gtid_set)` — the node's
+  `gtid_executed` as a single-line GTID set, and whether it is a superset of another set.
+  Use these to prove a node caught up: `COUNT_TRANSACTIONS_REMOTE_APPLIED` stays 0 after a
+  recovery-channel catch-up, since it only counts what arrives once a member is `ONLINE`.
+- `gr_cluster.purge_binary_logs(nodes=None)` — `FLUSH` + `PURGE BINARY LOGS` on each node
+  (default: every active node), returning the resulting `gtid_purged` per node so you can
+  assert something was actually purged. Defaults to all nodes because GR picks its recovery
+  donor from any `ONLINE` member — purging only the primary still leaves a donor that can
+  serve an IST.
 - `gr_cluster.docker` — the `DockerHelper`. Common methods:
   - `docker.exec_mysql(node, "SQL;", database=None)` → returns `ExecResult` with `.stdout`, `.stderr`, `.returncode`, `.ok`.
   - `docker.exec_mysqlsh(node, "<JS script>")` — same return shape, runs mysqlsh AdminAPI.

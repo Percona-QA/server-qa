@@ -271,6 +271,87 @@ class GroupReplication:
             self.active_nodes.append(name)
         self.wait_all_online(timeout=timeout)
 
+    def node_alive(self, name: str) -> bool:
+        """Return True if mysqld on the node still answers queries (liveness, not membership).
+
+        Probed with exec_mysql rather than `mysqladmin ping` through exec_command for the
+        same reason _wait_ready does: no shell is involved, so a root_password containing
+        shell metacharacters can't break the check. Useful during a network partition,
+        where the container has no connectivity but the process is expected to stay up.
+        """
+        return self.docker.exec_mysql(
+            name, "SELECT 1;", password=self.root_password, check=False, timeout=15
+        ).ok
+
+    def local_member_state(self, name: str) -> str:
+        """Return the node's own MEMBER_STATE as it sees itself, or '' when unreadable."""
+        # Matched on MEMBER_ID rather than MEMBER_HOST: MEMBER_HOST can be blank while the
+        # member is OFFLINE, which is exactly the state callers need to detect here.
+        result = self.docker.exec_mysql(
+            name,
+            "SELECT MEMBER_STATE FROM performance_schema.replication_group_members "
+            "WHERE MEMBER_ID=@@server_uuid;",
+            password=self.root_password,
+            check=False,
+            timeout=15,
+        )
+        return result.stdout.strip() if result.ok else ""
+
+    def isolate_node(self, name: str) -> None:
+        """Sever a node's network while leaving its mysqld running, and drop it from active_nodes.
+
+        The network-partition counterpart of stop_node(): the process stays up and keeps
+        its data, it just can no longer reach (or be reached by) the rest of the group.
+        Dropping it from active_nodes keeps get_primary(), the wait_* helpers and
+        verify_checksums() — all of which query active_nodes[0] — pointed at a survivor.
+        """
+        self.log(f"isolate node {name} (disconnect from {self.network})")
+        self.docker.network_disconnect(self.network, name)
+        if name in self.active_nodes:
+            self.active_nodes.remove(name)
+
+    def heal_node(self, name: str, timeout: int = 180, rejoin_grace: int = 30) -> bool:
+        """Reconnect an isolated node and wait until every member is ONLINE again.
+
+        Returns True when GR readmitted the member on its own, False when the explicit
+        STOP/START GROUP_REPLICATION fallback was needed. Both outcomes are valid and the
+        test can't control which one GR takes, so it is logged rather than asserted: a
+        member that was expelled can come back through group_replication_autorejoin_tries,
+        but one that merely sat blocked in the minority (the default
+        group_replication_unreachable_majority_timeout=0 never makes it leave the group)
+        has no auto-rejoin to trigger and only an explicit start gets it back.
+        """
+        self.log(f"heal node {name} (reconnect to {self.network})")
+        survivors = [node for node in self.active_nodes if node != name]
+        if not survivors:
+            raise RuntimeError(f"No surviving node to observe {name} rejoining from")
+        self.docker.network_connect(self.network, name)
+        self._wait_ready(name)
+        if name not in self.active_nodes:
+            self.active_nodes.append(name)
+
+        # Poll the group's view of the member, not the member's view of itself: a node
+        # blocked in a minority partition keeps reporting its own MEMBER_STATE as ONLINE,
+        # so its self-report says nothing about whether it has been readmitted.
+        self.log(f"wait up to {rejoin_grace}s for {name} to rejoin on its own")
+        deadline = time.time() + rejoin_grace
+        while time.time() < deadline:
+            state = self.member_states(survivors[0]).get(name, ("", ""))[0]
+            if state in ("ONLINE", "RECOVERING"):
+                self.wait_all_online(timeout=timeout)
+                return True
+            time.sleep(2)
+
+        self.log(f"{name} did not auto-rejoin in {rejoin_grace}s "
+                 f"(state {self.local_member_state(name)!r}); issuing START GROUP_REPLICATION")
+        # STOP is a no-op when GR is already stopped, so failures here are not interesting.
+        self.docker.exec_mysql(
+            name, "STOP GROUP_REPLICATION;", password=self.root_password, check=False
+        )
+        self.docker.exec_mysql(name, "START GROUP_REPLICATION;", password=self.root_password)
+        self.wait_all_online(timeout=timeout)
+        return False
+
     def _persist_gr_settings(self, nodes: list[str]) -> None:
         """Persist start_on_boot and the current group_seeds list on each given node."""
         start_on_boot = "ON" if self.start_on_boot else "OFF"

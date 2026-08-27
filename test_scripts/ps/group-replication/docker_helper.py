@@ -261,6 +261,55 @@ class DockerHelper:
         """Remove a container network, ignoring errors if it does not exist."""
         return self._run(["network", "rm", name], check=False)
 
+    def container_networks(self, name: str) -> list[str]:
+        """Return the names of the networks a container is currently attached to.
+
+        Empty when the container is detached from every network (see network_disconnect)
+        or when it cannot be inspected at all, so callers must not read [] as "absent".
+        """
+        result = self._run(
+            [
+                "inspect",
+                "-f",
+                '{{range $net, $_ := .NetworkSettings.Networks}}{{$net}}{{"\\n"}}{{end}}',
+                name,
+            ],
+            check=False,
+        )
+        if not result.ok:
+            return []
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    def network_connect(self, network: str, name: str) -> ExecResult | None:
+        """Attach a running container to a network, doing nothing if it is already attached.
+
+        The idempotence matters for reruns and for healing a partition that was only
+        partially applied: connecting twice otherwise fails with "already exists in network".
+        Returns None when the container was already attached.
+        """
+        if network in self.container_networks(name):
+            return None
+        return self._run(["network", "connect", network, name])
+
+    def network_disconnect(self, network: str, name: str, force: bool = False) -> ExecResult | None:
+        """Detach a running container from a network, doing nothing if it is not attached.
+
+        Unlike stop(), the process inside the container is untouched — it simply loses
+        connectivity — which is what makes this usable for network-partition tests.
+        Returns None when the container was not attached in the first place.
+
+        Note: reconnecting later does not restore the container's published host port
+        mappings (the -p flags given at create time). Nothing in this suite reaches nodes
+        from the host, but a healed node is no longer reachable on its host port.
+        """
+        if network not in self.container_networks(name):
+            return None
+        args = ["network", "disconnect"]
+        if force:
+            args.append("--force")
+        args.extend([network, name])
+        return self._run(args)
+
     def volume_remove(self, name: str) -> ExecResult:
         """Remove a container volume, ignoring errors if it does not exist."""
         return self._run(["volume", "rm", name], check=False)

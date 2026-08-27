@@ -18,7 +18,8 @@ group-replication/
 ├── test_basic.py               # smoke test: write on primary, read on every node
 ├── test_failover.py            # primary failover + recovery under sysbench load
 ├── test_scaling.py             # scale up 3->5 and down 5->3 under sysbench load
-└── test_backup_restore.py      # XtraBackup full+incremental backup and restore
+├── test_backup_restore.py      # XtraBackup full+incremental backup and restore
+└── test_secondary_isolation_ist.py # secondary network-partitioned, rejoins via IST
 ```
 
 ## Prerequisites
@@ -455,11 +456,26 @@ fixture and use:
 - `gr_cluster.get_bootstrap_node()` — name of the bootstrap node (e.g. `"ps0-1"` when running serially, or `"psgw0-1"` under pytest-xdist); for the
   currently-elected primary (which differs after failover) use `gr_cluster.get_primary()`.
 - `gr_cluster.containers` — list of all node names in start order.
+- `gr_cluster.stop_node(node)` / `gr_cluster.rejoin_node(node)` — kill and restart a
+  node's mysqld; the group sees an immediate member loss.
+- `gr_cluster.isolate_node(node)` / `gr_cluster.heal_node(node)` — network-partition a
+  node and heal it again. Unlike `stop_node()`, mysqld keeps running and only loses
+  connectivity, which is what exercises GR's expulsion, minority-block and distributed
+  recovery (IST/SST) paths. `heal_node()` returns `True` when GR rejoined the member on
+  its own and `False` when it needed an explicit `START GROUP_REPLICATION`.
+- `gr_cluster.node_alive(node)` — does mysqld still answer queries? (liveness, not
+  membership — the point of a partition test is that this stays `True`).
+- `gr_cluster.local_member_state(node)` — the node's own `MEMBER_STATE` as it sees itself
+  (`ONLINE` / `RECOVERING` / `ERROR` / `OFFLINE`), for the minority side of a partition.
 - `gr_cluster.docker` — the `DockerHelper`. Common methods:
   - `docker.exec_mysql(node, "SQL;", database=None)` → returns `ExecResult` with `.stdout`, `.stderr`, `.returncode`, `.ok`.
   - `docker.exec_mysqlsh(node, "<JS script>")` — same return shape, runs mysqlsh AdminAPI.
   - `docker.exec_command(node, "shell command")` — arbitrary `sh -c` inside the container.
   - `docker.stop(node)` / `docker.start(node)` — useful for failover-style tests.
+  - `docker.network_disconnect(network, node)` / `docker.network_connect(network, node)` —
+    the raw partition primitive behind `isolate_node()`/`heal_node()`; both are no-ops when
+    the container is already in the requested state. `docker.container_networks(node)`
+    reports what it is attached to right now.
 
 Skeleton:
 

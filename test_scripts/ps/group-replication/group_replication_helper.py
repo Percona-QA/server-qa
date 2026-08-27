@@ -368,6 +368,38 @@ class GroupReplication:
                 return states
             time.sleep(2)
 
+    def super_read_only(self, name: str) -> str:
+        """Return the node's @@GLOBAL.super_read_only as '1'/'0', or '' when unreadable.
+
+        check=False so a node that is mid-restart (or otherwise unreachable) yields '' for
+        the caller to poll on, rather than raising.
+        """
+        result = self.docker.exec_mysql(
+            name,
+            "SELECT @@GLOBAL.super_read_only;",
+            password=self.root_password,
+            check=False,
+            timeout=15,
+        )
+        return result.stdout.strip() if result.ok else ""
+
+    def wait_super_read_only(self, name: str, timeout: int = 90) -> bool:
+        """Poll until the node reports super_read_only=ON, returning whether it got there.
+
+        Returns a bool instead of raising so the caller can build a failure message from the
+        surrounding diagnostics (exit_state_action, local_member_state). The default timeout
+        leaves room for a group_replication_unreachable_majority_timeout window plus the
+        expulsion that follows it.
+        """
+        self.log(f"wait for {name} to become super_read_only")
+        deadline = time.time() + timeout
+        while True:
+            if self.super_read_only(name) == "1":
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(2)
+
     def clone_status(self, name: str) -> dict[str, str]:
         """Return the node's current/last clone operation as a column->value map, {} if never cloned.
 
@@ -584,12 +616,21 @@ class GroupReplication:
         # correctly; shlex.quote then protects the surrounding bash -c command (it chains
         # bootstrap && exec) from a password with spaces/$/quotes/etc.
         bootstrap_uri = shlex.quote(self._instance_uri(seed))
+        config = "/tmp/mysqlrouter/mysqlrouter.conf"
+        # Bootstrap only when there is no config yet. The container runs with
+        # restart=on-failure, and by the time a restart happens the bootstrap seed may be
+        # unreachable (a partition test can have isolated it) — re-bootstrapping then fails,
+        # exits non-zero and leaves the router crash-looping with its ports closed. The
+        # config written on first start survives a restart and already lists every metadata
+        # server, so a restart can simply reuse it.
         bootstrap = (
+            f"if [ ! -f {config} ]; then "
             f"mysqlrouter --bootstrap {bootstrap_uri} "
             "--directory /tmp/mysqlrouter "
             "--conf-set-option=DEFAULT.unknown_config_option=warning "
-            "--conf-bind-address=0.0.0.0 --force "
-            "&& exec mysqlrouter -c /tmp/mysqlrouter/mysqlrouter.conf"
+            "--conf-bind-address=0.0.0.0 --force || exit 1; "
+            "fi; "
+            f"exec mysqlrouter -c {config}"
         )
         self.docker.create(
             image=self.router_image,
@@ -768,7 +809,8 @@ class GroupReplication:
             last = routed or (result.stderr or "").strip()
             time.sleep(2)
         raise RuntimeError(
-            f"{self.proxy} {self.proxy_name} not ready / not routing to primary in {timeout}s (last: {last!r})"
+            f"{self.proxy} {self.proxy_name} not ready / not routing to primary in {timeout}s "
+            f"(container: {self.docker.container_state(self.proxy_name)!r}, last: {last!r})"
         )
 
     def _start_mysqld_node(self, index: int) -> str:

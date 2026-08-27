@@ -16,11 +16,12 @@ group-replication/
 ├── sysbench_helper.py          # Sysbench — ephemeral sysbench load container
 ├── xtrabackup_helper.py        # XtraBackup — full/incremental backup + restore
 ├── test_basic.py               # smoke test: write on primary, read on every node
-├── test_failover.py            # primary failover + recovery under sysbench load
+├── test_primary_shutdown_failover.py  # primary mysqld stopped: election + auto-rejoin
 ├── test_scaling.py             # scale up 3->5 and down 5->3 under sysbench load
 ├── test_backup_restore.py      # XtraBackup full+incremental backup and restore
 ├── test_secondary_isolation_ist.py # secondary network-partitioned, rejoins via IST
-└── test_secondary_isolation_sst.py # same, binlogs purged so it rejoins via clone/SST
+├── test_secondary_isolation_sst.py # same, binlogs purged so it rejoins via clone/SST
+└── test_primary_isolation_failover.py # primary partitioned: automatic failover
 ```
 
 ## Prerequisites
@@ -48,12 +49,12 @@ The fixture brings up 3 containers (by default `ps<workerid>-1`, `ps<workerid>-2
 `grnet-<workerid>` network (e.g. `grnet-0` / `ps0-1..3` when running serially, or `grnet-gw0` / `psgw0-1..3` under pytest-xdist), bootstraps the cluster via mysqlsh, runs the tests,
 then removes containers, volumes, and the network. Expect ~1 minute end-to-end.
 
-## Failover test (sysbench)
+## Failover test (primary shutdown)
 
-`test_failover.py` drives real load and exercises a primary outage:
+`test_primary_shutdown_failover.py` drives real load and exercises a primary outage:
 
 ```bash
-GR_VERBOSE=1 pytest -v test_failover.py
+GR_VERBOSE=1 pytest -v test_primary_shutdown_failover.py
 ```
 
 What it does: load initial data with sysbench (`prepare`, 4 tables × 10000 rows),
@@ -62,6 +63,9 @@ workload against the new primary and compare checksums across the online nodes,
 restart the stopped node (it **auto-rejoins** because the framework persists
 `group_replication_start_on_boot=ON`), then run another 20s workload against the
 full cluster and compare checksums across all three. Expect ~2-3 minutes.
+
+This kills mysqld, so the group loses the member immediately. For the variant where
+the process stays alive and only its network is cut, see the partition tests below.
 
 Sysbench notes:
 - Runs from the multi-arch image `pingwinator/sysbench:latest` (pulled on first
@@ -77,6 +81,45 @@ Sysbench notes:
 Relevant `GroupReplication` helpers: `get_primary()`, `stop_node()`,
 `rejoin_node()`, `wait_all_online()`, and `verify_checksums(database, nodes=...)`
 (defaults to the currently-online nodes).
+
+## Network partition tests
+
+Three tests injure the cluster with `docker network disconnect` instead of
+`docker stop`. That distinction is the whole point: the container keeps running, so
+**mysqld stays alive and keeps its data** — the group has to cope with a member it
+cannot reach rather than one that has cleanly departed. The node is put back with
+`docker network connect`. Expect ~3.5 minutes per proxy for each test.
+
+```bash
+GR_VERBOSE=1 pytest -v test_secondary_isolation_ist.py
+GR_VERBOSE=1 pytest -v test_secondary_isolation_sst.py
+GR_VERBOSE=1 pytest -v test_primary_isolation_failover.py
+```
+
+- **`test_secondary_isolation_ist.py`** — isolates one secondary, runs a 30s sysbench
+  workload so it falls behind, then heals while the donors still hold the binary logs
+  covering that window. Asserts the node came back by **IST**: no new row in
+  `performance_schema.clone_status`, and its `gtid_executed` caught up to the primary's.
+- **`test_secondary_isolation_sst.py`** — the same partition, but
+  `purge_binary_logs()` runs on **every** surviving node before the heal, so no donor can
+  serve an IST. Asserts the node came back by **clone/SST**: a *new* clone row with
+  `STATE=Completed, ERROR_NO=0`. Purging only the primary would not be enough — GR picks
+  its recovery donor from any `ONLINE` member.
+- **`test_primary_isolation_failover.py`** — isolates the **primary**. The two surviving
+  secondaries hold majority and must expel it, elect a new primary and become writable on
+  their own; the test measures and logs that failover window, checks the proxy re-routes
+  writes to the new primary, and confirms the old primary rejoins as a `SECONDARY`.
+  It sets `group_replication_unreachable_majority_timeout=30` on the primary beforehand:
+  at the default of `0` a minority-blocked member never leaves the group, so
+  `group_replication_exit_state_action` never fires and writes hang rather than being
+  rejected. With the timeout set, the old primary self-ejects and goes `super_read_only`,
+  and the test can assert that the write it refused exists on no node afterwards.
+
+Two notes for anyone writing more of these. `performance_schema.clone_status` is never
+empty on a secondary — `create()` adds every node with `recoveryMethod:'clone'`, so the
+only way to tell an IST from an SST is to compare snapshots taken before and after. And
+`COUNT_TRANSACTIONS_REMOTE_APPLIED` stays `0` after a recovery-channel catch-up, since it
+only counts what arrives once a member is already `ONLINE`; use `gtid_subset()` instead.
 
 ## Scaling test (sysbench)
 

@@ -314,6 +314,18 @@ class DockerHelper:
         """Remove a container volume, ignoring errors if it does not exist."""
         return self._run(["volume", "rm", name], check=False)
 
+    def container_state(self, name: str) -> str:
+        """Return a container's status and restart count ("running restarts=0"), or "" if unknown.
+
+        Handy in a timeout message: it distinguishes a container that is up but not yet
+        serving from one that has died or is stuck in a restart loop.
+        """
+        result = self._run(
+            ["inspect", "-f", "{{.State.Status}} restarts={{.RestartCount}}", name],
+            check=False,
+        )
+        return result.stdout.strip() if result.ok else ""
+
     def container_exists(self, name: str) -> bool:
         """Return True if a container with the exact given name exists (running or stopped)."""
         result = self._run(

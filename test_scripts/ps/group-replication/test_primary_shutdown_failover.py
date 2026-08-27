@@ -1,16 +1,19 @@
-"""Group Replication primary failover and recovery test.
+"""Group Replication primary shutdown failover and recovery test.
 
-Loads data via sysbench, stops the current primary to force the election of a new one,
-then resumes writes after the failover. Brings the stopped node back, confirms it
+Loads data via sysbench, stops the current primary's mysqld to force the election of a
+new one, then resumes writes after the failover. Brings the stopped node back, confirms it
 auto-rejoins and the cluster is whole again, verifying data stays consistent across all
 online nodes (matching checksums) at every stage.
+
+Killing the process makes the group lose the member immediately. For the variant where
+mysqld stays alive and only its network is severed, see test_primary_isolation_failover.py.
 """
 
 import pytest
 
 
 @pytest.mark.parametrize("gr_cluster", ["router", "haproxy"], indirect=True)
-def test_primary_failover_and_recovery(gr_cluster, sysbench):
+def test_primary_shutdown_failover_and_recovery(gr_cluster, sysbench):
     gr_cluster.verify()
 
     # Initial data load via sysbench (4 tables x 10000 rows) through the read/write endpoint.

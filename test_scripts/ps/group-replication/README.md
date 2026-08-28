@@ -21,7 +21,8 @@ group-replication/
 ├── test_backup_restore.py      # XtraBackup full+incremental backup and restore
 ├── test_secondary_isolation_ist.py # secondary network-partitioned, rejoins via IST
 ├── test_secondary_isolation_sst.py # same, binlogs purged so it rejoins via clone/SST
-└── test_primary_isolation_failover.py # primary partitioned: automatic failover
+├── test_primary_isolation_failover.py # primary partitioned: automatic failover
+└── test_majority_loss.py       # both secondaries cut off: quorum loss, no writes
 ```
 
 ## Prerequisites
@@ -94,6 +95,7 @@ cannot reach rather than one that has cleanly departed. The node is put back wit
 GR_VERBOSE=1 pytest -v test_secondary_isolation_ist.py
 GR_VERBOSE=1 pytest -v test_secondary_isolation_sst.py
 GR_VERBOSE=1 pytest -v test_primary_isolation_failover.py
+GR_VERBOSE=1 pytest -v test_majority_loss.py
 ```
 
 - **`test_secondary_isolation_ist.py`** — isolates one secondary, runs a 30s sysbench
@@ -114,6 +116,26 @@ GR_VERBOSE=1 pytest -v test_primary_isolation_failover.py
   `group_replication_exit_state_action` never fires and writes hang rather than being
   rejected. With the timeout set, the old primary self-ejects and goes `super_read_only`,
   and the test can assert that the write it refused exists on no node afterwards.
+
+- **`test_majority_loss.py`** — cuts off **both** secondaries at once, so every member is
+  alone and no side holds a majority. The surviving primary must refuse writes rather than
+  accept anything it can never replicate: the test asserts writes fail both directly and
+  through the proxy, and that neither exists on any node afterwards. Reconnecting the
+  secondaries restores a 2-of-3 quorum between them, then the old primary rejoins. Like the
+  primary-isolation test it sets `group_replication_unreachable_majority_timeout=30` on the
+  primary, so it leaves the group and goes `super_read_only` instead of blocking forever.
+
+  Recovery here is **not** automatic, which is worth knowing before writing more of these.
+  Reconnecting the network is not enough: a member blocked in a minority keeps its stale
+  view and still reports the others `UNREACHABLE`. The group has to be forced back with
+  `force_members()`, and XCOM refuses a forced list containing anyone it currently suspects
+  (*"Only alive members in the current configuration should be present in a forced
+  configuration list"*) — so it is forced down to a **single** member and the rest rejoin
+  with `restart_group_replication()`.
+
+Note that `partition_group()` detaches each node from the network individually, so the
+isolated nodes cannot see **each other** either — it produces N one-node partitions, not a
+split into two communicating sub-groups. Expressing the latter needs a second network.
 
 Two notes for anyone writing more of these. `performance_schema.clone_status` is never
 empty on a secondary — `create()` adds every node with `recoveryMethod:'clone'`, so the
@@ -141,7 +163,7 @@ Relevant `GroupReplication` helpers: `scale_up(count)`, `scale_down(count)`,
 original members (i.e. `<node_prefix><index>` — e.g. `ps0-4`, `ps0-5`, … with the default fixture).
 proxy is reconciled automatically after each change — MySQL Router auto-discovers
 members from cluster metadata; HAProxy's container is recreated so its static backend
-server list matches the new membership (`_refresh_proxy()`).
+server list matches the new membership (`refresh_proxy()`).
 
 ## Backup / restore test (XtraBackup)
 
@@ -514,6 +536,26 @@ fixture and use:
 - `gr_cluster.wait_node_isolated(node)` — block until an isolated node sees no group
   member but itself as `ONLINE`, and return its view. The minority side runs its own
   suspicion timer, so this is still needed after `wait_online_count()` has settled.
+- `gr_cluster.partition_group(nodes)` / `gr_cluster.heal_group(nodes)` — isolate or
+  reconnect several nodes at once. `partition_group()` gives each node its **own** one-node
+  partition (they lose contact with each other too), so it cannot express a split into two
+  communicating sub-groups. `heal_group()` only reconnects and restores `active_nodes`; it
+  does not wait for `ONLINE`, because after a majority loss members come back in stages.
+- `gr_cluster.wait_members_unreachable(nodes, node=...)` — block until the given members are
+  seen as `UNREACHABLE` from an observer node, and return that view.
+- `gr_cluster.force_members(nodes, node=...)` / `gr_cluster.restart_group_replication(node)` —
+  recovery from a lost quorum. Force the membership down to the single node you run it on
+  (XCOM rejects any member it currently suspects), then restart GR on the others so they
+  rejoin. `force_members()` always clears `group_replication_force_members` afterwards.
+- `gr_cluster.refresh_proxy()` — rebuild HAProxy so it picks up the current backend
+  addresses. Reconnecting a container to the network gives it a **new IP**, and HAProxy
+  resolves its backends once at config-parse time, so any test where a reconnected node
+  later becomes the primary must call this before `wait_proxy_ready()`. No-op for MySQL
+  Router, which resolves by name.
+- `wait_all_online(node=...)` / `wait_online_count(n, node=...)` — read membership from an
+  explicit node. Needed when the head of `active_nodes` is not in the group.
+- `gr_cluster.super_read_only(node)` / `gr_cluster.wait_super_read_only(node)` — read or wait
+  on a node's `@@super_read_only`, for the side of a partition that has lost quorum.
 - `gr_cluster.clone_status(node)` — the node's current/last clone operation as a
   column→value map (`ID`, `STATE`, `ERROR_NO`, `BEGIN_TIME`), `{}` if it never cloned.
   Every secondary already carries a completed row from the clone-based `addInstance` in

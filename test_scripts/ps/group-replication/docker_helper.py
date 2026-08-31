@@ -89,6 +89,7 @@ class DockerHelper:
         detach: bool = True,
         restart: str | None = None,
         platform: str | None = None,
+        cap_add: list[str] | None = None,
     ) -> ExecResult:
         """Create and start a long-lived (detached) container with the given config."""
         # These containers are long-lived (no --rm), so a run that crashed before teardown
@@ -110,6 +111,8 @@ class DockerHelper:
             args.extend(["--entrypoint", entrypoint])
         if restart:
             args.extend(["--restart", restart])
+        for cap in cap_add or []:
+            args.extend(["--cap-add", cap])
         for k, v in (environment or {}).items():
             args.extend(["-e", f"{k}={v}"])
         for vol in volumes or []:
@@ -313,6 +316,12 @@ class DockerHelper:
     def volume_remove(self, name: str) -> ExecResult:
         """Remove a container volume, ignoring errors if it does not exist."""
         return self._run(["volume", "rm", name], check=False)
+
+    def container_ip(self, name: str, network: str) -> str:
+        """Return a container's IPv4 address on the given network, or "" if it is not attached."""
+        template = f'{{{{(index .NetworkSettings.Networks "{network}").IPAddress}}}}'
+        result = self._run(["inspect", "-f", template, name], check=False)
+        return result.stdout.strip() if result.ok else ""
 
     def container_state(self, name: str) -> str:
         """Return a container's status and restart count ("running restarts=0"), or "" if unknown.

@@ -388,6 +388,54 @@ class GroupReplication:
                 check=False,
             )
 
+    def _peer_route(self, node: str, peers: list[str], action: str, check: bool) -> None:
+        """Add or delete reject routes on `node` for each peer's address on the cluster network."""
+        for peer in peers:
+            ip = self.docker.container_ip(peer, self.network)
+            if not ip:
+                raise RuntimeError(f"could not resolve {peer}'s address on {self.network}")
+            self.docker.exec_command(node, f"route {action} -host {ip} reject", check=check)
+
+    def sever_link(self, group_a: list[str], group_b: list[str]) -> None:
+        """Cut two halves of the cluster off from each other, leaving every IP and process intact.
+
+        Each node blackholes the other half's addresses with a local reject route, so the
+        two groups cannot talk to each other while each stays fully connected internally.
+        That is what an even split needs, and it cannot be done by moving containers between
+        networks: a container that changes network changes IP, and XCOM does not follow a
+        peer to a new address — the moved nodes lose each other as well.
+
+        Requires the containers to have NET_ADMIN (see _start_mysqld_node). Nodes in
+        `group_b` are dropped from active_nodes, so get_primary() and the wait_* helpers
+        keep observing `group_a`.
+        """
+        if not group_a or not group_b:
+            raise ValueError("both groups must be non-empty")
+        self.log(f"sever link: {', '.join(group_a)} | {', '.join(group_b)}")
+        for node in group_a:
+            self._peer_route(node, group_b, "add", check=True)
+        for node in group_b:
+            self._peer_route(node, group_a, "add", check=True)
+            if node in self.active_nodes:
+                self.active_nodes.remove(node)
+
+    def restore_link(self, group_a: list[str], group_b: list[str]) -> None:
+        """Remove the reject routes added by sever_link and put group_b back in active_nodes.
+
+        Only restores connectivity: members blocked during the split keep their stale view
+        and still need restart_group_replication() to rejoin.
+        """
+        if not group_a or not group_b:
+            raise ValueError("both groups must be non-empty")
+        self.log(f"restore link: {', '.join(group_a)} | {', '.join(group_b)}")
+        for node in group_a:
+            # check=False: a partially applied sever leaves nothing to delete on some nodes.
+            self._peer_route(node, group_b, "del", check=False)
+        for node in group_b:
+            self._peer_route(node, group_a, "del", check=False)
+            if node not in self.active_nodes:
+                self.active_nodes.append(node)
+
     def wait_members_unreachable(
         self, names: list[str], node: str, timeout: int = 60
     ) -> dict[str, tuple[str, str]]:
@@ -949,6 +997,11 @@ class GroupReplication:
             ports=[f"{self.base_host_port + index}:3306"],
             command=self._mysqld_args(server_id=index, hostname=name),
             restart="always",
+            # Lets a test blackhole individual peers from inside the container (see
+            # sever_link), which is the only way to split the cluster into two halves that
+            # each stay internally connected: moving containers between networks changes
+            # their IPs, and XCOM does not follow a peer to a new address.
+            cap_add=["NET_ADMIN"],
         )
         self.containers.append(name)
         self.node_index[name] = index

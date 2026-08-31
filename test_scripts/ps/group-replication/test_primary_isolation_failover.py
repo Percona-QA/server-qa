@@ -182,6 +182,36 @@ def test_primary_isolation_failover(gr_cluster, sysbench):
         ).stdout.strip()
         assert leaked == "0", f"rejected write leaked onto {node} ({leaked} rows)"
 
+    # The old primary came back on a *new* IP — reconnecting a container to the network
+    # reassigns one — and HAProxy resolved its backends once, at start time. Nothing above
+    # notices: the write backend is pinned to the new primary, whose address never changed.
+    # The read backend is what breaks, so rebuild the proxy now that the cluster is whole.
+    gr_cluster.refresh_proxy()
+    gr_cluster.wait_proxy_ready(timeout=300)
+
+    # ...and prove it: the reconnected node has to be serving reads again. A stale backend
+    # shows up exactly here — HAProxy health-checks the dead address, takes that node out of
+    # rotation, and it never answers on the read endpoint no matter how often we ask.
+    ro_host, ro_port = gr_cluster.ro_endpoint()
+    seen: set[str] = set()
+    deadline = time.monotonic() + 60
+    while old_primary not in seen and time.monotonic() < deadline:
+        probe = gr_cluster.docker.exec_mysql(
+            new_primary,
+            "SELECT @@hostname;",
+            password=gr_cluster.root_password,
+            host=ro_host,
+            port=ro_port,
+            check=False,
+            timeout=15,
+        )
+        if probe.ok:
+            seen.add(probe.stdout.strip())
+    assert old_primary in seen, (
+        f"{old_primary} is not serving reads after rejoining — the {gr_cluster.proxy} read "
+        f"endpoint only ever answered from {sorted(seen)}"
+    )
+
     gr_cluster.verify()
     gr_cluster.verify_checksums("sbtest", timeout=120)
 

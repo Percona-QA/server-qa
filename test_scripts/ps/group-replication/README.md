@@ -22,7 +22,8 @@ group-replication/
 ├── test_secondary_isolation_ist.py # secondary network-partitioned, rejoins via IST
 ├── test_secondary_isolation_sst.py # same, binlogs purged so it rejoins via clone/SST
 ├── test_primary_isolation_failover.py # primary partitioned: automatic failover
-└── test_majority_loss.py       # both secondaries cut off: quorum loss, no writes
+├── test_majority_loss.py       # both secondaries cut off: quorum loss, no writes
+└── test_equal_partition.py     # 4-node 2-2 split: split-brain prevention
 ```
 
 ## Prerequisites
@@ -96,6 +97,7 @@ GR_VERBOSE=1 pytest -v test_secondary_isolation_ist.py
 GR_VERBOSE=1 pytest -v test_secondary_isolation_sst.py
 GR_VERBOSE=1 pytest -v test_primary_isolation_failover.py
 GR_VERBOSE=1 pytest -v test_majority_loss.py
+GR_VERBOSE=1 pytest -v test_equal_partition.py
 ```
 
 - **`test_secondary_isolation_ist.py`** — isolates one secondary, runs a 30s sysbench
@@ -111,8 +113,10 @@ GR_VERBOSE=1 pytest -v test_majority_loss.py
   secondaries hold majority and must expel it, elect a new primary and become writable on
   their own; the test measures and logs that failover window, checks the proxy re-routes
   writes to the new primary, and confirms the old primary rejoins as a `SECONDARY`.
-  It sets `group_replication_unreachable_majority_timeout=30` on the primary beforehand:
-  at the default of `0` a minority-blocked member never leaves the group, so
+  After the heal it rebuilds the proxy and checks the rejoined node is serving reads again —
+  it came back on a new address, and without that rebuild HAProxy drops it from the read
+  backend for good. It sets `group_replication_unreachable_majority_timeout=30` on the
+  primary beforehand: at the default of `0` a minority-blocked member never leaves the group, so
   `group_replication_exit_state_action` never fires and writes hang rather than being
   rejected. With the timeout set, the old primary self-ejects and goes `super_read_only`,
   and the test can assert that the write it refused exists on no node afterwards.
@@ -133,9 +137,27 @@ GR_VERBOSE=1 pytest -v test_majority_loss.py
   configuration list"*) — so it is forced down to a **single** member and the rest rejoin
   with `restart_group_replication()`.
 
-Note that `partition_group()` detaches each node from the network individually, so the
-isolated nodes cannot see **each other** either — it produces N one-node partitions, not a
-split into two communicating sub-groups. Expressing the latter needs a second network.
+- **`test_equal_partition.py`** — the only 4-node test. Splits the cluster down the middle
+  into two halves of two, each intact internally but holding just 2 of 4. Neither half may
+  accept a write or promote a primary of its own. GR cannot resolve an even split by itself:
+  recovery is an operator running `force_members()` on the chosen half — and unlike the
+  majority-loss case the forced list can name **both** its members, since they are alive and
+  can see each other. Roughly 4 minutes per proxy.
+
+Two things about splitting the cluster. `partition_group()` detaches each node from the
+network individually, so the isolated nodes cannot see **each other** either — it produces N
+one-node partitions. Moving a pair onto a second network does *not* fix that: a container
+that changes network changes IP, and XCOM does not follow a peer to a new address, so the
+moved pair lose each other too (verified). A split into two internally-connected halves
+therefore uses `sever_link()`, which blackholes the other half's addresses with reject routes
+inside each container, leaving every IP and process untouched. That is why node containers
+run with `NET_ADMIN`.
+
+And one about writes during a partition. With `group_replication_unreachable_majority_timeout`
+at its default `0`, a write to a primary that has lost quorum **blocks** rather than failing —
+and a blocked write is not discarded. It is parked awaiting consensus, so it commits once that
+half is unblocked, even if the client that issued it has gone. Assert that no write becomes
+*visible* while the split is in effect, rather than that it never lands.
 
 Two notes for anyone writing more of these. `performance_schema.clone_status` is never
 empty on a secondary — `create()` adds every node with `recoveryMethod:'clone'`, so the
@@ -514,6 +536,11 @@ docker network rm grnet-<workerid>
 Add files named `test_*.py` in this directory. Request the `gr_cluster`
 fixture and use:
 
+The fixture's indirect parameter is normally just a proxy name (`"router"` / `"haproxy"`),
+which gives a 3-node cluster. For a different size pass a `(proxy, num_nodes)` tuple, wrapped
+in `pytest.param(..., id=proxy)` so the node id stays readable — see
+`test_equal_partition.py`, which asks for 4 nodes.
+
 - `gr_cluster.exec_sql("SQL;")` — run application SQL through the read/write
   endpoint (the router when enabled, else the primary). Use this for DDL/DML
   instead of targeting a node directly, so the test is proxy-agnostic.
@@ -536,6 +563,10 @@ fixture and use:
 - `gr_cluster.wait_node_isolated(node)` — block until an isolated node sees no group
   member but itself as `ONLINE`, and return its view. The minority side runs its own
   suspicion timer, so this is still needed after `wait_online_count()` has settled.
+- `gr_cluster.sever_link(group_a, group_b)` / `gr_cluster.restore_link(group_a, group_b)` —
+  cut two halves of the cluster off from each other with reject routes, leaving every IP and
+  process intact. Use this, not `partition_group()`, when both halves must stay internally
+  connected. Nodes in `group_b` drop out of `active_nodes`.
 - `gr_cluster.partition_group(nodes)` / `gr_cluster.heal_group(nodes)` — isolate or
   reconnect several nodes at once. `partition_group()` gives each node its **own** one-node
   partition (they lose contact with each other too), so it cannot express a split into two
@@ -549,9 +580,11 @@ fixture and use:
   rejoin. `force_members()` always clears `group_replication_force_members` afterwards.
 - `gr_cluster.refresh_proxy()` — rebuild HAProxy so it picks up the current backend
   addresses. Reconnecting a container to the network gives it a **new IP**, and HAProxy
-  resolves its backends once at config-parse time, so any test where a reconnected node
-  later becomes the primary must call this before `wait_proxy_ready()`. No-op for MySQL
-  Router, which resolves by name.
+  resolves its backends once at config-parse time, so **any** test that reconnects a node
+  must call this before `wait_proxy_ready()` — not only ones where that node goes on to
+  become the primary. A rejoined *secondary* on a stale address is health-checked out of the
+  read backend and silently stops serving reads, which is easy to miss because the write
+  path still works. No-op for MySQL Router, which resolves by name.
 - `wait_all_online(node=...)` / `wait_online_count(n, node=...)` — read membership from an
   explicit node. Needed when the head of `active_nodes` is not in the group.
 - `gr_cluster.super_read_only(node)` / `gr_cluster.wait_super_read_only(node)` — read or wait

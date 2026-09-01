@@ -1,6 +1,5 @@
 """Group Replication primary isolation and automatic failover test.
 
-Scenario 5 of gr_partition_scenarios.md, and the most critical real-world failure path.
 The PRIMARY of a 3-node cluster is network-partitioned with `docker network disconnect` —
 its mysqld keeps running, it just loses connectivity. The two surviving secondaries hold
 majority, so they must detect the loss, expel the old primary, elect a new one and become

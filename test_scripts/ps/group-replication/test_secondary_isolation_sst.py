@@ -1,13 +1,12 @@
 """Group Replication minority node isolation with SST (clone) recovery test.
 
-Scenario 3 of gr_partition_scenarios.md, the mirror image of the IST test. A single
-secondary of a 3-node cluster is network-partitioned with `docker network disconnect` —
-its mysqld keeps running, it just loses connectivity — while the primary keeps majority
-and accepts writes. Before healing, the binary logs are purged on every surviving node so
-no donor can serve an Incremental State Transfer, forcing Group Replication to fall back
-to a full clone. Confirms mysqld stayed alive throughout the partition, that a new clone
-really did run and completed without error, and that data is consistent across all three
-nodes afterwards.
+This is the mirror image of the IST test. A single secondary of a 3-node cluster is
+network-partitioned with `docker network disconnect` — its mysqld keeps running, it just
+loses connectivity — while the primary keeps majority and accepts writes. Before healing,
+the binary logs are purged on every surviving node so no donor can serve an Incremental
+State Transfer, forcing Group Replication to fall back to a full clone. Confirms mysqld
+stayed alive throughout the partition, that a new clone really did run and completed
+without error, and that data is consistent across all three nodes afterwards.
 
 Percona Server 8.4 uses the clone plugin for distributed recovery, so this exercises
 clone-based SST rather than the XtraBackup SST path.

@@ -1,11 +1,10 @@
 """Group Replication equal partition and split-brain prevention test.
 
-Scenario 4 of gr_partition_scenarios.md, and the only one needing a 4-node cluster. The
-cluster is split down the middle into two halves of two, each half intact internally but
-holding only 2 of 4 — short of the 3-of-4 majority. Neither side may accept a write and
-neither may elect a primary of its own, because either would be a split brain. Group
-Replication cannot recover from an even split on its own: an operator has to choose a half
-and force its membership.
+This test is the only one needing a 4-node cluster. The cluster is split down the middle
+into two halves of two, each half intact internally but holding only 2 of 4 — short of the
+3-of-4 majority. Neither side may accept a write and neither may elect a primary of its own,
+because either would be a split brain. Group Replication cannot recover from an even split
+on its own: an operator has to choose a half and force its membership.
 
 The split is done with reject routes inside the containers (sever_link), not by moving
 containers between networks. A container that changes network changes IP, and XCOM does not

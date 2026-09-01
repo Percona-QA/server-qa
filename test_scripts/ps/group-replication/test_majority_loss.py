@@ -1,11 +1,11 @@
 """Group Replication majority loss and quorum failure tolerance test.
 
-Scenario 1 of gr_partition_scenarios.md. Both secondaries of a 3-node cluster are
-network-partitioned at the same time with `docker network disconnect` — their mysqld keeps
-running, they just lose connectivity. That leaves every member alone in a one-node
-partition, so no side holds a majority and the cluster must accept no writes at all: the
-surviving primary goes read-only rather than risk diverging. Reconnecting the secondaries
-restores a 2-of-3 quorum between them, after which the old primary rejoins.
+Both secondaries of a 3-node cluster are network-partitioned at the same time with
+`docker network disconnect` — their mysqld keeps running, they just lose connectivity.
+That leaves every member alone in a one-node partition, so no side holds a majority and
+the cluster must accept no writes at all: the surviving primary goes read-only rather than
+risk diverging. Reconnecting the secondaries restores a 2-of-3 quorum between them, after
+which the old primary rejoins.
 
 Unlike the other partition tests, which always leave a writable majority behind, this one
 removes the majority itself. It asserts that writes are refused both directly on the

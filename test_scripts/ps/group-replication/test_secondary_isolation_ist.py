@@ -1,12 +1,12 @@
 """Group Replication minority node isolation with IST recovery test.
 
-Scenario 2 of gr_partition_scenarios.md. A single secondary of a 3-node cluster is
-network-partitioned with `docker network disconnect` — its mysqld keeps running, it just
-loses connectivity — while the primary keeps majority and accepts writes. The node is
-healed before the donor can purge its binary logs, so Group Replication catches it up
-with an Incremental State Transfer rather than a full clone. Confirms mysqld stayed alive
-throughout the partition, that no new clone was taken, that the node actually applied the
-transactions it missed, and that data is consistent across all three nodes afterwards.
+A single secondary of a 3-node cluster is network-partitioned with `docker network disconnect`
+— its mysqld keeps running, it just loses connectivity — while the primary keeps majority and
+accepts writes. The node is healed before the donor can purge its binary logs, so Group
+Replication catches it up with an Incremental State Transfer rather than a full clone.
+Confirms mysqld stayed alive throughout the partition, that no new clone was taken, that the
+node actually applied the transactions it missed, and that data is consistent across all three
+nodes afterwards.
 """
 
 import pytest

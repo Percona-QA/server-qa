@@ -267,8 +267,12 @@ class DockerHelper:
     def container_networks(self, name: str) -> list[str]:
         """Return the names of the networks a container is currently attached to.
 
-        Empty when the container is detached from every network (see network_disconnect)
-        or when it cannot be inspected at all, so callers must not read [] as "absent".
+        Empty means attached to nothing — the normal state of a node that
+        network_disconnect() has isolated, not an error. An inspect that fails (no such
+        container, no daemon) raises rather than returning [], so callers can act on the
+        answer instead of guessing: reporting a failure as "attached to nothing" would make
+        network_disconnect() skip the disconnect and report success, leaving a partition
+        test reasoning about a partition that never happened.
         """
         result = self._run(
             [
@@ -277,10 +281,7 @@ class DockerHelper:
                 '{{range $net, $_ := .NetworkSettings.Networks}}{{$net}}{{"\\n"}}{{end}}',
                 name,
             ],
-            check=False,
         )
-        if not result.ok:
-            return []
         return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
     def network_connect(self, network: str, name: str) -> ExecResult | None:

@@ -560,9 +560,11 @@ in `pytest.param(..., id=proxy)` so the node id stays readable — see
   membership — the point of a partition test is that this stays `True`).
 - `gr_cluster.local_member_state(node)` — the node's own `MEMBER_STATE` as it sees itself
   (`ONLINE` / `RECOVERING` / `ERROR` / `OFFLINE`), for the minority side of a partition.
-- `gr_cluster.wait_node_isolated(node)` — block until an isolated node sees no group
-  member but itself as `ONLINE`, and return its view. The minority side runs its own
-  suspicion timer, so this is still needed after `wait_online_count()` has settled.
+- `gr_cluster.wait_node_isolated(node)` — poll until an isolated node sees no group
+  member but itself as `ONLINE`, and return its view. On timeout it returns the last view
+  it read rather than raising, so the caller has to assert on what comes back. The minority
+  side runs its own suspicion timer, so this is still needed after `wait_online_count()`
+  has settled.
 - `gr_cluster.sever_link(group_a, group_b)` / `gr_cluster.restore_link(group_a, group_b)` —
   cut two halves of the cluster off from each other with reject routes, leaving every IP and
   process intact. Use this, not `partition_group()`, when both halves must stay internally
@@ -572,8 +574,10 @@ in `pytest.param(..., id=proxy)` so the node id stays readable — see
   partition (they lose contact with each other too), so it cannot express a split into two
   communicating sub-groups. `heal_group()` only reconnects and restores `active_nodes`; it
   does not wait for `ONLINE`, because after a majority loss members come back in stages.
-- `gr_cluster.wait_members_unreachable(nodes, node=...)` — block until the given members are
-  seen as `UNREACHABLE` from an observer node, and return that view.
+- `gr_cluster.wait_members_unreachable(nodes, node=...)` — poll until the given members are
+  seen as `UNREACHABLE` from an observer node, and return that view. Same contract as
+  `wait_node_isolated()`: a timeout returns the last view read rather than raising, so
+  assert on what comes back.
 - `gr_cluster.force_members(nodes, node=...)` / `gr_cluster.restart_group_replication(node)` —
   recovery from a lost quorum. Force the membership down to the single node you run it on
   (XCOM rejects any member it currently suspects), then restart GR on the others so they
@@ -586,9 +590,12 @@ in `pytest.param(..., id=proxy)` so the node id stays readable — see
   read backend and silently stops serving reads, which is easy to miss because the write
   path still works. No-op for MySQL Router, which resolves by name.
 - `wait_all_online(node=...)` / `wait_online_count(n, node=...)` — read membership from an
-  explicit node. Needed when the head of `active_nodes` is not in the group.
-- `gr_cluster.super_read_only(node)` / `gr_cluster.wait_super_read_only(node)` — read or wait
-  on a node's `@@super_read_only`, for the side of a partition that has lost quorum.
+  explicit node. Needed when the head of `active_nodes` is not in the group. Unlike the two
+  above, these **raise** on timeout.
+- `gr_cluster.super_read_only(node)` / `gr_cluster.wait_super_read_only(node)` — read a
+  node's `@@super_read_only`, or poll until it is `ON`, for the side of a partition that has
+  lost quorum. `wait_super_read_only()` returns whether it got there rather than raising, so
+  assert on the result.
 - `gr_cluster.clone_status(node)` — the node's current/last clone operation as a
   column→value map (`ID`, `STATE`, `ERROR_NO`, `BEGIN_TIME`), `{}` if it never cloned.
   Every secondary already carries a completed row from the clone-based `addInstance` in

@@ -442,7 +442,12 @@ class GroupReplication:
     def wait_members_unreachable(
         self, names: list[str], node: str, timeout: int = 60
     ) -> dict[str, tuple[str, str]]:
-        """Wait until every named member is seen as UNREACHABLE from `node`; return that view."""
+        """Poll until every named member is seen as UNREACHABLE from `node`; return that view.
+
+        On timeout the last view read is returned rather than raising, so the caller can
+        assert on the state actually observed and report it — same contract as
+        wait_node_isolated().
+        """
         self.log(f"wait for {', '.join(names)} to be UNREACHABLE from {node}")
         deadline = time.time() + timeout
         while True:

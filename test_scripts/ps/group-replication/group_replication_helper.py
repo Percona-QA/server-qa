@@ -324,9 +324,12 @@ class GroupReplication:
         """Isolate several nodes at once, each into its own one-node partition.
 
         A loop over isolate_node(). Because each node is detached from the network entirely,
-        they lose contact with *each other* as well as with the rest of the group — so this
-        cannot express a split into two communicating sub-groups (that needs a second
-        network, not a disconnect).
+        they lose contact with *each other* as well as with the rest of the group, so this
+        cannot express a split into two communicating sub-groups — use sever_link() for
+        that, which blackholes one half from the other with reject routes and leaves every
+        address intact. Moving a pair onto a second network does not work: they get new IPs,
+        and XCOM does not follow a peer to a new address, so the moved nodes lose each other
+        too.
         """
         if not names:
             raise ValueError("names must not be empty")

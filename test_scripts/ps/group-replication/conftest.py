@@ -51,15 +51,29 @@ def gr_cluster(request):
     # bare proxy name — wrapped in pytest.param(..., id=proxy), or the node id degrades to
     # "gr_cluster0". Everything else about the fixture is the same either way.
     param = getattr(request, "param", None)
-    proxy, num_nodes = param if isinstance(param, tuple) else (param, 3)
-    if proxy is None:
+    if param is None:
         raise pytest.UsageError(
             'gr_cluster requires a proxy via indirect parametrization, e.g. '
             '@pytest.mark.parametrize("gr_cluster", ["haproxy"], indirect=True)'
         )
-    if proxy not in PROXIES:
+    if isinstance(param, tuple):
+        if len(param) != 2:
+            raise pytest.UsageError(
+                f"gr_cluster tuple parameter must be (proxy, num_nodes); got {param!r}"
+            )
+        proxy, num_nodes = param
+    else:
+        proxy, num_nodes = param, 3
+    # isinstance before the lookup: an unhashable proxy (e.g. a list) would otherwise raise
+    # TypeError from inside the dict membership test rather than reporting the bad value.
+    if not isinstance(proxy, str) or proxy not in PROXIES:
         raise pytest.UsageError(
             f"unknown gr_cluster proxy {proxy!r}; valid options: {sorted(PROXIES)}"
+        )
+    # bool is a subclass of int, so without the isinstance guard True would pass as 1 node.
+    if isinstance(num_nodes, bool) or not isinstance(num_nodes, int) or num_nodes < 1:
+        raise pytest.UsageError(
+            f"gr_cluster num_nodes must be a positive integer; got {num_nodes!r}"
         )
     try:
         helper = DockerHelper()

@@ -285,6 +285,34 @@ class GroupReplication:
             time.sleep(2)
         raise RuntimeError(f"Expected {expected} ONLINE members within {timeout}s (last: {last})")
 
+    def wait_membership(
+        self, names: list[str], node: str, timeout: int = 120
+    ) -> dict[str, tuple[str, str]]:
+        """Wait until `node` sees exactly `names` as the group and all of them ONLINE.
+
+        Stricter than wait_online_count(), and for a reconfiguration it is the only one that
+        means anything: after a partition the ONLINE count often already equals the target
+        before anything has been done — a lone survivor is one ONLINE member, an even split
+        leaves each half with its own two — so counting cannot tell a settled membership from
+        the state that preceded it. Comparing the whole view can: the members that were
+        dropped disappear from it.
+
+        Returns the settled view; raises with the last one seen on timeout.
+        """
+        expected = set(names)
+        self.log(f"wait for membership on {node} to settle to {', '.join(sorted(expected))}")
+        deadline = time.time() + timeout
+        while True:
+            states = self.member_states(node)
+            if set(states) == expected and all(s == "ONLINE" for s, _ in states.values()):
+                return states
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"membership on {node} did not settle to {sorted(expected)} within "
+                    f"{timeout}s (last: {states})"
+                )
+            time.sleep(2)
+
     def rejoin_node(self, name: str, timeout: int = 180) -> None:
         """Restart a stopped node and wait for it to auto-rejoin and all members to be ONLINE."""
         self.rejoin_nodes([name], timeout=timeout)
@@ -414,7 +442,10 @@ class GroupReplication:
             password=self.root_password,
         )
         try:
-            return self.wait_online_count(len(names), timeout=timeout, node=node)
+            # Not wait_online_count(): the count it would wait for is already satisfied
+            # before the force in every partition this is used for, so it would return
+            # without confirming anything and hand back the pre-force view.
+            return self.wait_membership(names, node=node, timeout=timeout)
         finally:
             self.docker.exec_mysql(
                 node,

@@ -16,6 +16,10 @@ is severed, see test_primary_isolation_failover.py.
 
 import pytest
 
+# Past participle per fault, so assertion messages read as English. Conjugating the
+# parameter directly with f"{fault}ed" spells "stoped".
+FAULT_PAST = {"stop": "stopped", "kill": "killed"}
+
 
 @pytest.mark.parametrize("gr_cluster", ["router", "haproxy"], indirect=True)
 @pytest.mark.parametrize("fault", ["stop", "kill"])
@@ -40,10 +44,14 @@ def test_primary_shutdown_failover_and_recovery(gr_cluster, sysbench, fault):
     # out instead of being told — so the default settle budget matters more here.
     states = gr_cluster.wait_online_count(2)
     online_hosts = [host for host, (state, _) in states.items() if state == "ONLINE"]
-    assert old_primary not in online_hosts, f"{fault}ed node {old_primary} still ONLINE: {states}"
+    assert old_primary not in online_hosts, (
+        f"{FAULT_PAST[fault]} node {old_primary} still ONLINE: {states}"
+    )
 
     new_primary = gr_cluster.get_primary()
-    assert new_primary != old_primary, f"primary did not change after {fault} of {old_primary}"
+    assert new_primary != old_primary, (
+        f"primary did not change after {old_primary} was {FAULT_PAST[fault]}"
+    )
     assert new_primary in gr_cluster.active_nodes
 
     # The two surviving members must be exactly one PRIMARY (the newly elected one)

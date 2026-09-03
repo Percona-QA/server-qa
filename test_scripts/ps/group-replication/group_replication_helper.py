@@ -209,6 +209,19 @@ class GroupReplication:
         if name in self.active_nodes:
             self.active_nodes.remove(name)
 
+    def kill_node(self, name: str) -> None:
+        """SIGKILL a node's mysqld and remove it from the active-nodes list.
+
+        Unlike stop_node()'s SIGTERM — where mysqld shuts down cleanly and Group Replication
+        announces the member leaving, so the group loses it at once — a kill leaves the group
+        to notice a dead peer by timeout. Revive it with rejoin_node()/rejoin_nodes(), same
+        as a stopped node.
+        """
+        self.log(f"kill node {name}")
+        self.docker.kill(name)
+        if name in self.active_nodes:
+            self.active_nodes.remove(name)
+
     def member_states(self, node: str) -> dict[str, tuple[str, str]]:
         """Read the host->(state, role) map of all group members as seen from the given node."""
         result = self.docker.exec_mysql(
@@ -227,49 +240,455 @@ class GroupReplication:
                     states[parts[0]] = (parts[1], parts[2])
         return states
 
-    def wait_all_online(self, timeout: int = 180) -> None:
-        """Wait until every expected member reports the ONLINE state, or time out."""
+    def wait_all_online(self, timeout: int = 180, node: str | None = None) -> None:
+        """Wait until every expected member reports the ONLINE state, or time out.
+
+        Membership is read from `node`, defaulting to the first active node. Pass one
+        explicitly when the head of active_nodes is not a member of the group (e.g. after a
+        majority loss, where a node that left the group only ever reports itself).
+        """
         if not self.active_nodes:
             raise RuntimeError("No active nodes")
+        observer = node or self.active_nodes[0]
         self.log("wait for all members ONLINE")
         deadline = time.time() + timeout
         last: dict[str, tuple[str, str]] = {}
         while time.time() < deadline:
-            states = self.member_states(self.active_nodes[0])
+            states = self.member_states(observer)
             last = states
             if len(states) == self.num_nodes and all(s == "ONLINE" for s, _ in states.values()):
                 return
             time.sleep(2)
         raise RuntimeError(f"Not all members ONLINE within {timeout}s (last: {last})")
 
-    def wait_online_count(self, expected: int, timeout: int = 120) -> dict[str, tuple[str, str]]:
+    def wait_online_count(
+        self, expected: int, timeout: int = 120, node: str | None = None
+    ) -> dict[str, tuple[str, str]]:
         """Wait until exactly `expected` group members report ONLINE, returning their state map.
 
         Used after intentionally stopping a node: failure detection and expulsion take a
         few seconds, so the group needs a moment to settle to the smaller size before its
-        membership is inspected. Polls a surviving node; raises on timeout.
+        membership is inspected. Membership is read from `node`, defaulting to the first
+        active node; raises on timeout.
         """
         if not self.active_nodes:
             raise RuntimeError("No active nodes")
+        observer = node or self.active_nodes[0]
         self.log(f"wait for exactly {expected} members ONLINE")
         deadline = time.time() + timeout
         last: dict[str, tuple[str, str]] = {}
         while time.time() < deadline:
-            states = self.member_states(self.active_nodes[0])
+            states = self.member_states(observer)
             last = states
             if sum(1 for state, _ in states.values() if state == "ONLINE") == expected:
                 return states
             time.sleep(2)
         raise RuntimeError(f"Expected {expected} ONLINE members within {timeout}s (last: {last})")
 
+    def wait_membership(
+        self, names: list[str], node: str, timeout: int = 120
+    ) -> dict[str, tuple[str, str]]:
+        """Wait until `node` sees exactly `names` as the group and all of them ONLINE.
+
+        Stricter than wait_online_count(), and for a reconfiguration it is the only one that
+        means anything: after a partition the ONLINE count often already equals the target
+        before anything has been done — a lone survivor is one ONLINE member, an even split
+        leaves each half with its own two — so counting cannot tell a settled membership from
+        the state that preceded it. Comparing the whole view can: the members that were
+        dropped disappear from it.
+
+        Returns the settled view; raises with the last one seen on timeout.
+        """
+        expected = set(names)
+        self.log(f"wait for membership on {node} to settle to {', '.join(sorted(expected))}")
+        deadline = time.time() + timeout
+        while True:
+            states = self.member_states(node)
+            if set(states) == expected and all(s == "ONLINE" for s, _ in states.values()):
+                return states
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"membership on {node} did not settle to {sorted(expected)} within "
+                    f"{timeout}s (last: {states})"
+                )
+            time.sleep(2)
+
     def rejoin_node(self, name: str, timeout: int = 180) -> None:
         """Restart a stopped node and wait for it to auto-rejoin and all members to be ONLINE."""
-        self.log(f"start node {name} (auto-rejoin)")
-        self.docker.start(name)
+        self.rejoin_nodes([name], timeout=timeout)
+
+    def rejoin_nodes(self, names: list[str], timeout: int = 180) -> None:
+        """Restart several stopped nodes, then wait once for every member to be ONLINE.
+
+        Taking a list matters: rejoin_node() waits for the whole group after each node, so
+        calling it twice cannot bring back a pair — the first call would be waiting on a
+        member that is still down.
+        """
+        if not names:
+            raise ValueError("names must not be empty")
+        self.log(f"start node(s) {', '.join(names)} (auto-rejoin)")
+        for name in names:
+            self.docker.start(name)
+        for name in names:
+            self._wait_ready(name)
+            if name not in self.active_nodes:
+                self.active_nodes.append(name)
+            # The cluster may have changed shape while this node was down — scale_up() only
+            # persists settings on members that are up — so refresh its seed list. verify()
+            # compares group_replication_group_seeds against the current membership on every
+            # container, so a returning node with a stale list fails there rather than
+            # anywhere informative.
+            self._persist_gr_settings([name])
+        self.wait_all_online(timeout=timeout)
+
+    def node_alive(self, name: str) -> bool:
+        """Return True if mysqld on the node still answers queries (liveness, not membership).
+
+        Probed with exec_mysql rather than `mysqladmin ping` through exec_command for the
+        same reason _wait_ready does: no shell is involved, so a root_password containing
+        shell metacharacters can't break the check. Useful during a network partition,
+        where the container has no connectivity but the process is expected to stay up.
+        """
+        return self.docker.exec_mysql(
+            name, "SELECT 1;", password=self.root_password, check=False, timeout=15
+        ).ok
+
+    def local_member_state(self, name: str) -> str:
+        """Return the node's own MEMBER_STATE as it sees itself, or '' when unreadable."""
+        # Matched on MEMBER_ID rather than MEMBER_HOST: MEMBER_HOST can be blank while the
+        # member is OFFLINE, which is exactly the state callers need to detect here.
+        result = self.docker.exec_mysql(
+            name,
+            "SELECT MEMBER_STATE FROM performance_schema.replication_group_members "
+            "WHERE MEMBER_ID=@@server_uuid;",
+            password=self.root_password,
+            check=False,
+            timeout=15,
+        )
+        return result.stdout.strip() if result.ok else ""
+
+    def isolate_node(self, name: str) -> None:
+        """Sever a node's network while leaving its mysqld running, and drop it from active_nodes.
+
+        The network-partition counterpart of stop_node(): the process stays up and keeps
+        its data, it just can no longer reach (or be reached by) the rest of the group.
+        Dropping it from active_nodes keeps get_primary(), the wait_* helpers and
+        verify_checksums() — all of which query active_nodes[0] — pointed at a survivor.
+        """
+        self.log(f"isolate node {name} (disconnect from {self.network})")
+        self.docker.network_disconnect(self.network, name)
+        if name in self.active_nodes:
+            self.active_nodes.remove(name)
+
+    def partition_group(self, names: list[str]) -> None:
+        """Isolate several nodes at once, each into its own one-node partition.
+
+        A loop over isolate_node(). Because each node is detached from the network entirely,
+        they lose contact with *each other* as well as with the rest of the group, so this
+        cannot express a split into two communicating sub-groups — use sever_link() for
+        that, which blackholes one half from the other with reject routes and leaves every
+        address intact. Moving a pair onto a second network does not work: they get new IPs,
+        and XCOM does not follow a peer to a new address, so the moved nodes lose each other
+        too.
+        """
+        if not names:
+            raise ValueError("names must not be empty")
+        self.log(f"partition group: isolate {', '.join(names)}")
+        for name in names:
+            self.isolate_node(name)
+
+    def heal_group(self, names: list[str]) -> None:
+        """Reconnect several isolated nodes and put them back in active_nodes, without waiting.
+
+        Deliberately does not wait for ONLINE: after a majority loss the members come back
+        in stages — the reconnected ones regain quorum between themselves first, and a
+        member that left the group needs an explicit restart on top. Use heal_node() for the
+        single-node case where "reconnect and be ONLINE again" is one step.
+        """
+        if not names:
+            raise ValueError("names must not be empty")
+        self.log(f"heal group: reconnect {', '.join(names)}")
+        for name in names:
+            self.docker.network_connect(self.network, name)
+            self._wait_ready(name)
+            if name not in self.active_nodes:
+                self.active_nodes.append(name)
+
+    def force_members(
+        self, names: list[str], node: str, timeout: int = 120
+    ) -> dict[str, tuple[str, str]]:
+        """Force a new group membership from a member that has lost quorum; return the new view.
+
+        The documented recovery from majority loss. A member blocked in a minority does not
+        reconfigure on its own even once the network is back — it stays stuck with the
+        absent members UNREACHABLE — so the surviving set has to be imposed on it.
+
+        XCOM refuses a forced list containing any member it currently suspects ("Only alive
+        members in the current configuration should be present in a forced configuration
+        list"), and a member it lost contact with stays suspected while the group is
+        blocked. In practice that means forcing down to `node` alone and bringing the rest
+        back with restart_group_replication().
+
+        group_replication_force_members is always reset to '' afterwards (including on
+        timeout): leaving it set makes GR reject later membership changes.
+        """
+        if not names:
+            raise ValueError("names must not be empty")
+        addresses = ",".join(self._gr_address(name) for name in names)
+        self.log(f"force group membership to {addresses} via {node}")
+        self.docker.exec_mysql(
+            node,
+            f"SET GLOBAL group_replication_force_members={sql_str(addresses)};",
+            password=self.root_password,
+        )
+        try:
+            # Not wait_online_count(): the count it would wait for is already satisfied
+            # before the force in every partition this is used for, so it would return
+            # without confirming anything and hand back the pre-force view.
+            return self.wait_membership(names, node=node, timeout=timeout)
+        finally:
+            self.docker.exec_mysql(
+                node,
+                "SET GLOBAL group_replication_force_members='';",
+                password=self.root_password,
+                check=False,
+            )
+
+    def _peer_route(self, node: str, peers: list[str], action: str, check: bool) -> None:
+        """Add or delete reject routes on `node` for each peer's address on the cluster network."""
+        for peer in peers:
+            ip = self.docker.container_ip(peer, self.network)
+            if not ip:
+                raise RuntimeError(f"could not resolve {peer}'s address on {self.network}")
+            self.docker.exec_command(node, f"route {action} -host {ip} reject", check=check)
+
+    def sever_link(self, group_a: list[str], group_b: list[str]) -> None:
+        """Cut two halves of the cluster off from each other, leaving every IP and process intact.
+
+        Each node blackholes the other half's addresses with a local reject route, so the
+        two groups cannot talk to each other while each stays fully connected internally.
+        That is what an even split needs, and it cannot be done by moving containers between
+        networks: a container that changes network changes IP, and XCOM does not follow a
+        peer to a new address — the moved nodes lose each other as well.
+
+        Requires the containers to have NET_ADMIN (see _start_mysqld_node). Nodes in
+        `group_b` are dropped from active_nodes, so get_primary() and the wait_* helpers
+        keep observing `group_a`.
+        """
+        if not group_a or not group_b:
+            raise ValueError("both groups must be non-empty")
+        self.log(f"sever link: {', '.join(group_a)} | {', '.join(group_b)}")
+        for node in group_a:
+            self._peer_route(node, group_b, "add", check=True)
+        for node in group_b:
+            self._peer_route(node, group_a, "add", check=True)
+            if node in self.active_nodes:
+                self.active_nodes.remove(node)
+
+    def restore_link(self, group_a: list[str], group_b: list[str]) -> None:
+        """Remove the reject routes added by sever_link and put group_b back in active_nodes.
+
+        Only restores connectivity: members blocked during the split keep their stale view
+        and still need restart_group_replication() to rejoin.
+        """
+        if not group_a or not group_b:
+            raise ValueError("both groups must be non-empty")
+        self.log(f"restore link: {', '.join(group_a)} | {', '.join(group_b)}")
+        for node in group_a:
+            # check=False: a partially applied sever leaves nothing to delete on some nodes.
+            self._peer_route(node, group_b, "del", check=False)
+        for node in group_b:
+            self._peer_route(node, group_a, "del", check=False)
+            if node not in self.active_nodes:
+                self.active_nodes.append(node)
+
+    def wait_members_unreachable(
+        self, names: list[str], node: str, timeout: int = 60
+    ) -> dict[str, tuple[str, str]]:
+        """Poll until every named member is seen as UNREACHABLE from `node`; return that view.
+
+        On timeout the last view read is returned rather than raising, so the caller can
+        assert on the state actually observed and report it — same contract as
+        wait_node_isolated().
+        """
+        self.log(f"wait for {', '.join(names)} to be UNREACHABLE from {node}")
+        deadline = time.time() + timeout
+        while True:
+            states = self.member_states(node)
+            if all(states.get(name, ("", ""))[0] == "UNREACHABLE" for name in names):
+                return states
+            if time.time() >= deadline:
+                return states
+            time.sleep(2)
+
+    def heal_node(self, name: str, timeout: int = 180, rejoin_grace: int = 30) -> bool:
+        """Reconnect an isolated node and wait until every member is ONLINE again.
+
+        Returns True when GR readmitted the member on its own, False when the explicit
+        STOP/START GROUP_REPLICATION fallback was needed. Both outcomes are valid and the
+        test can't control which one GR takes, so it is logged rather than asserted: a
+        member that was expelled can come back through group_replication_autorejoin_tries,
+        but one that merely sat blocked in the minority (the default
+        group_replication_unreachable_majority_timeout=0 never makes it leave the group)
+        has no auto-rejoin to trigger and only an explicit start gets it back.
+        """
+        self.log(f"heal node {name} (reconnect to {self.network})")
+        survivors = [node for node in self.active_nodes if node != name]
+        if not survivors:
+            raise RuntimeError(f"No surviving node to observe {name} rejoining from")
+        self.docker.network_connect(self.network, name)
         self._wait_ready(name)
         if name not in self.active_nodes:
             self.active_nodes.append(name)
+
+        # Poll the group's view of the member, not the member's view of itself: a node
+        # blocked in a minority partition keeps reporting its own MEMBER_STATE as ONLINE,
+        # so its self-report says nothing about whether it has been readmitted.
+        self.log(f"wait up to {rejoin_grace}s for {name} to rejoin on its own")
+        deadline = time.time() + rejoin_grace
+        while time.time() < deadline:
+            state = self.member_states(survivors[0]).get(name, ("", ""))[0]
+            if state in ("ONLINE", "RECOVERING"):
+                self.wait_all_online(timeout=timeout)
+                return True
+            time.sleep(2)
+
+        self.log(f"{name} did not auto-rejoin in {rejoin_grace}s "
+                 f"(state {self.local_member_state(name)!r}); issuing START GROUP_REPLICATION")
+        self.restart_group_replication(name)
         self.wait_all_online(timeout=timeout)
+        return False
+
+    def restart_group_replication(self, name: str) -> None:
+        """Stop and start Group Replication on a node, bringing it back into the group.
+
+        The way a member that is stuck or has left rejoins: reconnecting the network is not
+        enough on its own, because a member blocked in a minority keeps its stale view even
+        after contact is restored.
+        """
+        self.log(f"restart group replication on {name}")
+        # STOP is a no-op when GR is already stopped, so failures here are not interesting.
+        self.docker.exec_mysql(
+            name, "STOP GROUP_REPLICATION;", password=self.root_password, check=False
+        )
+        self.docker.exec_mysql(name, "START GROUP_REPLICATION;", password=self.root_password)
+
+    def wait_node_isolated(self, name: str, timeout: int = 60) -> dict[str, tuple[str, str]]:
+        """Wait until an isolated node sees no group member but itself as ONLINE, returning its view.
+
+        The minority side runs its own suspicion timer, independent of the majority's
+        expulsion, so this still needs polling after wait_online_count() has settled on the
+        surviving side. Returns the last view read, so the caller can assert on it.
+        """
+        self.log(f"wait for {name} to see itself cut off from the group")
+        deadline = time.time() + timeout
+        while True:
+            states = self.member_states(name)
+            reachable = {host for host, (state, _) in states.items() if state == "ONLINE"}
+            if not reachable - {name} or time.time() >= deadline:
+                return states
+            time.sleep(2)
+
+    def super_read_only(self, name: str) -> str:
+        """Return the node's @@GLOBAL.super_read_only as '1'/'0', or '' when unreadable.
+
+        check=False so a node that is mid-restart (or otherwise unreachable) yields '' for
+        the caller to poll on, rather than raising.
+        """
+        result = self.docker.exec_mysql(
+            name,
+            "SELECT @@GLOBAL.super_read_only;",
+            password=self.root_password,
+            check=False,
+            timeout=15,
+        )
+        return result.stdout.strip() if result.ok else ""
+
+    def wait_super_read_only(self, name: str, timeout: int = 90) -> bool:
+        """Poll until the node reports super_read_only=ON, returning whether it got there.
+
+        Returns a bool instead of raising so the caller can build a failure message from the
+        surrounding diagnostics (exit_state_action, local_member_state). The default timeout
+        leaves room for a group_replication_unreachable_majority_timeout window plus the
+        expulsion that follows it.
+        """
+        self.log(f"wait for {name} to become super_read_only")
+        deadline = time.time() + timeout
+        while True:
+            if self.super_read_only(name) == "1":
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(2)
+
+    def clone_status(self, name: str) -> dict[str, str]:
+        """Return the node's current/last clone operation as a column->value map, {} if never cloned.
+
+        performance_schema.clone_status holds at most one row — the latest operation — so
+        this doubles as the before/after snapshot for "did a new clone run?". Note that a
+        node added by create()/scale_up() already carries a completed row from the
+        recoveryMethod:'clone' addInstance, so an empty map is not the healthy default.
+        """
+        columns = ["ID", "STATE", "ERROR_NO", "BEGIN_TIME"]
+        result = self.docker.exec_mysql(
+            name,
+            f"SELECT {', '.join(columns)} FROM performance_schema.clone_status;",
+            password=self.root_password,
+            check=False,
+            timeout=15,
+        )
+        line = result.stdout.strip()
+        if not result.ok or not line:
+            return {}
+        return dict(zip(columns, line.split("\t")))
+
+    def gtid_executed(self, name: str) -> str:
+        """Return the node's @@GLOBAL.gtid_executed as a single-line GTID set."""
+        # The client prints a newline per UUID set; GTID_SUBSET() and friends want one line.
+        result = self.docker.exec_mysql(
+            name, "SELECT @@GLOBAL.gtid_executed;", password=self.root_password, timeout=30
+        )
+        return result.stdout.strip().replace("\n", "")
+
+    def gtid_subset(self, name: str, gtid_set: str) -> bool:
+        """Return True when the node's gtid_executed is a superset of the given GTID set."""
+        result = self.docker.exec_mysql(
+            name,
+            f"SELECT GTID_SUBSET({sql_str(gtid_set)}, @@GLOBAL.gtid_executed);",
+            password=self.root_password,
+            timeout=30,
+        )
+        return result.stdout.strip() == "1"
+
+    def purge_binary_logs(self, nodes: list[str] | None = None) -> dict[str, str]:
+        """Purge the binary logs on each node, returning the resulting gtid_purged per node.
+
+        Defaults to every active node, which is what forcing clone (SST) recovery requires:
+        GR picks its recovery donor from any ONLINE member, so purging only the primary
+        leaves the remaining secondary able to serve an IST instead.
+
+        The returned gtid_purged is the caller's proof that something was actually purged —
+        an empty value means the logs are still there and no IST path has been closed off.
+        """
+        nodes = nodes if nodes is not None else list(self.active_nodes)
+        if not nodes:
+            raise RuntimeError("No nodes to purge binary logs on")
+        self.log(f"purge binary logs on {', '.join(nodes)}")
+        purged: dict[str, str] = {}
+        for name in nodes:
+            # FLUSH first so the log holding the most recent writes stops being the active
+            # one; PURGE never removes the active log. The + INTERVAL 1 SECOND covers the
+            # file just closed by FLUSH, whose mtime is essentially NOW().
+            self.docker.exec_mysql(
+                name,
+                "FLUSH BINARY LOGS; PURGE BINARY LOGS BEFORE NOW() + INTERVAL 1 SECOND;",
+                password=self.root_password,
+            )
+            result = self.docker.exec_mysql(
+                name, "SELECT @@GLOBAL.gtid_purged;", password=self.root_password, timeout=30
+            )
+            purged[name] = result.stdout.strip().replace("\n", "")
+        return purged
 
     def _persist_gr_settings(self, nodes: list[str]) -> None:
         """Persist start_on_boot and the current group_seeds list on each given node."""
@@ -287,8 +706,12 @@ class GroupReplication:
         """Grow the cluster by adding count new instances, then wait for everything ONLINE.
 
         Mirrors create()'s add path: start a fresh mysqld container, addInstance it via
-        mysqlsh (clone recovery), persist the updated seed list on all nodes, and reconcile
-        the proxy. Returns the names of the added nodes.
+        mysqlsh (clone recovery), persist the updated seed list on the nodes that are up, and
+        reconcile the proxy. Returns the names of the added nodes.
+
+        Members that are deliberately down are skipped rather than treated as an error, so a
+        test can grow the cluster while a node is stopped or killed; rejoin_nodes() refreshes
+        the seed list on such a node when it comes back.
         """
         if not self.containers:
             raise RuntimeError("Cluster not created yet")
@@ -309,11 +732,13 @@ class GroupReplication:
             added.append(node)
 
         self.num_nodes = len(self.containers)
-        self.log("persist GR settings (start_on_boot, group_seeds) on each node")
-        self._persist_gr_settings(self.containers)
-        self.wait_all_online()
+        self.log("persist GR settings (start_on_boot, group_seeds) on each node that is up")
+        self._persist_gr_settings(self.active_nodes)
+        # Not wait_all_online(): that expects num_nodes members, which is wrong when one is
+        # intentionally down. Identical when nothing is down.
+        self.wait_online_count(len(self.active_nodes))
         if self.proxy:
-            self._refresh_proxy()
+            self.refresh_proxy()
             self.wait_proxy_ready()
         return added
 
@@ -357,7 +782,7 @@ class GroupReplication:
         # pinning/polling doesn't run against the transient state right after removeInstance.
         self.wait_all_online()
         if self.proxy:
-            self._refresh_proxy()
+            self.refresh_proxy()
             self.wait_proxy_ready()
         return to_remove
 
@@ -383,8 +808,18 @@ class GroupReplication:
         secondaries = self.secondaries()
         return ((secondaries[0] if secondaries else self.get_primary()), 3306)
 
-    def exec_sql(self, sql: str, database: str | None = None, check: bool = True):
-        """Run application SQL through the read/write endpoint (via the proxy when enabled, else direct to the primary)."""
+    def exec_sql(
+        self,
+        sql: str,
+        database: str | None = None,
+        check: bool = True,
+        timeout: float | None = None,
+    ):
+        """Run application SQL through the read/write endpoint (via the proxy when enabled, else direct to the primary).
+
+        Pass a timeout when the cluster may have no writable primary: a write through a
+        proxy with no live backend otherwise blocks until the outer pytest timeout.
+        """
         if self.proxy:
             host, port = self.rw_endpoint()
             return self.docker.exec_mysql(
@@ -395,6 +830,7 @@ class GroupReplication:
                 host=host,
                 port=port,
                 check=check,
+                timeout=timeout,
             )
         return self.docker.exec_mysql(
             self.get_primary(),
@@ -402,6 +838,7 @@ class GroupReplication:
             password=self.root_password,
             database=database,
             check=check,
+            timeout=timeout,
         )
 
     def _start_router(self) -> None:
@@ -418,12 +855,21 @@ class GroupReplication:
         # correctly; shlex.quote then protects the surrounding bash -c command (it chains
         # bootstrap && exec) from a password with spaces/$/quotes/etc.
         bootstrap_uri = shlex.quote(self._instance_uri(seed))
+        config = "/tmp/mysqlrouter/mysqlrouter.conf"
+        # Bootstrap only when there is no config yet. The container runs with
+        # restart=on-failure, and by the time a restart happens the bootstrap seed may be
+        # unreachable (a partition test can have isolated it) — re-bootstrapping then fails,
+        # exits non-zero and leaves the router crash-looping with its ports closed. The
+        # config written on first start survives a restart and already lists every metadata
+        # server, so a restart can simply reuse it.
         bootstrap = (
+            f"if [ ! -f {config} ]; then "
             f"mysqlrouter --bootstrap {bootstrap_uri} "
             "--directory /tmp/mysqlrouter "
             "--conf-set-option=DEFAULT.unknown_config_option=warning "
-            "--conf-bind-address=0.0.0.0 --force "
-            "&& exec mysqlrouter -c /tmp/mysqlrouter/mysqlrouter.conf"
+            "--conf-bind-address=0.0.0.0 --force || exit 1; "
+            "fi; "
+            f"exec mysqlrouter -c {config}"
         )
         self.docker.create(
             image=self.router_image,
@@ -447,8 +893,14 @@ class GroupReplication:
         The write backend lists every node but the framework keeps only the current primary in the
         ready state via the runtime API (see _haproxy_set_write_primary) — the same external-management
         model the Percona operator uses.
+
+        Only nodes that are up are listed. HAProxy resolves every server address while parsing the
+        config and refuses to start if one of them does not resolve ("Failed to initialize
+        server(s) addr"), and a stopped container's name does not resolve — so including a node
+        that is deliberately down would leave the proxy crash-looping. refresh_proxy() rebuilds
+        the config, so a node that comes back is picked up then.
         """
-        servers = "\n".join(f"  server {n} {n}:3306" for n in self.containers)
+        servers = "\n".join(f"  server {n} {n}:3306" for n in self.active_nodes)
         return (
             "global\n"
             "  maxconn 2048\n"
@@ -492,9 +944,11 @@ class GroupReplication:
         """
         # HAProxy's runtime API is line-oriented: one command per line, each terminated
         # by a newline. Joining with ';' would be sent as a single command and ignored.
+        # active_nodes, matching what _haproxy_config() put in the backend: a "set server" for
+        # a name the config does not contain is rejected, and the noise would hide real problems.
         cmds = "".join(
             f"set server be_write/{n} state {'ready' if n == primary else 'maint'}\n"
-            for n in self.containers
+            for n in self.active_nodes
         )
         result = self.docker.exec_command(
             self.haproxy_name,
@@ -543,12 +997,16 @@ class GroupReplication:
         elif self.proxy == "haproxy":
             self._start_haproxy()
 
-    def _refresh_proxy(self) -> None:
-        """Reconcile the proxy with the current membership after a scale operation.
+    def refresh_proxy(self) -> None:
+        """Reconcile the proxy with the current node set and their current addresses.
 
-        MySQL Router auto-discovers members from the cluster metadata, so it needs nothing.
-        HAProxy's backend server list is baked into the config at start time (see
-        _haproxy_config), so the container is recreated to pick up the new node set.
+        MySQL Router auto-discovers members from the cluster metadata and resolves them by
+        name, so it needs nothing. HAProxy resolves its backend server list once, when the
+        config is parsed at start time (see _haproxy_config), so the container is recreated.
+
+        Needed after a scale operation (the node set changed) and after a partition heal:
+        reconnecting a container to the network gives it a *new* IP, which leaves HAProxy
+        pointing at an address nothing answers on.
         """
         if self.proxy == "haproxy":
             self.log(f"refresh HAProxy {self.haproxy_name} for new membership")
@@ -602,7 +1060,8 @@ class GroupReplication:
             last = routed or (result.stderr or "").strip()
             time.sleep(2)
         raise RuntimeError(
-            f"{self.proxy} {self.proxy_name} not ready / not routing to primary in {timeout}s (last: {last!r})"
+            f"{self.proxy} {self.proxy_name} not ready / not routing to primary in {timeout}s "
+            f"(container: {self.docker.container_state(self.proxy_name)!r}, last: {last!r})"
         )
 
     def _start_mysqld_node(self, index: int) -> str:
@@ -623,6 +1082,11 @@ class GroupReplication:
             ports=[f"{self.base_host_port + index}:3306"],
             command=self._mysqld_args(server_id=index, hostname=name),
             restart="always",
+            # Lets a test blackhole individual peers from inside the container (see
+            # sever_link), which is the only way to split the cluster into two halves that
+            # each stay internally connected: moving containers between networks changes
+            # their IPs, and XCOM does not follow a peer to a new address.
+            cap_add=["NET_ADMIN"],
         )
         self.containers.append(name)
         self.node_index[name] = index

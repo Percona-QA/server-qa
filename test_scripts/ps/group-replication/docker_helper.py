@@ -89,6 +89,7 @@ class DockerHelper:
         detach: bool = True,
         restart: str | None = None,
         platform: str | None = None,
+        cap_add: list[str] | None = None,
     ) -> ExecResult:
         """Create and start a long-lived (detached) container with the given config."""
         # These containers are long-lived (no --rm), so a run that crashed before teardown
@@ -110,6 +111,8 @@ class DockerHelper:
             args.extend(["--entrypoint", entrypoint])
         if restart:
             args.extend(["--restart", restart])
+        for cap in cap_add or []:
+            args.extend(["--cap-add", cap])
         for k, v in (environment or {}).items():
             args.extend(["-e", f"{k}={v}"])
         for vol in volumes or []:
@@ -177,8 +180,17 @@ class DockerHelper:
         return self._run(["start", name])
 
     def stop(self, name: str) -> ExecResult:
-        """Stop a running container."""
+        """Stop a running container gracefully (SIGTERM, then a timeout)."""
         return self._run(["stop", name])
+
+    def kill(self, name: str) -> ExecResult:
+        """SIGKILL a container's main process — an abrupt death, not a clean shutdown.
+
+        The container stays stopped afterwards: a kill counts as manual intervention, so a
+        `--restart always` policy does not bring it back (verified against podman). Use
+        start() to revive it, as with stop().
+        """
+        return self._run(["kill", name])
 
     def exec_command(self, name: str, command: str, check: bool = False) -> ExecResult:
         """Run a shell command inside a running container."""
@@ -261,9 +273,77 @@ class DockerHelper:
         """Remove a container network, ignoring errors if it does not exist."""
         return self._run(["network", "rm", name], check=False)
 
+    def container_networks(self, name: str) -> list[str]:
+        """Return the names of the networks a container is currently attached to.
+
+        Empty means attached to nothing — the normal state of a node that
+        network_disconnect() has isolated, not an error. An inspect that fails (no such
+        container, no daemon) raises rather than returning [], so callers can act on the
+        answer instead of guessing: reporting a failure as "attached to nothing" would make
+        network_disconnect() skip the disconnect and report success, leaving a partition
+        test reasoning about a partition that never happened.
+        """
+        result = self._run(
+            [
+                "inspect",
+                "-f",
+                '{{range $net, $_ := .NetworkSettings.Networks}}{{$net}}{{"\\n"}}{{end}}',
+                name,
+            ],
+        )
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+    def network_connect(self, network: str, name: str) -> ExecResult | None:
+        """Attach a running container to a network, doing nothing if it is already attached.
+
+        The idempotence matters for reruns and for healing a partition that was only
+        partially applied: connecting twice otherwise fails with "already exists in network".
+        Returns None when the container was already attached.
+        """
+        if network in self.container_networks(name):
+            return None
+        return self._run(["network", "connect", network, name])
+
+    def network_disconnect(self, network: str, name: str, force: bool = False) -> ExecResult | None:
+        """Detach a running container from a network, doing nothing if it is not attached.
+
+        Unlike stop(), the process inside the container is untouched — it simply loses
+        connectivity — which is what makes this usable for network-partition tests.
+        Returns None when the container was not attached in the first place.
+
+        Note: reconnecting later does not restore the container's published host port
+        mappings (the -p flags given at create time). Nothing in this suite reaches nodes
+        from the host, but a healed node is no longer reachable on its host port.
+        """
+        if network not in self.container_networks(name):
+            return None
+        args = ["network", "disconnect"]
+        if force:
+            args.append("--force")
+        args.extend([network, name])
+        return self._run(args)
+
     def volume_remove(self, name: str) -> ExecResult:
         """Remove a container volume, ignoring errors if it does not exist."""
         return self._run(["volume", "rm", name], check=False)
+
+    def container_ip(self, name: str, network: str) -> str:
+        """Return a container's IPv4 address on the given network, or "" if it is not attached."""
+        template = f'{{{{(index .NetworkSettings.Networks "{network}").IPAddress}}}}'
+        result = self._run(["inspect", "-f", template, name], check=False)
+        return result.stdout.strip() if result.ok else ""
+
+    def container_state(self, name: str) -> str:
+        """Return a container's status and restart count ("running restarts=0"), or "" if unknown.
+
+        Handy in a timeout message: it distinguishes a container that is up but not yet
+        serving from one that has died or is stuck in a restart loop.
+        """
+        result = self._run(
+            ["inspect", "-f", "{{.State.Status}} restarts={{.RestartCount}}", name],
+            check=False,
+        )
+        return result.stdout.strip() if result.ok else ""
 
     def container_exists(self, name: str) -> bool:
         """Return True if a container with the exact given name exists (running or stopped)."""

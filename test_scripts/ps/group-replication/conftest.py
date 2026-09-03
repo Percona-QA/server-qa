@@ -21,7 +21,9 @@ from xtrabackup_helper import XtraBackup  # noqa: E402
 # Proxy modes the suite can run a test behind. There is intentionally no "direct"
 # entry: every test runs behind a proxy. Each test selects its proxies explicitly
 # with @pytest.mark.parametrize("gr_cluster", [...], indirect=True) — see the test
-# files. The value passed (e.g. "router"/"haproxy") is the key looked up here.
+# files. The value passed is either a proxy name ("router"/"haproxy", giving the
+# default 3 nodes) or a (proxy, num_nodes) tuple for a differently-sized cluster;
+# the proxy name is the key looked up here.
 PROXIES = {
     "router": {"mysql_router": True},
     "haproxy": {"haproxy": True},
@@ -44,15 +46,34 @@ def gr_cluster(request):
     # @pytest.mark.parametrize("gr_cluster", [...], indirect=True). Validate it explicitly
     # so a test that forgets the decorator fails with a clear message instead of an opaque
     # AttributeError (no param) / KeyError (unknown proxy).
-    proxy = getattr(request, "param", None)
-    if proxy is None:
+    #
+    # A test needing a different cluster size passes a (proxy, num_nodes) tuple instead of a
+    # bare proxy name — wrapped in pytest.param(..., id=proxy), or the node id degrades to
+    # "gr_cluster0". Everything else about the fixture is the same either way.
+    param = getattr(request, "param", None)
+    if param is None:
         raise pytest.UsageError(
             'gr_cluster requires a proxy via indirect parametrization, e.g. '
             '@pytest.mark.parametrize("gr_cluster", ["haproxy"], indirect=True)'
         )
-    if proxy not in PROXIES:
+    if isinstance(param, tuple):
+        if len(param) != 2:
+            raise pytest.UsageError(
+                f"gr_cluster tuple parameter must be (proxy, num_nodes); got {param!r}"
+            )
+        proxy, num_nodes = param
+    else:
+        proxy, num_nodes = param, 3
+    # isinstance before the lookup: an unhashable proxy (e.g. a list) would otherwise raise
+    # TypeError from inside the dict membership test rather than reporting the bad value.
+    if not isinstance(proxy, str) or proxy not in PROXIES:
         raise pytest.UsageError(
             f"unknown gr_cluster proxy {proxy!r}; valid options: {sorted(PROXIES)}"
+        )
+    # bool is a subclass of int, so without the isinstance guard True would pass as 1 node.
+    if isinstance(num_nodes, bool) or not isinstance(num_nodes, int) or num_nodes < 1:
+        raise pytest.UsageError(
+            f"gr_cluster num_nodes must be a positive integer; got {num_nodes!r}"
         )
     try:
         helper = DockerHelper()
@@ -71,7 +92,7 @@ def gr_cluster(request):
     offset = int(m.group()) if m else 0
     cluster = GroupReplication(
         helper,
-        num_nodes=3,
+        num_nodes=num_nodes,
         network=f"grnet-{safe_workerid}",
         node_prefix=f"ps{safe_workerid}-",
         base_host_port=33060 + offset * 100,
@@ -110,6 +131,15 @@ def sysbench(request, gr_cluster):
     try:
         yield sb
     finally:
+        # Drop the tables so a later test sharing this module-scoped cluster can prepare()
+        # again — prepare() creates them outright and fails if they already exist. check=False
+        # and the broad except: a cluster left unhealthy by a failing test must not turn
+        # teardown into a second error that masks the real one.
+        try:
+            cleanup_host, cleanup_port = gr_cluster.rw_endpoint()
+            sb.cleanup(host=cleanup_host, port=cleanup_port, check=False)
+        except Exception as exc:  # noqa: BLE001 - teardown must not mask a test failure
+            gr_cluster.log(f"sysbench cleanup skipped: {exc}")
         gr_cluster.docker.destroy(name)
 
 

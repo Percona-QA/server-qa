@@ -131,6 +131,15 @@ def sysbench(request, gr_cluster):
     try:
         yield sb
     finally:
+        # Drop the tables so a later test sharing this module-scoped cluster can prepare()
+        # again — prepare() creates them outright and fails if they already exist. check=False
+        # and the broad except: a cluster left unhealthy by a failing test must not turn
+        # teardown into a second error that masks the real one.
+        try:
+            cleanup_host, cleanup_port = gr_cluster.rw_endpoint()
+            sb.cleanup(host=cleanup_host, port=cleanup_port, check=False)
+        except Exception as exc:  # noqa: BLE001 - teardown must not mask a test failure
+            gr_cluster.log(f"sysbench cleanup skipped: {exc}")
         gr_cluster.docker.destroy(name)
 
 

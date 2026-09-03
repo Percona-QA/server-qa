@@ -149,9 +149,16 @@ def test_primary_isolation_failover(gr_cluster, sysbench):
     # Heal. The rejoin may take either the IST or the clone path depending on how much the
     # old primary missed, so the budget covers the slower one and neither is asserted.
     auto_rejoined = gr_cluster.heal_node(old_primary, timeout=240)
-    gr_cluster.log(
-        f"{old_primary} rejoined "
-        f"{'automatically' if auto_rejoined else 'via explicit START GROUP_REPLICATION'}"
+    # Having left the group under unreachable_majority_timeout, the member must come back
+    # through group_replication_autorejoin_tries on its own — heal_node() falling back to an
+    # explicit START GROUP_REPLICATION would mean auto-rejoin did not do its job. (The
+    # secondary isolation tests deliberately do not assert this: there the timeout is left at
+    # 0, so the member never leaves the group and there is no auto-rejoin to trigger.)
+    assert auto_rejoined, (
+        f"{old_primary} needed an explicit START GROUP_REPLICATION; "
+        f"group_replication_autorejoin_tries "
+        f"({gr_cluster.docker.exec_mysql(old_primary, 'SELECT @@GLOBAL.group_replication_autorejoin_tries;', password=gr_cluster.root_password).stdout.strip()}) "
+        "should have brought it back"
     )
 
     # It comes back as a secondary — the election is not undone by its return.

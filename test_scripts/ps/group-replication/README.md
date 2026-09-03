@@ -16,13 +16,15 @@ group-replication/
 ├── sysbench_helper.py          # Sysbench — ephemeral sysbench load container
 ├── xtrabackup_helper.py        # XtraBackup — full/incremental backup + restore
 ├── test_basic.py               # smoke test: write on primary, read on every node
-├── test_primary_shutdown_failover.py  # primary mysqld stopped: election + auto-rejoin
+├── test_primary_shutdown_failover.py  # primary stopped or killed: election + auto-rejoin
+├── test_rejoin_after_scale_up.py # node killed, 4th added, killed node rejoins
 ├── test_scaling.py             # scale up 3->5 and down 5->3 under sysbench load
 ├── test_backup_restore.py      # XtraBackup full+incremental backup and restore
 ├── test_secondary_isolation_ist.py # secondary network-partitioned, rejoins via IST
 ├── test_secondary_isolation_sst.py # same, binlogs purged so it rejoins via clone/SST
 ├── test_primary_isolation_failover.py # primary partitioned: automatic failover
 ├── test_majority_loss.py       # both secondaries cut off: quorum loss, no writes
+├── test_majority_loss_kill.py  # same, by killing two of three nodes
 └── test_equal_partition.py     # 4-node 2-2 split: split-brain prevention
 ```
 
@@ -549,8 +551,16 @@ in `pytest.param(..., id=proxy)` so the node id stays readable — see
 - `gr_cluster.get_bootstrap_node()` — name of the bootstrap node (e.g. `"ps0-1"` when running serially, or `"psgw0-1"` under pytest-xdist); for the
   currently-elected primary (which differs after failover) use `gr_cluster.get_primary()`.
 - `gr_cluster.containers` — list of all node names in start order.
-- `gr_cluster.stop_node(node)` / `gr_cluster.rejoin_node(node)` — kill and restart a
-  node's mysqld; the group sees an immediate member loss.
+- `gr_cluster.stop_node(node)` / `gr_cluster.kill_node(node)` — take a node's mysqld down.
+  A stop is graceful (SIGTERM): mysqld shuts down cleanly and GR announces the member
+  leaving, so the group loses it at once. A kill is abrupt (SIGKILL) and the group has to
+  notice a dead peer by timeout. Both leave the container stopped — a `--restart always`
+  policy does not resurrect a killed container.
+- `gr_cluster.rejoin_node(node)` / `gr_cluster.rejoin_nodes(nodes)` — restart stopped or
+  killed nodes and wait for the group to be whole. Use the plural form to bring back more
+  than one: the singular waits for the whole group after each node, so calling it twice
+  would wait on a member that is still down. Both refresh the returning node's persisted
+  seed list, which matters if the cluster changed shape while it was away.
 - `gr_cluster.isolate_node(node)` / `gr_cluster.heal_node(node)` — network-partition a
   node and heal it again. Unlike `stop_node()`, mysqld keeps running and only loses
   connectivity, which is what exercises GR's expulsion, minority-block and distributed
@@ -582,8 +592,11 @@ in `pytest.param(..., id=proxy)` so the node id stays readable — see
   recovery from a lost quorum. Force the membership down to the single node you run it on
   (XCOM rejects any member it currently suspects), then restart GR on the others so they
   rejoin. `force_members()` always clears `group_replication_force_members` afterwards.
-- `gr_cluster.refresh_proxy()` — rebuild HAProxy so it picks up the current backend
-  addresses. Reconnecting a container to the network gives it a **new IP**, and HAProxy
+- `gr_cluster.refresh_proxy()` — rebuild HAProxy so it picks up the current node set and
+  their current addresses. Also needed after a node is **stopped or killed**: HAProxy
+  resolves every backend address while parsing its config and refuses to start if one does
+  not resolve, so the config lists only the nodes that are up and has to be rebuilt when
+  that set changes. Reconnecting a container to the network gives it a **new IP**, and HAProxy
   resolves its backends once at config-parse time, so **any** test that reconnects a node
   must call this before `wait_proxy_ready()` — not only ones where that node goes on to
   become the primary. A rejoined *secondary* on a stale address is health-checked out of the

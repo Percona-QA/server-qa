@@ -209,6 +209,19 @@ class GroupReplication:
         if name in self.active_nodes:
             self.active_nodes.remove(name)
 
+    def kill_node(self, name: str) -> None:
+        """SIGKILL a node's mysqld and remove it from the active-nodes list.
+
+        Unlike stop_node()'s SIGTERM — where mysqld shuts down cleanly and Group Replication
+        announces the member leaving, so the group loses it at once — a kill leaves the group
+        to notice a dead peer by timeout. Revive it with rejoin_node()/rejoin_nodes(), same
+        as a stopped node.
+        """
+        self.log(f"kill node {name}")
+        self.docker.kill(name)
+        if name in self.active_nodes:
+            self.active_nodes.remove(name)
+
     def member_states(self, node: str) -> dict[str, tuple[str, str]]:
         """Read the host->(state, role) map of all group members as seen from the given node."""
         result = self.docker.exec_mysql(
@@ -274,11 +287,30 @@ class GroupReplication:
 
     def rejoin_node(self, name: str, timeout: int = 180) -> None:
         """Restart a stopped node and wait for it to auto-rejoin and all members to be ONLINE."""
-        self.log(f"start node {name} (auto-rejoin)")
-        self.docker.start(name)
-        self._wait_ready(name)
-        if name not in self.active_nodes:
-            self.active_nodes.append(name)
+        self.rejoin_nodes([name], timeout=timeout)
+
+    def rejoin_nodes(self, names: list[str], timeout: int = 180) -> None:
+        """Restart several stopped nodes, then wait once for every member to be ONLINE.
+
+        Taking a list matters: rejoin_node() waits for the whole group after each node, so
+        calling it twice cannot bring back a pair — the first call would be waiting on a
+        member that is still down.
+        """
+        if not names:
+            raise ValueError("names must not be empty")
+        self.log(f"start node(s) {', '.join(names)} (auto-rejoin)")
+        for name in names:
+            self.docker.start(name)
+        for name in names:
+            self._wait_ready(name)
+            if name not in self.active_nodes:
+                self.active_nodes.append(name)
+            # The cluster may have changed shape while this node was down — scale_up() only
+            # persists settings on members that are up — so refresh its seed list. verify()
+            # compares group_replication_group_seeds against the current membership on every
+            # container, so a returning node with a stale list fails there rather than
+            # anywhere informative.
+            self._persist_gr_settings([name])
         self.wait_all_online(timeout=timeout)
 
     def node_alive(self, name: str) -> bool:
@@ -643,8 +675,12 @@ class GroupReplication:
         """Grow the cluster by adding count new instances, then wait for everything ONLINE.
 
         Mirrors create()'s add path: start a fresh mysqld container, addInstance it via
-        mysqlsh (clone recovery), persist the updated seed list on all nodes, and reconcile
-        the proxy. Returns the names of the added nodes.
+        mysqlsh (clone recovery), persist the updated seed list on the nodes that are up, and
+        reconcile the proxy. Returns the names of the added nodes.
+
+        Members that are deliberately down are skipped rather than treated as an error, so a
+        test can grow the cluster while a node is stopped or killed; rejoin_nodes() refreshes
+        the seed list on such a node when it comes back.
         """
         if not self.containers:
             raise RuntimeError("Cluster not created yet")
@@ -665,9 +701,11 @@ class GroupReplication:
             added.append(node)
 
         self.num_nodes = len(self.containers)
-        self.log("persist GR settings (start_on_boot, group_seeds) on each node")
-        self._persist_gr_settings(self.containers)
-        self.wait_all_online()
+        self.log("persist GR settings (start_on_boot, group_seeds) on each node that is up")
+        self._persist_gr_settings(self.active_nodes)
+        # Not wait_all_online(): that expects num_nodes members, which is wrong when one is
+        # intentionally down. Identical when nothing is down.
+        self.wait_online_count(len(self.active_nodes))
         if self.proxy:
             self.refresh_proxy()
             self.wait_proxy_ready()
@@ -824,8 +862,14 @@ class GroupReplication:
         The write backend lists every node but the framework keeps only the current primary in the
         ready state via the runtime API (see _haproxy_set_write_primary) — the same external-management
         model the Percona operator uses.
+
+        Only nodes that are up are listed. HAProxy resolves every server address while parsing the
+        config and refuses to start if one of them does not resolve ("Failed to initialize
+        server(s) addr"), and a stopped container's name does not resolve — so including a node
+        that is deliberately down would leave the proxy crash-looping. refresh_proxy() rebuilds
+        the config, so a node that comes back is picked up then.
         """
-        servers = "\n".join(f"  server {n} {n}:3306" for n in self.containers)
+        servers = "\n".join(f"  server {n} {n}:3306" for n in self.active_nodes)
         return (
             "global\n"
             "  maxconn 2048\n"
@@ -869,9 +913,11 @@ class GroupReplication:
         """
         # HAProxy's runtime API is line-oriented: one command per line, each terminated
         # by a newline. Joining with ';' would be sent as a single command and ignored.
+        # active_nodes, matching what _haproxy_config() put in the backend: a "set server" for
+        # a name the config does not contain is rejected, and the noise would hide real problems.
         cmds = "".join(
             f"set server be_write/{n} state {'ready' if n == primary else 'maint'}\n"
-            for n in self.containers
+            for n in self.active_nodes
         )
         result = self.docker.exec_command(
             self.haproxy_name,

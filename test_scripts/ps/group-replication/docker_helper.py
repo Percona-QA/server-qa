@@ -180,8 +180,17 @@ class DockerHelper:
         return self._run(["start", name])
 
     def stop(self, name: str) -> ExecResult:
-        """Stop a running container."""
+        """Stop a running container gracefully (SIGTERM, then a timeout)."""
         return self._run(["stop", name])
+
+    def kill(self, name: str) -> ExecResult:
+        """SIGKILL a container's main process — an abrupt death, not a clean shutdown.
+
+        The container stays stopped afterwards: a kill counts as manual intervention, so a
+        `--restart always` policy does not bring it back (verified against podman). Use
+        start() to revive it, as with stop().
+        """
+        return self._run(["kill", name])
 
     def exec_command(self, name: str, command: str, check: bool = False) -> ExecResult:
         """Run a shell command inside a running container."""

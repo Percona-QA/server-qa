@@ -11,6 +11,12 @@ Unlike the other partition tests, which always leave a writable majority behind,
 removes the majority itself. It asserts that writes are refused both directly on the
 primary and through the proxy, and that neither of those writes exists anywhere afterwards.
 
+Recovery is not necessarily automatic. Reconnecting the secondaries only brings the group
+back if they can still reach each other at the addresses XCOM holds for them, which comes
+down to whether the container runtime returned their old IPs — Docker usually does, podman
+usually does not. When it does not, the membership has to be forced onto one survivor. The
+test takes whichever path the runtime produces and logs which.
+
 The test sets group_replication_unreachable_majority_timeout=30 on the primary only. At the
 default of 0 the primary would block indefinitely instead of leaving the group, never
 applying group_replication_exit_state_action and so never becoming super_read_only. It is
@@ -119,27 +125,36 @@ def test_majority_loss(gr_cluster, sysbench):
     )
     gr_cluster.log(f"{gr_cluster.proxy} rejected the write: {via_proxy.stderr.strip()!r}")
 
-    # Reconnect the secondaries. Restoring the network is not enough on its own: a member
-    # blocked in a minority stays stuck with the others UNREACHABLE rather than reforming,
-    # so the surviving membership has to be forced onto one of them. This is the documented
-    # recovery from majority loss, and it is the step the scenario doc assumes happens by
-    # itself — it does not.
+    # Reconnect the secondaries. Whether that is enough on its own depends on the container
+    # runtime: Docker hands a reconnected container its old address back, so the two
+    # secondaries find each other again, reach 2 of 3 and reform by themselves; podman hands
+    # out a new one, and XCOM does not follow a peer to a new address, so they stay stuck
+    # with everyone UNREACHABLE. Both are legitimate here, so try the group's own recovery
+    # first and force the membership only when it did not happen.
     gr_cluster.heal_group(secondaries)
-
-    # Forced down to a single member, not to both secondaries: XCOM refuses a forced list
-    # containing anyone it currently suspects, and each blocked node still suspects the
-    # others even after the network is back ("Only alive members in the current
-    # configuration should be present in a forced configuration list").
     seed = secondaries[0]
-    survivors = gr_cluster.force_members([seed], node=seed)
-    online = {h for h, (state, _) in survivors.items() if state == "ONLINE"}
-    assert online == {seed}, f"forced membership did not settle on {seed}: {survivors}"
+    reformed = gr_cluster.wait_quorum(seed, timeout=60)
+    if not reformed:
+        # Forced down to a single member rather than to both secondaries: XCOM refuses a
+        # forced list naming anyone it currently suspects ("Only alive members in the
+        # current configuration should be present in a forced configuration list"), and a
+        # node that never re-established contact still suspects the other.
+        gr_cluster.force_members([seed], node=seed)
+    gr_cluster.log(
+        f"quorum recovered {'on its own' if reformed else 'by forcing the membership'}"
+    )
+    assert gr_cluster.has_quorum(seed), (
+        f"{seed} still has no quorum: {gr_cluster.member_states(seed)}"
+    )
 
-    # Everyone else rejoins the reformed group. The remaining secondary is still stuck in
-    # its stale blocked view, and the old primary left the group entirely when its
-    # unreachable-majority timeout fired; both need Group Replication restarted.
-    for node in (secondaries[1], primary):
-        gr_cluster.restart_group_replication(node)
+    # Whoever is not back in the group restarts Group Replication and rejoins. Read that set
+    # from the group rather than hardcoding it: which nodes are still out depends on the
+    # path above, and stopping GR on a member that is already ONLINE would drop the
+    # survivors back below quorum.
+    in_group = {h for h, (state, _) in gr_cluster.member_states(seed).items() if state == "ONLINE"}
+    for node in gr_cluster.containers:
+        if node not in in_group:
+            gr_cluster.restart_group_replication(node)
     gr_cluster.wait_all_online(timeout=240, node=seed)
 
     # The cluster is whole again with exactly one primary. Which node holds it is not

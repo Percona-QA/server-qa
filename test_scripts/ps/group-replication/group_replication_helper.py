@@ -313,6 +313,35 @@ class GroupReplication:
                 )
             time.sleep(2)
 
+    def has_quorum(self, node: str) -> bool:
+        """Return True if `node` currently sees an ONLINE PRIMARY — its side holds a quorum.
+
+        A member blocked in a minority still lists the old primary, but as UNREACHABLE, so
+        requiring the role *and* the ONLINE state is what separates a working group from a
+        stuck one.
+        """
+        return any(
+            state == "ONLINE" and role == "PRIMARY"
+            for state, role in self.member_states(node).values()
+        )
+
+    def wait_quorum(self, node: str, timeout: int = 60) -> bool:
+        """Poll until `node`'s side of the group has quorum; return whether it got there.
+
+        Returns a bool rather than raising: after connectivity is restored both outcomes are
+        legitimate. Whether the members find each other again depends on whether the
+        container runtime handed them back their old addresses — XCOM does not follow a peer
+        to a new one — so the caller decides what to do when they did not.
+        """
+        self.log(f"wait up to {timeout}s for {node} to regain quorum")
+        deadline = time.time() + timeout
+        while True:
+            if self.has_quorum(node):
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(2)
+
     def rejoin_node(self, name: str, timeout: int = 180) -> None:
         """Restart a stopped node and wait for it to auto-rejoin and all members to be ONLINE."""
         self.rejoin_nodes([name], timeout=timeout)
@@ -436,11 +465,22 @@ class GroupReplication:
             raise ValueError("names must not be empty")
         addresses = ",".join(self._gr_address(name) for name in names)
         self.log(f"force group membership to {addresses} via {node}")
-        self.docker.exec_mysql(
-            node,
-            f"SET GLOBAL group_replication_force_members={sql_str(addresses)};",
-            password=self.root_password,
-        )
+        try:
+            self.docker.exec_mysql(
+                node,
+                f"SET GLOBAL group_replication_force_members={sql_str(addresses)};",
+                password=self.root_password,
+            )
+        except RuntimeError as exc:
+            # GR rejects the write unless it is running on this member *and* the member has
+            # lost quorum (error 4118 names both conditions without saying which failed).
+            # Report each so the cause is readable: a member that reformed on its own after
+            # the partition healed has quorum again and nothing left to force.
+            raise RuntimeError(
+                f"{exc}\nforce_members precondition on {node}: "
+                f"member_state={self.local_member_state(node)!r}, "
+                f"has_quorum={self.has_quorum(node)}, view={self.member_states(node)}"
+            ) from exc
         try:
             # Not wait_online_count(): the count it would wait for is already satisfied
             # before the force in every partition this is used for, so it would return

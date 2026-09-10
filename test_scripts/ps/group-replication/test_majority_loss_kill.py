@@ -90,6 +90,7 @@ def test_majority_loss_by_kill(gr_cluster, sysbench, victims):
     )
     assert not direct.ok, f"{survivor} accepted a write with no quorum: {direct.stdout!r}"
     gr_cluster.log(f"{survivor} did not accept the write: {_describe(direct)}")
+    probes = [(NOTE_DIRECT, direct)]
 
     via_proxy = gr_cluster.exec_sql(
         f"INSERT INTO {PROBE_TABLE} (note) VALUES ('{NOTE_PROXY}');", check=False, timeout=30
@@ -98,6 +99,7 @@ def test_majority_loss_by_kill(gr_cluster, sysbench, victims):
         f"{gr_cluster.proxy} accepted a write with no quorum: {via_proxy.stdout!r}"
     )
     gr_cluster.log(f"{gr_cluster.proxy} did not accept the write: {_describe(via_proxy)}")
+    probes.append((NOTE_PROXY, via_proxy))
 
     # ...and neither became visible while quorum was lost. That is the guarantee that holds
     # regardless of how the write failed.
@@ -132,14 +134,31 @@ def test_majority_loss_by_kill(gr_cluster, sysbench, victims):
     gr_cluster.refresh_proxy()
     gr_cluster.wait_proxy_ready(timeout=300)
 
-    # The write the survivor refused outright can never exist. The one it *blocked* is a
-    # different matter — a parked write commits once the survivor is unblocked, even though
-    # its client is long gone — so that one is only asserted to have been invisible during
-    # the outage, above, with verify_checksums() covering agreement on whatever did commit.
-    if not survivor_was_primary:
-        for node in gr_cluster.active_nodes:
-            leaked = _count_note(gr_cluster, node, NOTE_DIRECT)
-            assert leaked == "0", f"a refused write leaked onto {node} ({leaked} rows)"
+    # What can be asserted about each write depends on *how* it failed, not on the
+    # survivor's former role: a read-only member refuses a write outright, while a primary
+    # that has lost quorum parks it awaiting consensus. _run() reports a timeout as
+    # returncode 124, which is the signal that the write was still parked when the client
+    # was cut off.
+    refused = [note for note, result in probes if result.returncode != 124]
+    parked = [note for note, result in probes if result.returncode == 124]
+    gr_cluster.log(f"post-recovery check: refused={refused} parked={parked}")
+
+    # A refused write was never accepted, so it can never appear anywhere.
+    for node in gr_cluster.active_nodes:
+        for note in refused:
+            leaked = _count_note(gr_cluster, node, note)
+            assert leaked == "0", f"a refused write ({note}) leaked onto {node} ({leaked} rows)"
+
+    # A parked write may well have committed once quorum came back — GR was holding it for
+    # consensus, not rejecting it, so unblocking the survivor lets it through even though
+    # the client that issued it is long gone. That is not a leak. What must hold either way
+    # is that every node agrees: the same row on some nodes and not others is the divergence
+    # this test exists to rule out.
+    for note in parked:
+        counts = {node: _count_note(gr_cluster, node, note) for node in gr_cluster.active_nodes}
+        assert len(set(counts.values())) == 1, (
+            f"parked write ({note}) committed on some nodes but not others: {counts}"
+        )
 
     gr_cluster.verify()
     gr_cluster.verify_checksums("sbtest", timeout=180)

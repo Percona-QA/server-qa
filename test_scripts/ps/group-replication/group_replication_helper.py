@@ -460,7 +460,11 @@ class GroupReplication:
             ip = self.docker.container_ip(peer, self.network)
             if not ip:
                 raise RuntimeError(f"could not resolve {peer}'s address on {self.network}")
-            self.docker.exec_command(node, f"route {action} -host {ip} reject", check=check)
+            # As root: the reject route needs NET_ADMIN, and --cap-add puts it only in the
+            # bounding set, which the image's non-root mysql user does not inherit.
+            self.docker.exec_command(
+                node, f"route {action} -host {ip} reject", check=check, user="root"
+            )
 
     def sever_link(self, group_a: list[str], group_b: list[str]) -> None:
         """Cut two halves of the cluster off from each other, leaving every IP and process intact.

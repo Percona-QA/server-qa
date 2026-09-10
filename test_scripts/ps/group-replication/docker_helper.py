@@ -192,9 +192,23 @@ class DockerHelper:
         """
         return self._run(["kill", name])
 
-    def exec_command(self, name: str, command: str, check: bool = False) -> ExecResult:
-        """Run a shell command inside a running container."""
-        return self._run(["exec", name, "sh", "-c", command], check=check)
+    def exec_command(
+        self, name: str, command: str, check: bool = False, user: str | None = None
+    ) -> ExecResult:
+        """Run a shell command inside a running container, as `user` when given.
+
+        Without `user` the command runs as whatever the image declares (the server image
+        sets USER mysql, uid 1001). Pass user="root" for anything needing a capability such
+        as NET_ADMIN: --cap-add only fills the container's *bounding* set, which a non-root
+        process does not inherit without ambient or file capabilities. Docker enforces that
+        and the command fails with EPERM; rootless podman happens to let it through, so this
+        is a difference that only shows up on one of the two runtimes the suite supports.
+        """
+        args = ["exec"]
+        if user:
+            args.extend(["-u", user])
+        args.extend([name, "sh", "-c", command])
+        return self._run(args, check=check)
 
     def exec_mysql(
         self,

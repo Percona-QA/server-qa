@@ -88,6 +88,19 @@ def test_secondary_isolation_ist_recovery(gr_cluster, sysbench):
         f"has: {gr_cluster.gtid_executed(target)!r}"
     )
 
+    # The target came back on a new address — reconnecting a container to the network
+    # reassigns one — and HAProxy resolved its backends once, at config-parse time. Nothing
+    # else in this test would notice: every check above talks to nodes directly, and the
+    # write endpoint points at the primary, which never moved. The read backend is what
+    # breaks, so rebuild the proxy and confirm the target is serving reads again.
+    gr_cluster.refresh_proxy()
+    gr_cluster.wait_proxy_ready(timeout=300)
+    serving = gr_cluster.wait_node_serving_reads(target)
+    assert target in serving, (
+        f"{target} is not serving reads after rejoining — the {gr_cluster.proxy} read "
+        f"endpoint only ever answered from {sorted(serving)}"
+    )
+
     gr_cluster.verify()
     gr_cluster.verify_checksums("sbtest", timeout=120)
 

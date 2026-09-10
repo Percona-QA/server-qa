@@ -198,24 +198,10 @@ def test_primary_isolation_failover(gr_cluster, sysbench):
     # ...and prove it: the reconnected node has to be serving reads again. A stale backend
     # shows up exactly here — HAProxy health-checks the dead address, takes that node out of
     # rotation, and it never answers on the read endpoint no matter how often we ask.
-    ro_host, ro_port = gr_cluster.ro_endpoint()
-    seen: set[str] = set()
-    deadline = time.monotonic() + 60
-    while old_primary not in seen and time.monotonic() < deadline:
-        probe = gr_cluster.docker.exec_mysql(
-            new_primary,
-            "SELECT @@hostname;",
-            password=gr_cluster.root_password,
-            host=ro_host,
-            port=ro_port,
-            check=False,
-            timeout=15,
-        )
-        if probe.ok:
-            seen.add(probe.stdout.strip())
-    assert old_primary in seen, (
+    serving = gr_cluster.wait_node_serving_reads(old_primary)
+    assert old_primary in serving, (
         f"{old_primary} is not serving reads after rejoining — the {gr_cluster.proxy} read "
-        f"endpoint only ever answered from {sorted(seen)}"
+        f"endpoint only ever answered from {sorted(serving)}"
     )
 
     gr_cluster.verify()

@@ -1057,6 +1057,34 @@ class GroupReplication:
             self.docker.destroy(self.haproxy_name)
             self._start_haproxy()
 
+    def wait_node_serving_reads(self, name: str, timeout: int = 60) -> set[str]:
+        """Poll the read endpoint until `name` answers, and return every host that did.
+
+        A node that reconnected on a new address is health-checked out of HAProxy's read
+        backend and silently stops serving reads while the write path keeps working — so
+        this is what catches a proxy that was not rebuilt after a heal (see refresh_proxy).
+        Returns the hosts seen rather than a bool, so a caller can name them when the node
+        never appears.
+        """
+        host, port = self.ro_endpoint()
+        self.log(f"wait up to {timeout}s for {name} to answer on the read endpoint")
+        seen: set[str] = set()
+        deadline = time.time() + timeout
+        while True:
+            probe = self.docker.exec_mysql(
+                self.active_nodes[0],
+                "SELECT @@hostname;",
+                password=self.root_password,
+                host=host,
+                port=port,
+                check=False,
+                timeout=15,
+            )
+            if probe.ok:
+                seen.add(probe.stdout.strip())
+            if name in seen or time.time() >= deadline:
+                return seen
+
     def wait_proxy_ready(self, timeout: int = 120) -> None:
         """Wait until the proxy accepts connections and routes the read/write endpoint to the current primary.
 

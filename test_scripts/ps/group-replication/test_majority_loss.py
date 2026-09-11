@@ -11,11 +11,12 @@ Unlike the other partition tests, which always leave a writable majority behind,
 removes the majority itself. It asserts that writes are refused both directly on the
 primary and through the proxy, and that neither of those writes exists anywhere afterwards.
 
-Recovery is not necessarily automatic. Reconnecting the secondaries only brings the group
-back if they can still reach each other at the addresses XCOM holds for them, which comes
-down to whether the container runtime returned their old IPs — Docker usually does, podman
-usually does not. When it does not, the membership has to be forced onto one survivor. The
-test takes whichever path the runtime produces and logs which.
+Recovery may or may not be automatic. Reconnecting a secondary restores a 2-of-3 quorum on
+its own if XCOM still has a usable address for the old primary, which comes down to whether
+the container runtime returned the old IP (Docker usually does, podman usually does not);
+otherwise the membership has to be forced onto one survivor. The test waits for the view to
+settle after reconnecting and then takes whichever path applies — deciding immediately would
+race the force against a view change, which is how this failed on Docker.
 
 The test sets group_replication_unreachable_majority_timeout=30 on the primary only. At the
 default of 0 the primary would block indefinitely instead of leaving the group, never
@@ -125,32 +126,33 @@ def test_majority_loss(gr_cluster, sysbench):
     )
     gr_cluster.log(f"{gr_cluster.proxy} rejected the write: {via_proxy.stderr.strip()!r}")
 
-    # Reconnect the secondaries. Whether that is enough on its own depends on the container
-    # runtime: Docker hands a reconnected container its old address back, so the two
-    # secondaries find each other again, reach 2 of 3 and reform by themselves; podman hands
-    # out a new one, and XCOM does not follow a peer to a new address, so they stay stuck
-    # with everyone UNREACHABLE. Both are legitimate here, so try the group's own recovery
-    # first and force the membership only when it did not happen.
-    gr_cluster.heal_group(secondaries)
+    # Reconnect the secondaries, then let the view settle before deciding anything. Both
+    # outcomes are legitimate and which one happens is not under the test's control: the old
+    # primary is still on the network throughout (only the secondaries were cut off), so a
+    # reconnected secondary can reach it and restore a 2-of-3 quorum by itself — provided
+    # XCOM still has a usable address for it. Whether it does comes down to whether the
+    # runtime handed the container its old IP back, since XCOM does not follow a peer to a
+    # new address: Docker usually does, podman usually does not.
+    #
+    # Deciding straight after heal_group() catches XCOM mid-reaction and races the force
+    # against a view change, so wait for the view to stop moving first, then force only if
+    # quorum genuinely did not come back.
     seed = secondaries[0]
-    reformed = gr_cluster.wait_quorum(seed, timeout=60)
-    if not reformed:
-        # Forced down to a single member rather than to both secondaries: XCOM refuses a
-        # forced list naming anyone it currently suspects ("Only alive members in the
-        # current configuration should be present in a forced configuration list"), and a
-        # node that never re-established contact still suspects the other.
+    gr_cluster.heal_group(secondaries)
+    settled = gr_cluster.wait_view_stable(seed)
+    if gr_cluster.has_quorum(seed):
+        gr_cluster.log(f"{seed} regained quorum without forcing: {settled}")
+    else:
+        gr_cluster.log(f"{seed} still has no quorum, forcing the membership: {settled}")
         gr_cluster.force_members([seed], node=seed)
-    gr_cluster.log(
-        f"quorum recovered {'on its own' if reformed else 'by forcing the membership'}"
-    )
     assert gr_cluster.has_quorum(seed), (
         f"{seed} still has no quorum: {gr_cluster.member_states(seed)}"
     )
 
     # Whoever is not back in the group restarts Group Replication and rejoins. Read that set
-    # from the group rather than hardcoding it: which nodes are still out depends on the
-    # path above, and stopping GR on a member that is already ONLINE would drop the
-    # survivors back below quorum.
+    # from the group rather than hardcoding it: which nodes are still out depends on the path
+    # above, and stopping GR on a member that is already ONLINE would drop the survivors back
+    # below quorum.
     in_group = {h for h, (state, _) in gr_cluster.member_states(seed).items() if state == "ONLINE"}
     for node in gr_cluster.containers:
         if node not in in_group:

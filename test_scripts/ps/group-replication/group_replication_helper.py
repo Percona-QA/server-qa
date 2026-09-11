@@ -325,22 +325,28 @@ class GroupReplication:
             for state, role in self.member_states(node).values()
         )
 
-    def wait_quorum(self, node: str, timeout: int = 60) -> bool:
-        """Poll until `node`'s side of the group has quorum; return whether it got there.
+    def wait_view_stable(
+        self, node: str, settle: int = 3, interval: int = 2, timeout: int = 60
+    ) -> dict[str, tuple[str, str]]:
+        """Wait until `node`'s membership view stops changing; return the settled view.
 
-        Returns a bool rather than raising: after connectivity is restored both outcomes are
-        legitimate. Whether the members find each other again depends on whether the
-        container runtime handed them back their old addresses — XCOM does not follow a peer
-        to a new one — so the caller decides what to do when they did not.
+        Reading the view once straight after connectivity is restored catches XCOM
+        mid-reaction: a peer may be about to come back, so a decision made on that snapshot
+        (notably "has this side lost quorum, and must the membership be forced?") can be
+        overtaken and leave the force racing a view change. Requiring `settle` consecutive
+        identical reads gives XCOM time to finish reacting. Returns the last view read even
+        if it never settled, since the caller has to decide something either way.
         """
-        self.log(f"wait up to {timeout}s for {node} to regain quorum")
+        self.log(f"wait for {node}'s view to settle")
         deadline = time.time() + timeout
-        while True:
-            if self.has_quorum(node):
-                return True
-            if time.time() >= deadline:
-                return False
-            time.sleep(2)
+        last = self.member_states(node)
+        stable = 1
+        while stable < settle and time.time() < deadline:
+            time.sleep(interval)
+            current = self.member_states(node)
+            stable = stable + 1 if current == last else 1
+            last = current
+        return last
 
     def rejoin_node(self, name: str, timeout: int = 180) -> None:
         """Restart a stopped node and wait for it to auto-rejoin and all members to be ONLINE."""

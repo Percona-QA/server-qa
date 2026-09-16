@@ -44,7 +44,7 @@ class Sysbench:
             f"--table-size={self.table_size}",
         ]
 
-    def _exec(self, command: list[str]):
+    def _exec(self, command: list[str], check: bool = True):
         return self.docker.run(
             self.image,
             name=self.name,
@@ -52,12 +52,27 @@ class Sysbench:
             entrypoint="sysbench",
             command=command,
             remove=True,
-            check=True,
+            check=check,
         )
 
     def prepare(self, host: str, workload: str = "oltp_read_write", port: int = 3306):
         self.log(f"sysbench prepare ({self.tables} tables x {self.table_size} rows) on {host}:{port}")
         return self._exec(self._args(host, workload, port) + ["prepare"])
+
+    def cleanup(
+        self,
+        host: str,
+        workload: str = "oltp_read_write",
+        port: int = 3306,
+        check: bool = True,
+    ):
+        """Drop the sysbench tables, so a later test can prepare() against the same cluster.
+
+        prepare() creates the tables outright and fails if they already exist, so without
+        this two sysbench tests cannot share a module-scoped cluster.
+        """
+        self.log(f"sysbench cleanup ({self.tables} tables) on {host}:{port}")
+        return self._exec(self._args(host, workload, port) + ["cleanup"], check=check)
 
     def run(self, host: str, workload: str = "oltp_read_write", time: int = 20, port: int = 3306):
         self.log(f"sysbench {workload} run for {time}s ({self.threads} threads) on {host}:{port}")

@@ -16,9 +16,16 @@ group-replication/
 ├── sysbench_helper.py          # Sysbench — ephemeral sysbench load container
 ├── xtrabackup_helper.py        # XtraBackup — full/incremental backup + restore
 ├── test_basic.py               # smoke test: write on primary, read on every node
-├── test_failover.py            # primary failover + recovery under sysbench load
+├── test_primary_shutdown_failover.py  # primary stopped or killed: election + auto-rejoin
+├── test_rejoin_after_scale_up.py # node killed, 4th added, killed node rejoins
 ├── test_scaling.py             # scale up 3->5 and down 5->3 under sysbench load
-└── test_backup_restore.py      # XtraBackup full+incremental backup and restore
+├── test_backup_restore.py      # XtraBackup full+incremental backup and restore
+├── test_secondary_isolation_ist.py # secondary network-partitioned, rejoins via IST
+├── test_secondary_isolation_sst.py # same, binlogs purged so it rejoins via clone/SST
+├── test_primary_isolation_failover.py # primary partitioned: automatic failover
+├── test_majority_loss.py       # both secondaries cut off: quorum loss, no writes
+├── test_majority_loss_kill.py  # same, by killing two of three nodes
+└── test_equal_partition.py     # 4-node 2-2 split: split-brain prevention
 ```
 
 ## Prerequisites
@@ -46,12 +53,12 @@ The fixture brings up 3 containers (by default `ps<workerid>-1`, `ps<workerid>-2
 `grnet-<workerid>` network (e.g. `grnet-0` / `ps0-1..3` when running serially, or `grnet-gw0` / `psgw0-1..3` under pytest-xdist), bootstraps the cluster via mysqlsh, runs the tests,
 then removes containers, volumes, and the network. Expect ~1 minute end-to-end.
 
-## Failover test (sysbench)
+## Failover test (primary shutdown)
 
-`test_failover.py` drives real load and exercises a primary outage:
+`test_primary_shutdown_failover.py` drives real load and exercises a primary outage:
 
 ```bash
-GR_VERBOSE=1 pytest -v test_failover.py
+GR_VERBOSE=1 pytest -v test_primary_shutdown_failover.py
 ```
 
 What it does: load initial data with sysbench (`prepare`, 4 tables × 10000 rows),
@@ -60,6 +67,9 @@ workload against the new primary and compare checksums across the online nodes,
 restart the stopped node (it **auto-rejoins** because the framework persists
 `group_replication_start_on_boot=ON`), then run another 20s workload against the
 full cluster and compare checksums across all three. Expect ~2-3 minutes.
+
+This kills mysqld, so the group loses the member immediately. For the variant where
+the process stays alive and only its network is cut, see the partition tests below.
 
 Sysbench notes:
 - Runs from the multi-arch image `pingwinator/sysbench:latest` (pulled on first
@@ -75,6 +85,87 @@ Sysbench notes:
 Relevant `GroupReplication` helpers: `get_primary()`, `stop_node()`,
 `rejoin_node()`, `wait_all_online()`, and `verify_checksums(database, nodes=...)`
 (defaults to the currently-online nodes).
+
+## Network partition tests
+
+Three tests injure the cluster with `docker network disconnect` instead of
+`docker stop`. That distinction is the whole point: the container keeps running, so
+**mysqld stays alive and keeps its data** — the group has to cope with a member it
+cannot reach rather than one that has cleanly departed. The node is put back with
+`docker network connect`. Expect ~3.5 minutes per proxy for each test.
+
+```bash
+GR_VERBOSE=1 pytest -v test_secondary_isolation_ist.py
+GR_VERBOSE=1 pytest -v test_secondary_isolation_sst.py
+GR_VERBOSE=1 pytest -v test_primary_isolation_failover.py
+GR_VERBOSE=1 pytest -v test_majority_loss.py
+GR_VERBOSE=1 pytest -v test_equal_partition.py
+```
+
+- **`test_secondary_isolation_ist.py`** — isolates one secondary, runs a 30s sysbench
+  workload so it falls behind, then heals while the donors still hold the binary logs
+  covering that window. Asserts the node came back by **IST**: no new row in
+  `performance_schema.clone_status`, and its `gtid_executed` caught up to the primary's.
+- **`test_secondary_isolation_sst.py`** — the same partition, but
+  `purge_binary_logs()` runs on **every** surviving node before the heal, so no donor can
+  serve an IST. Asserts the node came back by **clone/SST**: a *new* clone row with
+  `STATE=Completed, ERROR_NO=0`. Purging only the primary would not be enough — GR picks
+  its recovery donor from any `ONLINE` member.
+- **`test_primary_isolation_failover.py`** — isolates the **primary**. The two surviving
+  secondaries hold majority and must expel it, elect a new primary and become writable on
+  their own; the test measures and logs that failover window, checks the proxy re-routes
+  writes to the new primary, and confirms the old primary rejoins as a `SECONDARY`.
+  After the heal it rebuilds the proxy and checks the rejoined node is serving reads again —
+  it came back on a new address, and without that rebuild HAProxy drops it from the read
+  backend for good. It sets `group_replication_unreachable_majority_timeout=30` on the
+  primary beforehand: at the default of `0` a minority-blocked member never leaves the group, so
+  `group_replication_exit_state_action` never fires and writes hang rather than being
+  rejected. With the timeout set, the old primary self-ejects and goes `super_read_only`,
+  and the test can assert that the write it refused exists on no node afterwards.
+
+- **`test_majority_loss.py`** — cuts off **both** secondaries at once, so every member is
+  alone and no side holds a majority. The surviving primary must refuse writes rather than
+  accept anything it can never replicate: the test asserts writes fail both directly and
+  through the proxy, and that neither exists on any node afterwards. Reconnecting the
+  secondaries restores a 2-of-3 quorum between them, then the old primary rejoins. Like the
+  primary-isolation test it sets `group_replication_unreachable_majority_timeout=30` on the
+  primary, so it leaves the group and goes `super_read_only` instead of blocking forever.
+
+  Recovery here is **not** automatic, which is worth knowing before writing more of these.
+  Reconnecting the network is not enough: a member blocked in a minority keeps its stale
+  view and still reports the others `UNREACHABLE`. The group has to be forced back with
+  `force_members()`, and XCOM refuses a forced list containing anyone it currently suspects
+  (*"Only alive members in the current configuration should be present in a forced
+  configuration list"*) — so it is forced down to a **single** member and the rest rejoin
+  with `restart_group_replication()`.
+
+- **`test_equal_partition.py`** — the only 4-node test. Splits the cluster down the middle
+  into two halves of two, each intact internally but holding just 2 of 4. Neither half may
+  accept a write or promote a primary of its own. GR cannot resolve an even split by itself:
+  recovery is an operator running `force_members()` on the chosen half — and unlike the
+  majority-loss case the forced list can name **both** its members, since they are alive and
+  can see each other. Roughly 4 minutes per proxy.
+
+Two things about splitting the cluster. `partition_group()` detaches each node from the
+network individually, so the isolated nodes cannot see **each other** either — it produces N
+one-node partitions. Moving a pair onto a second network does *not* fix that: a container
+that changes network changes IP, and XCOM does not follow a peer to a new address, so the
+moved pair lose each other too (verified). A split into two internally-connected halves
+therefore uses `sever_link()`, which blackholes the other half's addresses with reject routes
+inside each container, leaving every IP and process untouched. That is why node containers
+run with `NET_ADMIN`.
+
+And one about writes during a partition. With `group_replication_unreachable_majority_timeout`
+at its default `0`, a write to a primary that has lost quorum **blocks** rather than failing —
+and a blocked write is not discarded. It is parked awaiting consensus, so it commits once that
+half is unblocked, even if the client that issued it has gone. Assert that no write becomes
+*visible* while the split is in effect, rather than that it never lands.
+
+Two notes for anyone writing more of these. `performance_schema.clone_status` is never
+empty on a secondary — `create()` adds every node with `recoveryMethod:'clone'`, so the
+only way to tell an IST from an SST is to compare snapshots taken before and after. And
+`COUNT_TRANSACTIONS_REMOTE_APPLIED` stays `0` after a recovery-channel catch-up, since it
+only counts what arrives once a member is already `ONLINE`; use `gtid_subset()` instead.
 
 ## Scaling test (sysbench)
 
@@ -96,7 +187,7 @@ Relevant `GroupReplication` helpers: `scale_up(count)`, `scale_down(count)`,
 original members (i.e. `<node_prefix><index>` — e.g. `ps0-4`, `ps0-5`, … with the default fixture).
 proxy is reconciled automatically after each change — MySQL Router auto-discovers
 members from cluster metadata; HAProxy's container is recreated so its static backend
-server list matches the new membership (`_refresh_proxy()`).
+server list matches the new membership (`refresh_proxy()`).
 
 ## Backup / restore test (XtraBackup)
 
@@ -447,6 +538,11 @@ docker network rm grnet-<workerid>
 Add files named `test_*.py` in this directory. Request the `gr_cluster`
 fixture and use:
 
+The fixture's indirect parameter is normally just a proxy name (`"router"` / `"haproxy"`),
+which gives a 3-node cluster. For a different size pass a `(proxy, num_nodes)` tuple, wrapped
+in `pytest.param(..., id=proxy)` so the node id stays readable — see
+`test_equal_partition.py`, which asks for 4 nodes.
+
 - `gr_cluster.exec_sql("SQL;")` — run application SQL through the read/write
   endpoint (the router when enabled, else the primary). Use this for DDL/DML
   instead of targeting a node directly, so the test is proxy-agnostic.
@@ -455,11 +551,87 @@ fixture and use:
 - `gr_cluster.get_bootstrap_node()` — name of the bootstrap node (e.g. `"ps0-1"` when running serially, or `"psgw0-1"` under pytest-xdist); for the
   currently-elected primary (which differs after failover) use `gr_cluster.get_primary()`.
 - `gr_cluster.containers` — list of all node names in start order.
+- `gr_cluster.stop_node(node)` / `gr_cluster.kill_node(node)` — take a node's mysqld down.
+  A stop is graceful (SIGTERM): mysqld shuts down cleanly and GR announces the member
+  leaving, so the group loses it at once. A kill is abrupt (SIGKILL) and the group has to
+  notice a dead peer by timeout. Both leave the container stopped — a `--restart always`
+  policy does not resurrect a killed container.
+- `gr_cluster.rejoin_node(node)` / `gr_cluster.rejoin_nodes(nodes)` — restart stopped or
+  killed nodes and wait for the group to be whole. Use the plural form to bring back more
+  than one: the singular waits for the whole group after each node, so calling it twice
+  would wait on a member that is still down. Both refresh the returning node's persisted
+  seed list, which matters if the cluster changed shape while it was away.
+- `gr_cluster.isolate_node(node)` / `gr_cluster.heal_node(node)` — network-partition a
+  node and heal it again. Unlike `stop_node()`, mysqld keeps running and only loses
+  connectivity, which is what exercises GR's expulsion, minority-block and distributed
+  recovery (IST/SST) paths. `heal_node()` returns `True` when GR rejoined the member on
+  its own and `False` when it needed an explicit `START GROUP_REPLICATION`.
+- `gr_cluster.node_alive(node)` — does mysqld still answer queries? (liveness, not
+  membership — the point of a partition test is that this stays `True`).
+- `gr_cluster.local_member_state(node)` — the node's own `MEMBER_STATE` as it sees itself
+  (`ONLINE` / `RECOVERING` / `ERROR` / `OFFLINE`), for the minority side of a partition.
+- `gr_cluster.wait_node_isolated(node)` — poll until an isolated node sees no group
+  member but itself as `ONLINE`, and return its view. On timeout it returns the last view
+  it read rather than raising, so the caller has to assert on what comes back. The minority
+  side runs its own suspicion timer, so this is still needed after `wait_online_count()`
+  has settled.
+- `gr_cluster.sever_link(group_a, group_b)` / `gr_cluster.restore_link(group_a, group_b)` —
+  cut two halves of the cluster off from each other with reject routes, leaving every IP and
+  process intact. Use this, not `partition_group()`, when both halves must stay internally
+  connected. Nodes in `group_b` drop out of `active_nodes`.
+- `gr_cluster.partition_group(nodes)` / `gr_cluster.heal_group(nodes)` — isolate or
+  reconnect several nodes at once. `partition_group()` gives each node its **own** one-node
+  partition (they lose contact with each other too), so it cannot express a split into two
+  communicating sub-groups. `heal_group()` only reconnects and restores `active_nodes`; it
+  does not wait for `ONLINE`, because after a majority loss members come back in stages.
+- `gr_cluster.wait_members_unreachable(nodes, node=...)` — poll until the given members are
+  seen as `UNREACHABLE` from an observer node, and return that view. Same contract as
+  `wait_node_isolated()`: a timeout returns the last view read rather than raising, so
+  assert on what comes back.
+- `gr_cluster.force_members(nodes, node=...)` / `gr_cluster.restart_group_replication(node)` —
+  recovery from a lost quorum. Force the membership down to the single node you run it on
+  (XCOM rejects any member it currently suspects), then restart GR on the others so they
+  rejoin. `force_members()` always clears `group_replication_force_members` afterwards.
+- `gr_cluster.refresh_proxy()` — rebuild HAProxy so it picks up the current node set and
+  their current addresses. Also needed after a node is **stopped or killed**: HAProxy
+  resolves every backend address while parsing its config and refuses to start if one does
+  not resolve, so the config lists only the nodes that are up and has to be rebuilt when
+  that set changes. Reconnecting a container to the network gives it a **new IP**, and HAProxy
+  resolves its backends once at config-parse time, so **any** test that reconnects a node
+  must call this before `wait_proxy_ready()` — not only ones where that node goes on to
+  become the primary. A rejoined *secondary* on a stale address is health-checked out of the
+  read backend and silently stops serving reads, which is easy to miss because the write
+  path still works. No-op for MySQL Router, which resolves by name.
+- `wait_all_online(node=...)` / `wait_online_count(n, node=...)` — read membership from an
+  explicit node. Needed when the head of `active_nodes` is not in the group. Unlike the two
+  above, these **raise** on timeout.
+- `gr_cluster.super_read_only(node)` / `gr_cluster.wait_super_read_only(node)` — read a
+  node's `@@super_read_only`, or poll until it is `ON`, for the side of a partition that has
+  lost quorum. `wait_super_read_only()` returns whether it got there rather than raising, so
+  assert on the result.
+- `gr_cluster.clone_status(node)` — the node's current/last clone operation as a
+  column→value map (`ID`, `STATE`, `ERROR_NO`, `BEGIN_TIME`), `{}` if it never cloned.
+  Every secondary already carries a completed row from the clone-based `addInstance` in
+  `create()`, so to tell an IST from an SST compare snapshots taken before and after,
+  rather than checking whether a row exists.
+- `gr_cluster.gtid_executed(node)` / `gr_cluster.gtid_subset(node, gtid_set)` — the node's
+  `gtid_executed` as a single-line GTID set, and whether it is a superset of another set.
+  Use these to prove a node caught up: `COUNT_TRANSACTIONS_REMOTE_APPLIED` stays 0 after a
+  recovery-channel catch-up, since it only counts what arrives once a member is `ONLINE`.
+- `gr_cluster.purge_binary_logs(nodes=None)` — `FLUSH` + `PURGE BINARY LOGS` on each node
+  (default: every active node), returning the resulting `gtid_purged` per node so you can
+  assert something was actually purged. Defaults to all nodes because GR picks its recovery
+  donor from any `ONLINE` member — purging only the primary still leaves a donor that can
+  serve an IST.
 - `gr_cluster.docker` — the `DockerHelper`. Common methods:
   - `docker.exec_mysql(node, "SQL;", database=None)` → returns `ExecResult` with `.stdout`, `.stderr`, `.returncode`, `.ok`.
   - `docker.exec_mysqlsh(node, "<JS script>")` — same return shape, runs mysqlsh AdminAPI.
   - `docker.exec_command(node, "shell command")` — arbitrary `sh -c` inside the container.
   - `docker.stop(node)` / `docker.start(node)` — useful for failover-style tests.
+  - `docker.network_disconnect(network, node)` / `docker.network_connect(network, node)` —
+    the raw partition primitive behind `isolate_node()`/`heal_node()`; both are no-ops when
+    the container is already in the requested state. `docker.container_networks(node)`
+    reports what it is attached to right now.
 
 Skeleton:
 

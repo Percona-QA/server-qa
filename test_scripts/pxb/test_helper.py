@@ -2020,6 +2020,42 @@ class BackupTestHelper:
         cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {name}"
         subprocess.run(cmd, shell=True, capture_output=True, check=False)
 
+    def s3_list_objects(self, prefix: str = "") -> List[str]:
+        """List object keys in the S3 bucket, optionally filtered by prefix.
+
+        Talks to the S3-compatible endpoint directly via curl's built-in AWS
+        SigV4 signing (``--aws-sigv4``, curl >= 7.75) so inspecting what
+        xbcloud actually left in the bucket does not require a boto3/awscli
+        dependency that the rest of this test suite doesn't otherwise need.
+        """
+        url = f"{self.s3_endpoint}/{self.s3_bucket}?list-type=2"
+        if prefix:
+            url += f"&prefix={prefix}"
+        cmd = [
+            "curl", "-s", "--aws-sigv4", f"aws:amz:{self.s3_region}:s3",
+            "--user", f"{self.s3_access_key}:{self.s3_secret_key}", url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            pytest.fail(f"ERR: Listing S3 objects (prefix={prefix!r}) failed: {result.stderr}")
+        return re.findall(r"<Key>(.*?)</Key>", result.stdout)
+
+    def s3_delete_object(self, key: str):
+        """Delete a single object directly from the S3 bucket via a REST DELETE.
+
+        Used to simulate the md5-sidecar cleanup option that xbcloud does not
+        currently provide (see ``test_cloud_backup_md5_delete``).
+        """
+        url = f"{self.s3_endpoint}/{self.s3_bucket}/{key}"
+        cmd = [
+            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "DELETE",
+            "--aws-sigv4", f"aws:amz:{self.s3_region}:s3",
+            "--user", f"{self.s3_access_key}:{self.s3_secret_key}", url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.stdout.strip() not in ("200", "204"):
+            pytest.fail(f"ERR: Deleting S3 object '{key}' failed with HTTP {result.stdout.strip()}")
+
     def run_ddl_in_background(self, ddl_func, *args, **kwargs) -> threading.Thread:
         """Launch a DDL operation in a background thread. Returns the thread handle."""
         thread = threading.Thread(target=ddl_func, args=args, kwargs=kwargs, daemon=True, name=f"ddl_{ddl_func.__name__}")

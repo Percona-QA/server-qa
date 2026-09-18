@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from test_helper import CORE_FILE_OPT, KMIP_CONFIGS, TEST_BASE_DIR, BackupTestHelper
@@ -883,7 +883,7 @@ def test_cloud_backup_md5_delete(test_helper):
         shutil.rmtree(test_helper.backup_dir)
     os.makedirs(test_helper.backup_dir)
 
-    log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
     def _take_cloud_md5_backup(backup_name: str, log_file: str) -> None:
         xb_cmd = test_helper._xtrabackup_cmd_prefix() + [

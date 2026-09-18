@@ -6,15 +6,15 @@ Assumption: PS and PXB are already installed as tarballs.
 """
 
 import os
-import sys
 import re
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
-import pytest
 
-from test_helper import BackupTestHelper, TEST_BASE_DIR, KMIP_CONFIGS, CORE_FILE_OPT
+import pytest
+from test_helper import CORE_FILE_OPT, KMIP_CONFIGS, TEST_BASE_DIR, BackupTestHelper
 
 
 @pytest.fixture(scope="function")

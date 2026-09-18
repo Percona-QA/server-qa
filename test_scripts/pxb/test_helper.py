@@ -2020,25 +2020,37 @@ class BackupTestHelper:
         cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {name}"
         subprocess.run(cmd, shell=True, capture_output=True, check=False)
 
-    def s3_list_objects(self, prefix: str = "") -> List[str]:
+    def s3_list_objects(self, prefix: str = "") -> list[str]:
         """List object keys in the S3 bucket, optionally filtered by prefix.
 
         Talks to the S3-compatible endpoint directly via curl's built-in AWS
         SigV4 signing (``--aws-sigv4``, curl >= 7.75) so inspecting what
         xbcloud actually left in the bucket does not require a boto3/awscli
         dependency that the rest of this test suite doesn't otherwise need.
+
+        curl exits 0 even when the server responds with an HTTP error (e.g.
+        403 for a signature/credentials mismatch), so the response's own
+        status line is checked explicitly here; otherwise an auth/config
+        problem would silently look like "the bucket has no matching
+        objects" instead of a clear, actionable error.
         """
         url = f"{self.s3_endpoint}/{self.s3_bucket}?list-type=2"
         if prefix:
             url += f"&prefix={prefix}"
         cmd = [
-            "curl", "-s", "--aws-sigv4", f"aws:amz:{self.s3_region}:s3",
+            "curl", "-s", "-w", "\n%{http_code}",
+            "--aws-sigv4", f"aws:amz:{self.s3_region}:s3",
             "--user", f"{self.s3_access_key}:{self.s3_secret_key}", url,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
-            pytest.fail(f"ERR: Listing S3 objects (prefix={prefix!r}) failed: {result.stderr}")
-        return re.findall(r"<Key>(.*?)</Key>", result.stdout)
+            pytest.fail(f"ERR: Listing S3 objects (prefix={prefix!r}) failed to run curl: {result.stderr}")
+        body, _, status = result.stdout.rpartition("\n")
+        if status.strip() != "200":
+            pytest.fail(
+                f"ERR: Listing S3 objects (prefix={prefix!r}) failed with HTTP {status.strip()}: {body.strip()}"
+            )
+        return re.findall(r"<Key>(.*?)</Key>", body)
 
     def s3_delete_object(self, key: str):
         """Delete a single object directly from the S3 bucket via a REST DELETE.
@@ -2048,13 +2060,14 @@ class BackupTestHelper:
         """
         url = f"{self.s3_endpoint}/{self.s3_bucket}/{key}"
         cmd = [
-            "curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-X", "DELETE",
+            "curl", "-s", "-w", "\n%{http_code}", "-X", "DELETE",
             "--aws-sigv4", f"aws:amz:{self.s3_region}:s3",
             "--user", f"{self.s3_access_key}:{self.s3_secret_key}", url,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if result.stdout.strip() not in ("200", "204"):
-            pytest.fail(f"ERR: Deleting S3 object '{key}' failed with HTTP {result.stdout.strip()}")
+        body, _, status = result.stdout.rpartition("\n")
+        if status.strip() not in ("200", "204"):
+            pytest.fail(f"ERR: Deleting S3 object '{key}' failed with HTTP {status.strip()}: {body.strip()}")
 
     def run_ddl_in_background(self, ddl_func, *args, **kwargs) -> threading.Thread:
         """Launch a DDL operation in a background thread. Returns the thread handle."""

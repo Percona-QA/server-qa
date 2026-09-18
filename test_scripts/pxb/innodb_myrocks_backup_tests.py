@@ -1175,7 +1175,7 @@ PARALLEL_ORDER_ROCKSDB_SCOPE = re.compile(r"\.rocksdb/")
 
 
 def _sysbench_prepare(
-    test_helper, database: str, tables: int, table_size: int, log_name: str, storage_engine: str = None
+    test_helper, database: str, tables: int, table_size: int, log_name: str, storage_engine: str | None = None
 ) -> None:
     """Create and populate sbtest1..sbtestN via sysbench 'prepare'."""
     log_path = os.path.join(test_helper.logdir, log_name)

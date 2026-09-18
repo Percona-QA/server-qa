@@ -1275,7 +1275,7 @@ def test_decompress_largest_file_first(test_helper):
     os.makedirs(test_helper.backup_dir)
     full_target = os.path.join(test_helper.backup_dir, "full")
 
-    log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     backup_log = os.path.join(test_helper.logdir, f"adv_backup_{log_date}_log")
     xb_cmd = test_helper._xtrabackup_cmd_prefix() + [
         "--no-defaults", f"--user={test_helper.backup_user}", "--password=",
@@ -1339,7 +1339,7 @@ def test_copy_back_largest_file_first(test_helper):
     os.makedirs(test_helper.backup_dir)
     full_target = os.path.join(test_helper.backup_dir, "full")
 
-    log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     backup_log = os.path.join(test_helper.logdir, f"adv_backup_{log_date}_log")
     xb_cmd = test_helper._xtrabackup_cmd_prefix() + [
         "--no-defaults", f"--user={test_helper.backup_user}", "--password=",

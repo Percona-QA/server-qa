@@ -77,6 +77,13 @@ S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
 S3_REGION = os.environ.get("S3_REGION", "")
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
+# SHA-256 of an empty string -- the fixed x-amz-content-sha256 value for a
+# request with no body. curl's --aws-sigv4 computes and sends this header
+# itself on some versions but not others (observed missing entirely against
+# real AWS S3 with the curl build on the CI host, even though it works
+# against MinIO either way); passing it explicitly makes the signed request
+# independent of that curl-version behavior.
+S3_EMPTY_PAYLOAD_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 INSTALL_TYPE = os.environ.get("INSTALL_TYPE", "tarball")  # tarball or package
 ROCKSDB = os.environ.get("ROCKSDB", "enabled")  # enabled or disabled
 BACKUP_USER = os.environ.get("BACKUP_USER", "root")
@@ -2040,7 +2047,8 @@ class BackupTestHelper:
         cmd = [
             "curl", "-s", "-w", "\n%{http_code}",
             "--aws-sigv4", f"aws:amz:{self.s3_region}:s3",
-            "--user", f"{self.s3_access_key}:{self.s3_secret_key}", url,
+            "--user", f"{self.s3_access_key}:{self.s3_secret_key}",
+            "-H", f"x-amz-content-sha256: {S3_EMPTY_PAYLOAD_SHA256}", url,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
@@ -2062,7 +2070,8 @@ class BackupTestHelper:
         cmd = [
             "curl", "-s", "-w", "\n%{http_code}", "-X", "DELETE",
             "--aws-sigv4", f"aws:amz:{self.s3_region}:s3",
-            "--user", f"{self.s3_access_key}:{self.s3_secret_key}", url,
+            "--user", f"{self.s3_access_key}:{self.s3_secret_key}",
+            "-H", f"x-amz-content-sha256: {S3_EMPTY_PAYLOAD_SHA256}", url,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         body, _, status = result.stdout.rpartition("\n")

@@ -875,7 +875,8 @@ def test_cloud_backup_md5_delete(test_helper):
     while test_helper.is_load_running():
         time.sleep(1)
 
-    databases = ["test"]
+    rocksdb_enabled = test_helper.rocksdb == "enabled"
+    databases = ["test", "test_rocksdb"] if rocksdb_enabled else ["test"]
     orig_data = test_helper.collect_table_data(databases)
 
     if os.path.exists(test_helper.backup_dir):
@@ -960,7 +961,8 @@ def test_cloud_backup_md5_delete(test_helper):
     )
     test_helper.restore_backup_to(replica.datadir, test_helper.restore_params, log_date)
     replica.start()
-    replica.check_tables(database="test")
+    for db in databases:
+        replica.check_tables(database=db)
 
     replica_mysql = os.path.join(replica.basedir, "bin/mysql")
     for db in databases:

@@ -1569,40 +1569,14 @@ class BackupTestHelper:
 
         time.sleep(2)
 
-        # --- Stop server and move data directory ---
-        print("Stopping mysql server and moving data directory")
-        self.primary.stop(timeout=MYSQL_SHUTDOWN_TIMEOUT)
-
-        data_orig = os.path.join(self.backup_dir, f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
-        if os.path.exists(data_orig):
-            shutil.rmtree(data_orig)
-        shutil.move(self.datadir, data_orig)
-
-        # --- Restore backup ---
-        print("=>Restoring full backup")
-        cmd = self._xtrabackup_cmd_prefix() + [
-            "--no-defaults", "--copy-back",
-            f"--target-dir={full_target}",
-            f"--datadir={self.datadir}",
-        ] + self.restore_params.split()
-
-        log_file = os.path.join(self.logdir, f"res_backup_{log_date}_log")
-        result = self.run_command(cmd, check=False, log_file=log_file)
-        if result.returncode != 0:
-            pytest.fail(f"ERR: Restore of full backup failed. Please check the log at: {log_file}")
-        else:
-            print(f"..Restore of full backup was successful.\n  Logs available at: {log_file}")
-
-        # Copy .pem files from original datadir for SSL
-        for pem_file in glob.glob(os.path.join(data_orig, "*.pem")):
-            shutil.copy2(pem_file, self.datadir)
-
-        # Copy keyring file if it exists as transition-key
-        keyring_in_backup = os.path.join(full_target, "keyring")
-        if os.path.isfile(keyring_in_backup):
-            shutil.copy2(keyring_in_backup, self.logdir)
-
-        self.start_server()
+        # --- Stop server, copy-back, restart (shared with FIFO restore path) ---
+        data_orig = self.restore_datadir_from(
+            full_target,
+            data_orig_dir=os.path.join(self.backup_dir, f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
+            copy_ssl_pem=True,
+            copy_keyring_to_logdir=True,
+            log_file=os.path.join(self.logdir, f"res_backup_{log_date}_log"),
+        )
 
         # --- Verify ---
         if use_detailed_verify:
@@ -1623,8 +1597,8 @@ class BackupTestHelper:
 
                 print(f"Xtrabackup binlog position: {xb_binlog_file}, {xb_binlog_pos}")
                 print(f"Applying binlog to restored data starting from {xb_binlog_file}, {xb_binlog_pos}")
-                binlog_path = os.path.join(data_orig, xb_binlog_file)
-                if os.path.exists(binlog_path):
+                binlog_path = os.path.join(data_orig, xb_binlog_file) if data_orig else ""
+                if binlog_path and os.path.exists(binlog_path):
                     mysqlbinlog = subprocess.Popen(
                         [os.path.join(self.mysqldir, "bin/mysqlbinlog"), binlog_path, f"--start-position={xb_binlog_pos}"],
                         stdout=subprocess.PIPE,
@@ -2001,7 +1975,7 @@ class BackupTestHelper:
         return " ".join(params)
 
     def xbcloud_put(self, cloud_params: str, name: str, stream_file: str):
-        """Upload backup stream to cloud."""
+        """Upload a local stream file to cloud (`cat file | xbcloud put`)."""
         cmd = f"cat {stream_file} | {os.path.join(self.xtrabackup_dir, 'xbcloud')} put {cloud_params} {name}"
         log_file = os.path.join(self.logdir, f"xbcloud_put_{name}.log")
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
@@ -2010,37 +1984,7 @@ class BackupTestHelper:
         if result.returncode != 0:
             pytest.fail(f"xbcloud put failed for {name}. Log: {log_file}")
 
-    def xbcloud_get(self, cloud_params: str, name: str, target_dir: str):
-        """Download backup from cloud."""
-        os.makedirs(target_dir, exist_ok=True)
-        cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {name} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {target_dir}"
-        log_file = os.path.join(self.logdir, f"xbcloud_get_{name}.log")
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
-        with open(log_file, "w") as f:
-            f.write(result.stdout + "\n" + result.stderr)
-        if result.returncode != 0:
-            pytest.fail(f"xbcloud get failed for {name}. Log: {log_file}")
-
-    def xbcloud_delete(self, cloud_params: str, name: str):
-        """Delete backup from cloud."""
-        cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {name}"
-        subprocess.run(cmd, shell=True, capture_output=True, check=False)
-
-    # --- FIFO-streamed backup/restore -----------------------------------
-    #
-    # Unlike take_backup()'s "cloud" backup_type (a single shell pipe:
-    # `xtrabackup ... | xbcloud put ...`), FIFO streaming runs xtrabackup and
-    # xbcloud (or xbstream and xbcloud) as two independent processes that
-    # rendezvous through a directory of named pipes: xtrabackup/xbstream
-    # writes/reads --fifo-streams pipes under --fifo-dir while xbcloud reads/
-    # writes the same pipes concurrently. This lets xbcloud parallelize the
-    # network transfer across multiple streams instead of being serialized
-    # behind a single pipe. Ported from xbstream_fifo_test.sh's xbcloud_put()/
-    # xbcloud_get() (which backgrounded xtrabackup/xbstream and ran xbcloud in
-    # the foreground) into the run_command(background=True) idiom used
-    # elsewhere in this module.
-
-    def take_fifo_backup_step(
+    def take_backup_fifo(
         self,
         cloud_params: str,
         name: str,
@@ -2051,16 +1995,16 @@ class BackupTestHelper:
         fifo_dir: Optional[str] = None,
         log_file: Optional[str] = None,
     ) -> None:
-        """Take one backup step (full or a single incremental) and stream it
-        to xbcloud via named pipes.
+        """Take one backup and upload via FIFO-streamed xbcloud put.
 
-        --extra-lsndir captures the LSN/checkpoint metadata on local disk
-        (the backup payload itself never touches local disk, so this is the
-        only way to get --incremental-basedir for the next step).
-        keyring_backup_opts should carry --xtrabackup-plugin-dir for
-        encrypted backups (--component-keyring-config is ignored by
-        `xtrabackup --backup`; the component is discovered via the plugin
-        dir and the server's own manifest instead).
+        Unlike :meth:`xbcloud_put` (file-based `cat | put`) and
+        ``take_backup(backup_type="cloud")`` (single shell pipe), this runs
+        xtrabackup and xbcloud as two processes that rendezvous through
+        ``--fifo-streams`` named pipes under ``--fifo-dir``. ``--extra-lsndir``
+        captures LSN metadata on local disk (the backup payload itself never
+        lands locally), which is required for the next incremental's
+        ``--incremental-basedir``. ``keyring_backup_opts`` should carry
+        ``--xtrabackup-plugin-dir`` for encrypted backups.
         """
         if fifo_streams is None:
             fifo_streams = FIFO_STREAM
@@ -2092,25 +2036,44 @@ class BackupTestHelper:
         if put_result.returncode != 0 or backup_returncode != 0:
             pytest.fail(f"ERR: FIFO backup/upload failed for '{name}'. Please check the log at: {log_file}")
 
-    def restore_fifo_backup_step(
+    def xbcloud_get(
         self,
         cloud_params: str,
         name: str,
         target_dir: str,
+        *,
+        use_fifo: bool = False,
         fifo_streams: Optional[int] = None,
         fifo_dir: Optional[str] = None,
         log_file: Optional[str] = None,
     ) -> None:
-        """Restore one backup step from xbcloud via named pipes: xbstream -x
-        reads --fifo-streams pipes under --fifo-dir while xbcloud get writes
-        to them concurrently."""
+        """Download backup from cloud into ``target_dir``.
+
+        Default transport is a single shell pipe
+        (``xbcloud get | xbstream -xvC``). With ``use_fifo=True``, xbstream and
+        xbcloud run as two processes that rendezvous through ``--fifo-streams``
+        named pipes under ``--fifo-dir`` (parallel multi-stream download).
+        """
+        os.makedirs(target_dir, exist_ok=True)
+        log_file = log_file or os.path.join(self.logdir, f"xbcloud_get_{name}.log")
+
+        if not use_fifo:
+            cmd = (
+                f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {name} | "
+                f"{os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {target_dir}"
+            )
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True, check=False)
+            with open(log_file, "w") as f:
+                f.write(result.stdout + "\n" + result.stderr)
+            if result.returncode != 0:
+                pytest.fail(f"xbcloud get failed for {name}. Log: {log_file}")
+            return
+
         if fifo_streams is None:
             fifo_streams = FIFO_STREAM
         if fifo_dir is None:
             fifo_dir = FIFO_DIR
-        os.makedirs(target_dir, exist_ok=True)
         os.makedirs(fifo_dir, exist_ok=True)
-        log_file = log_file or os.path.join(self.logdir, f"fifo_restore_{name}.log")
 
         xbstream_cmd = [
             os.path.join(self.xtrabackup_dir, "xbstream"), "-x", "-C", target_dir,
@@ -2126,6 +2089,11 @@ class BackupTestHelper:
         restore_returncode = restore_proc.wait()
         if get_result.returncode != 0 or restore_returncode != 0:
             pytest.fail(f"ERR: FIFO restore/download failed for '{name}'. Please check the log at: {log_file}")
+
+    def xbcloud_delete(self, cloud_params: str, name: str):
+        """Delete backup from cloud."""
+        cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {name}"
+        subprocess.run(cmd, shell=True, capture_output=True, check=False)
 
     def cleanup_fifo_state(self, cloud_params: str, names: List[str], fifo_dir: Optional[str] = None) -> None:
         """Delete named S3 objects and clear stale FIFO pipes before a scenario.
@@ -2147,17 +2115,17 @@ class BackupTestHelper:
                 except OSError:
                     pass
 
-    def take_fifo_full_backup_and_restore(
+    def take_full_backup_fifo(
         self,
         cloud_params: str,
         keyring_backup_opts: str = "",
         fifo_streams: Optional[int] = None,
         fifo_dir: Optional[str] = None,
     ) -> str:
-        """Full backup -> FIFO/xbcloud put -> FIFO/xbcloud get -> decrypt/
-        decompress -> prepare. Returns backup_dir/full, ready for
-        restore_datadir_from(). Ported from xbstream_fifo_test.sh's
-        full_backup_and_restore().
+        """Full backup -> FIFO put -> FIFO get -> decrypt/decompress -> prepare.
+
+        Returns ``backup_dir/full``, ready for :meth:`restore_datadir_from`.
+        Ported from xbstream_fifo_test.sh's full_backup_and_restore().
         """
         if os.path.exists(self.backup_dir):
             shutil.rmtree(self.backup_dir)
@@ -2168,7 +2136,7 @@ class BackupTestHelper:
             shutil.rmtree(extra_lsndir)
 
         print("=>Taking full FIFO backup")
-        self.take_fifo_backup_step(
+        self.take_backup_fifo(
             cloud_params, "full_backup", extra_lsndir,
             keyring_backup_opts=keyring_backup_opts,
             fifo_streams=fifo_streams, fifo_dir=fifo_dir,
@@ -2177,9 +2145,9 @@ class BackupTestHelper:
 
         full_target = os.path.join(self.backup_dir, "full")
         print("=>Restoring FIFO backup")
-        self.restore_fifo_backup_step(
+        self.xbcloud_get(
             cloud_params, "full_backup", full_target,
-            fifo_streams=fifo_streams, fifo_dir=fifo_dir,
+            use_fifo=True, fifo_streams=fifo_streams, fifo_dir=fifo_dir,
         )
         print("..Restore successful")
 
@@ -2198,7 +2166,7 @@ class BackupTestHelper:
         self.xbcloud_delete(cloud_params, "full_backup")
         return full_target
 
-    def take_fifo_incremental_backup_and_restore(
+    def take_incremental_backup_fifo(
         self,
         cloud_params: str,
         keyring_backup_opts: str = "",
@@ -2206,12 +2174,13 @@ class BackupTestHelper:
         fifo_streams: Optional[int] = None,
         fifo_dir: Optional[str] = None,
     ) -> str:
-        """Full + N incremental backups (5s apart) streamed via FIFO to
-        xbcloud, then restored (each into its own backup_dir/<name> — the
-        increments are never merged locally) and prepared with a chained
-        --apply-log-only pass. Returns backup_dir/full, ready for
-        restore_datadir_from(). Ported from xbstream_fifo_test.sh's
-        incremental_backup_and_restore().
+        """Full + N incremental FIFO backups, restore each, chained prepare.
+
+        Incrementals are 5s apart; each is restored into its own
+        ``backup_dir/<name>`` (never merged locally) then applied with a
+        chained ``--apply-log-only`` prepare. Returns ``backup_dir/full``,
+        ready for :meth:`restore_datadir_from`. Ported from
+        xbstream_fifo_test.sh's incremental_backup_and_restore().
         """
         if os.path.exists(self.backup_dir):
             shutil.rmtree(self.backup_dir)
@@ -2225,7 +2194,7 @@ class BackupTestHelper:
         lsn_dirs = {name: os.path.join(lsn_root, name) for name in names}
 
         print("=>Taking Full Backup")
-        self.take_fifo_backup_step(
+        self.take_backup_fifo(
             cloud_params, "full", lsn_dirs["full"],
             keyring_backup_opts=keyring_backup_opts,
             fifo_streams=fifo_streams, fifo_dir=fifo_dir,
@@ -2237,7 +2206,7 @@ class BackupTestHelper:
             time.sleep(5)
             name = f"inc{i}"
             print(f"=>Taking Incremental Backup {i}")
-            self.take_fifo_backup_step(
+            self.take_backup_fifo(
                 cloud_params, name, lsn_dirs[name],
                 incremental_basedir=lsn_dirs[prev],
                 keyring_backup_opts=keyring_backup_opts,
@@ -2250,9 +2219,9 @@ class BackupTestHelper:
         targets = {}
         for name in names:
             target = os.path.join(self.backup_dir, name)
-            self.restore_fifo_backup_step(
+            self.xbcloud_get(
                 cloud_params, name, target,
-                fifo_streams=fifo_streams, fifo_dir=fifo_dir,
+                use_fifo=True, fifo_streams=fifo_streams, fifo_dir=fifo_dir,
             )
             self._decrypt_decompress(target, self.backup_params)
             targets[name] = target
@@ -2288,27 +2257,56 @@ class BackupTestHelper:
 
         return full_target
 
-    def restore_datadir_from(self, source_target_dir: str) -> None:
-        """Stop the server, move the current datadir aside, copy-back from
-        source_target_dir, and restart. Ported from xbstream_fifo_test.sh's
-        copy-back + start_server steps.
+    def restore_datadir_from(
+        self,
+        source_target_dir: str,
+        *,
+        data_orig_dir: Optional[str] = None,
+        copy_ssl_pem: bool = False,
+        copy_keyring_to_logdir: bool = False,
+        log_file: Optional[str] = None,
+    ) -> str:
+        """Stop the server, move the current datadir aside, ``--copy-back``, restart.
+
+        Shared by FIFO scenarios and :meth:`take_backup`'s restore path.
+        Returns the path of the moved-aside original datadir (empty string if
+        there was no datadir to move).
         """
+        print("Stopping mysql server and moving data directory")
         self.primary.stop(timeout=MYSQL_SHUTDOWN_TIMEOUT)
+
+        data_orig = ""
         if os.path.exists(self.datadir):
-            data_orig = os.path.join(
+            data_orig = data_orig_dir or os.path.join(
                 os.path.dirname(self.datadir), f"data_orig_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             )
+            if os.path.exists(data_orig):
+                shutil.rmtree(data_orig)
             shutil.move(self.datadir, data_orig)
+
         os.makedirs(self.datadir, exist_ok=True)
-        log_file = os.path.join(self.logdir, "fifo_copy_back.log")
+        print("=>Restoring full backup")
+        log_file = log_file or os.path.join(self.logdir, "copy_back.log")
         cmd = self._xtrabackup_cmd_prefix() + [
-            "--no-defaults", "--copy-back", f"--target-dir={source_target_dir}", f"--datadir={self.datadir}",
+            "--no-defaults", "--copy-back",
+            f"--target-dir={source_target_dir}", f"--datadir={self.datadir}",
         ] + self.restore_params.split()
         result = self.run_command(cmd, check=False, log_file=log_file)
         if result.returncode != 0:
             pytest.fail(f"ERR: xtrabackup --copy-back failed. Please check the log at: {log_file}")
         print(f"..Restored datadir at: {self.datadir}")
+
+        if copy_ssl_pem and data_orig:
+            for pem_file in glob.glob(os.path.join(data_orig, "*.pem")):
+                shutil.copy2(pem_file, self.datadir)
+
+        if copy_keyring_to_logdir:
+            keyring_in_backup = os.path.join(source_target_dir, "keyring")
+            if os.path.isfile(keyring_in_backup):
+                shutil.copy2(keyring_in_backup, self.logdir)
+
         self.start_server()
+        return data_orig
 
     def run_ddl_in_background(self, ddl_func, *args, **kwargs) -> threading.Thread:
         """Launch a DDL operation in a background thread. Returns the thread handle."""

@@ -110,7 +110,7 @@ def test_fifo_full_backup_and_restore(test_helper, cloud_params):
     test_helper.run_load(_default_tool_options(test_helper))
 
     test_helper.cleanup_fifo_state(cloud_params, ["full_backup"])
-    full_target = test_helper.take_fifo_full_backup_and_restore(cloud_params)
+    full_target = test_helper.take_full_backup_fifo(cloud_params)
     test_helper.restore_datadir_from(full_target)
     test_helper.check_tables()
 
@@ -125,7 +125,7 @@ def test_fifo_incremental_backup(test_helper, cloud_params):
     test_helper.run_load(_default_tool_options(test_helper))
 
     test_helper.cleanup_fifo_state(cloud_params, ["full", "inc1", "inc2", "inc3"])
-    full_target = test_helper.take_fifo_incremental_backup_and_restore(cloud_params)
+    full_target = test_helper.take_incremental_backup_fifo(cloud_params)
     test_helper.restore_datadir_from(full_target)
     test_helper.check_tables()
 
@@ -140,7 +140,7 @@ def test_fifo_compressed_backup(test_helper, cloud_params):
     test_helper.run_load(_default_tool_options(test_helper))
 
     test_helper.cleanup_fifo_state(cloud_params, ["full_backup"])
-    full_target = test_helper.take_fifo_full_backup_and_restore(cloud_params)
+    full_target = test_helper.take_full_backup_fifo(cloud_params)
     test_helper.restore_datadir_from(full_target)
     test_helper.check_tables()
 
@@ -158,7 +158,7 @@ def test_fifo_partition_tables(test_helper, cloud_params):
     test_helper.run_load(_pstress_tool_options(seconds=120, only_partition_tables=True))
 
     test_helper.cleanup_fifo_state(cloud_params, ["full", "inc1", "inc2", "inc3"])
-    full_target = test_helper.take_fifo_incremental_backup_and_restore(cloud_params)
+    full_target = test_helper.take_incremental_backup_fifo(cloud_params)
     test_helper.restore_datadir_from(full_target)
     test_helper.check_tables()
 
@@ -192,7 +192,7 @@ def test_fifo_keyring_file_backup(test_helper, cloud_params):
     test_helper.run_load(_pstress_tool_options(seconds=120, no_encryption=False))
 
     test_helper.cleanup_fifo_state(cloud_params, ["full", "inc1", "inc2", "inc3"])
-    full_target = test_helper.take_fifo_incremental_backup_and_restore(
+    full_target = test_helper.take_incremental_backup_fifo(
         cloud_params, keyring_backup_opts=keyring_backup_opts
     )
     test_helper.restore_datadir_from(full_target)
@@ -239,7 +239,7 @@ def test_fifo_kmip_backup(test_helper, cloud_params, vault_type):
     test_helper.run_load(_pstress_tool_options(seconds=120, no_encryption=False))
 
     test_helper.cleanup_fifo_state(cloud_params, ["full", "inc1", "inc2", "inc3"])
-    full_target = test_helper.take_fifo_incremental_backup_and_restore(
+    full_target = test_helper.take_incremental_backup_fifo(
         cloud_params, keyring_backup_opts=keyring_backup_opts
     )
     test_helper.restore_datadir_from(full_target)
@@ -257,7 +257,7 @@ def test_fifo_encrypted_backup(test_helper, cloud_params):
     test_helper.run_load(_pstress_tool_options(seconds=60))
 
     test_helper.cleanup_fifo_state(cloud_params, ["full_backup"])
-    full_target = test_helper.take_fifo_full_backup_and_restore(cloud_params)
+    full_target = test_helper.take_full_backup_fifo(cloud_params)
     test_helper.restore_datadir_from(full_target)
     test_helper.check_tables()
 

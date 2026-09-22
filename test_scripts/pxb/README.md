@@ -41,6 +41,10 @@
     - [Run a specific test suite](#run-a-specific-test-suite-3)
     - [Run all tests](#run-all-tests-3)
   - [Test reference — upgrade\_backup\_tests.py](#test-reference--upgrade_backup_testspy)
+- [xbstream\_fifo\_tests.py — FIFO-streamed cloud backup tests](#xbstream_fifo_testspy--fifo-streamed-cloud-backup-tests)
+  - [Additional environment variables](#additional-environment-variables-3)
+  - [How to run tests](#how-to-run-tests-4)
+  - [Test reference — xbstream\_fifo\_tests.py](#test-reference--xbstream_fifo_testspy)
 
 ---
 
@@ -830,3 +834,60 @@ python upgrade_backup_tests.py All
 | `test_upgrade_full_backup` | 1. full backup with previous PXB → prepare/restore with current PXB | Plain `--log-bin=binlog` server options; sysbench load runs in background |
 | `test_upgrade_inc_backup`  | 1. full + inc with previous PXB → prepare/restore with current PXB; 2. full with previous PXB + inc with current PXB → prepare/restore with current PXB | Two scenarios run sequentially against the same primary; sysbench load on each |
 | `test_upgrade_backup_encrypt` | 1. full prev → prepare/restore current; 2. full + inc prev → prepare/restore current; 3. full prev + inc current → prepare/restore current | Auto-detects server type (PS / MS / 5.7) and applies matching keyring + encryption options; uses `--keyring_file_data=<MYSQLDIR>/keyring` and per-binary `--xtrabackup-plugin-dir` for both PXB binaries |
+
+---
+
+## xbstream_fifo_tests.py — FIFO-streamed cloud backup tests
+
+Tests in `xbstream_fifo_tests.py` run full/incremental/compressed/partition-table/encrypted backups streamed through `xtrabackup`/`xbcloud`/`xbstream` named pipes (`--fifo-streams`/`--fifo-dir`) to a local [SeaweedFS](https://github.com/seaweedfs/seaweedfs) S3-gateway container, instead of a single-process shell pipe (which is what `take_backup(backup_type="cloud")` in the other test files uses). This exercises `xbcloud`'s multi-stream parallel upload/download path against an S3-compatible backend, without needing real cloud credentials.
+
+**Additional requirement:** Docker must be installed and running — `xbstream_fifo_tests.py` starts a `chrislusf/seaweedfs` container (`seaweedfs_helper.py`) once per test session (port `9000` on the host by default) and stops it when the session ends.
+
+### Additional environment variables
+
+```bash
+export LOAD_TOOL=pstress
+export LOAD_TOOL_DIR=$HOME/lab/pstress/src
+export FIFO_STREAM=30                # number of named pipes; default 30
+export FIFO_DIR=/tmp/xbstream_fifo   # FIFO pipe directory; default /tmp/xbstream_fifo
+```
+
+`test_fifo_partition_tables`, `test_fifo_keyring_file_backup`, and `test_fifo_kmip_backup` require `LOAD_TOOL=pstress` (they're skipped otherwise, since they rely on pstress's partition-table/encrypted-table DDL).
+
+**For KMIP tests** (`test_fifo_kmip_backup`): same requirements as `inc_backup_load_tests.py`'s `test_kmip_component_backup` — vault types come from `KMIP_CONFIGS`, skipped on 5.7/MS, and Fortanix variants need `FORTANIX_EMAIL`/`FORTANIX_PASSWORD`.
+
+### How to run tests
+
+```bash
+# Single test
+pytest xbstream_fifo_tests.py -v -s -k test_fifo_full_backup_and_restore
+
+# Multiple tests
+pytest xbstream_fifo_tests.py -v -s -k "test_fifo_full_backup_and_restore or test_fifo_compressed_backup"
+
+# One KMIP vault variant
+pytest xbstream_fifo_tests.py -v -s -k "test_fifo_kmip_backup[pykmip]"
+
+# Whole file
+pytest xbstream_fifo_tests.py -v -s
+
+# Via the script's built-in suites
+python xbstream_fifo_tests.py Fifo_Backup_tests
+python xbstream_fifo_tests.py Fifo_Partition_tests
+python xbstream_fifo_tests.py Fifo_Encryption_tests
+python xbstream_fifo_tests.py Fifo_Kmip_tests
+```
+
+Redirecting `-s` output to a log file for `tail -f`? Python fully buffers stdout when it isn't a TTY, so a genuinely-progressing test can look stuck. Use `python3 -u -m pytest ...` (or `export PYTHONUNBUFFERED=1`) to keep the log flushing in real time.
+
+### Test reference — xbstream_fifo_tests.py
+
+| Test | Type | Notes |
+|------|------|-------|
+| `test_fifo_full_backup_and_restore` | Non-param | Full backup and restore |
+| `test_fifo_incremental_backup` | Non-param | Full + 3 incrementals (5s apart), each restored/prepared separately (mirrors the original bash script's fixed-count design, not the load-until-done loop `take_backup()` uses elsewhere) |
+| `test_fifo_compressed_backup` | Non-param | Full backup with `--compress=zstd --compress-zstd-level=19` |
+| `test_fifo_partition_tables` | Non-param | Incremental backup of pstress-generated partitioned tables; requires `LOAD_TOOL=pstress` |
+| `test_fifo_keyring_file_backup` | Non-param | keyring_file component encrypted incremental backup; requires `LOAD_TOOL=pstress`. As of PXB 8.4.0-7/PS 8.4.10-10 this can occasionally crash `xtrabackup` with an InnoDB assertion (`fil0fil.cc:...:page_id.space() != TRX_SYS_SPACE`) while parsing the redo log of an encrypted incremental — a product-level PXB/InnoDB bug, not a bug in this test |
+| `test_fifo_kmip_backup` | Param | One id per vault in `KMIP_CONFIGS` (e.g. `[pykmip]`, `[fortanix]`); requires `LOAD_TOOL=pstress`; skipped on 5.7/MS; Fortanix variants require `FORTANIX_EMAIL`, `FORTANIX_PASSWORD` |
+| `test_fifo_encrypted_backup` | Non-param | Full backup encrypted with xbcrypt (`--encrypt=AES256`, not keyring-based) |

@@ -3052,8 +3052,8 @@ class BackupTestHelper:
         ):
             pytest.skip("Fortanix KMIP requires FORTANIX_EMAIL and FORTANIX_PASSWORD environment variables")
 
-        if vault_type == "hashicorp" and not os.environ.get("VAULT_LICENSE", "").strip():
-            pytest.skip("HashiCorp Vault KMIP requires a VAULT_LICENSE environment variable (Vault Enterprise license)")
+        if vault_type == "hashicorp" and not os.environ.get("HASHICORP_VAULT_LICENSE", "").strip():
+            pytest.skip("HashiCorp Vault KMIP requires a HASHICORP_VAULT_LICENSE environment variable (Vault Enterprise license)")
 
         if not self.kmip_helper:
             self.kmip_helper = KMIPHelper(KMIP_CONFIGS, cert_base_dir=TEST_BASE_DIR)
@@ -3331,9 +3331,9 @@ class BackupTestHelper:
                     pytest.skip(
                         "Fortanix KMIP requires FORTANIX_EMAIL and FORTANIX_PASSWORD"
                     )
-                if vault_type == "hashicorp" and not os.environ.get("VAULT_LICENSE", "").strip():
+                if vault_type == "hashicorp" and not os.environ.get("HASHICORP_VAULT_LICENSE", "").strip():
                     pytest.skip(
-                        "HashiCorp Vault KMIP requires a VAULT_LICENSE environment variable"
+                        "HashiCorp Vault KMIP requires a HASHICORP_VAULT_LICENSE environment variable"
                     )
                 print(f"Testing keyring_kmip with vault {vault_type} (encrypted crash)...")
                 if not self.kmip_helper:

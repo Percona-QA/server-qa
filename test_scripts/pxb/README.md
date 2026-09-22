@@ -109,7 +109,7 @@ If any of these are unset, KMS tests are skipped. PS 8.0+ only; skipped on MS.
 
 **For KMIP tests** (`test_kmip_component_backup`, `test_crash_backup_encrypted_kmip`):
 
-- Vault types come from `KMIP_CONFIGS` in `test_helper.py` (currently `pykmip`, `fortanix`).
+- Vault types come from `KMIP_CONFIGS` in `test_helper.py` (currently `pykmip`, `fortanix`, `hashicorp`).
 - KMIP tests require PS 8.0+ (skipped on 5.7); `keyring_kmip` tests are skipped on MS.
 - For **Fortanix** vault variants, export:
 
@@ -119,6 +119,14 @@ export FORTANIX_PASSWORD=<your-fortanix-password>
 ```
 
 If Fortanix vars are not set, Fortanix-only variants are skipped.
+
+- For **HashiCorp Vault** variants, export a real Vault Enterprise license:
+
+```bash
+export HASHICORP_VAULT_LICENSE=$(cat /path/to/vault.hclic)
+```
+
+If unset, `hashicorp`-only variants are skipped.
 
 ### How to run tests
 
@@ -294,8 +302,8 @@ pytest inc_backup_load_tests.py --collect-only -q
 | `test_page_tracking_backup`| Non-param     | Page tracking; skipped on 5.7 |
 | `test_crash_backup`         | Param         | `[innodb-no_pt]`, `[innodb-pt]`, `[rocksdb-no_pt]`, `[rocksdb-pt]` |
 | `test_crash_backup_encrypted_keyring_file` | Param `[no_pt]`, `[pt]` | Encrypted crash flow using keyring_file component |
-| `test_crash_backup_encrypted_kmip` | Param | One id per `vault_type` x page tracking, e.g. `[pykmip-no_pt]`, `[pykmip-pt]`; Fortanix variants require `FORTANIX_EMAIL`, `FORTANIX_PASSWORD` |
-| `test_kmip_component_backup`| Param         | One id per vault in `KMIP_CONFIGS` (e.g. `[pykmip]`, `[fortanix]`); Fortanix variants require `FORTANIX_EMAIL`, `FORTANIX_PASSWORD` |
+| `test_crash_backup_encrypted_kmip` | Param | One id per `vault_type` x page tracking, e.g. `[pykmip-no_pt]`, `[pykmip-pt]`; Fortanix variants require `FORTANIX_EMAIL`, `FORTANIX_PASSWORD`; hashicorp variants require `HASHICORP_VAULT_LICENSE` |
+| `test_kmip_component_backup`| Param         | One id per vault in `KMIP_CONFIGS` (e.g. `[pykmip]`, `[fortanix]`, `[hashicorp]`); Fortanix variants require `FORTANIX_EMAIL`, `FORTANIX_PASSWORD`; hashicorp variants require `HASHICORP_VAULT_LICENSE` |
 | `test_kms_component_backup` | Param `[no_pt]`, `[pt]` | keyring_kms component; requires `KMS_KEYID`, `KMS_SECRET_KEY`, `KMS_AUTH_KEY`, `KMS_REGION`; skipped on 5.7 and MS |
 
 ---
@@ -854,7 +862,7 @@ export FIFO_DIR=/tmp/xbstream_fifo   # FIFO pipe directory; default /tmp/xbstrea
 
 `test_fifo_partition_tables`, `test_fifo_keyring_file_backup`, and `test_fifo_kmip_backup` require `LOAD_TOOL=pstress` (they're skipped otherwise, since they rely on pstress's partition-table/encrypted-table DDL).
 
-**For KMIP tests** (`test_fifo_kmip_backup`): same requirements as `inc_backup_load_tests.py`'s `test_kmip_component_backup` — vault types come from `KMIP_CONFIGS`, skipped on 5.7/MS, and Fortanix variants need `FORTANIX_EMAIL`/`FORTANIX_PASSWORD`.
+**For KMIP tests** (`test_fifo_kmip_backup`): same requirements as `inc_backup_load_tests.py`'s `test_kmip_component_backup` — vault types come from `KMIP_CONFIGS`, skipped on 5.7/MS, Fortanix variants need `FORTANIX_EMAIL`/`FORTANIX_PASSWORD`, and hashicorp variants need `HASHICORP_VAULT_LICENSE` (a real Vault Enterprise license).
 
 ### How to run tests
 
@@ -889,5 +897,5 @@ Redirecting `-s` output to a log file for `tail -f`? Python fully buffers stdout
 | `test_fifo_compressed_backup` | Non-param | Full backup with `--compress=zstd --compress-zstd-level=19` |
 | `test_fifo_partition_tables` | Non-param | Incremental backup of pstress-generated partitioned tables; requires `LOAD_TOOL=pstress` |
 | `test_fifo_keyring_file_backup` | Non-param | keyring_file component encrypted incremental backup; requires `LOAD_TOOL=pstress`. As of PXB 8.4.0-7/PS 8.4.10-10 this can occasionally crash `xtrabackup` with an InnoDB assertion (`fil0fil.cc:...:page_id.space() != TRX_SYS_SPACE`) while parsing the redo log of an encrypted incremental — a product-level PXB/InnoDB bug, not a bug in this test |
-| `test_fifo_kmip_backup` | Param | One id per vault in `KMIP_CONFIGS` (e.g. `[pykmip]`, `[fortanix]`); requires `LOAD_TOOL=pstress`; skipped on 5.7/MS; Fortanix variants require `FORTANIX_EMAIL`, `FORTANIX_PASSWORD` |
+| `test_fifo_kmip_backup` | Param | One id per vault in `KMIP_CONFIGS` (e.g. `[pykmip]`, `[fortanix]`, `[hashicorp]`); requires `LOAD_TOOL=pstress`; skipped on 5.7/MS; Fortanix variants require `FORTANIX_EMAIL`, `FORTANIX_PASSWORD`; hashicorp variants require `HASHICORP_VAULT_LICENSE` |
 | `test_fifo_encrypted_backup` | Non-param | Full backup encrypted with xbcrypt (`--encrypt=AES256`, not keyring-based) |

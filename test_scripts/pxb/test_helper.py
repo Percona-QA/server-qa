@@ -2062,8 +2062,10 @@ class BackupTestHelper:
         `xtrabackup --backup`; the component is discovered via the plugin
         dir and the server's own manifest instead).
         """
-        fifo_streams = fifo_streams or FIFO_STREAM
-        fifo_dir = fifo_dir or FIFO_DIR
+        if fifo_streams is None:
+            fifo_streams = FIFO_STREAM
+        if fifo_dir is None:
+            fifo_dir = FIFO_DIR
         os.makedirs(extra_lsndir, exist_ok=True)
         os.makedirs(fifo_dir, exist_ok=True)
         log_file = log_file or os.path.join(self.logdir, f"fifo_backup_{name}.log")
@@ -2102,8 +2104,10 @@ class BackupTestHelper:
         """Restore one backup step from xbcloud via named pipes: xbstream -x
         reads --fifo-streams pipes under --fifo-dir while xbcloud get writes
         to them concurrently."""
-        fifo_streams = fifo_streams or FIFO_STREAM
-        fifo_dir = fifo_dir or FIFO_DIR
+        if fifo_streams is None:
+            fifo_streams = FIFO_STREAM
+        if fifo_dir is None:
+            fifo_dir = FIFO_DIR
         os.makedirs(target_dir, exist_ok=True)
         os.makedirs(fifo_dir, exist_ok=True)
         log_file = log_file or os.path.join(self.logdir, f"fifo_restore_{name}.log")
@@ -2134,7 +2138,8 @@ class BackupTestHelper:
         """
         for name in names:
             self.xbcloud_delete(cloud_params, name)
-        fifo_dir = fifo_dir or FIFO_DIR
+        if fifo_dir is None:
+            fifo_dir = FIFO_DIR
         if os.path.isdir(fifo_dir):
             for entry in os.listdir(fifo_dir):
                 try:

@@ -402,7 +402,8 @@ class KMIPHelper:
                 script_content = response.read().decode("utf-8")
 
             if not script_content:
-                print("Downloaded script is empty")
+                self.last_error = "Downloaded HashiCorp setup script is empty"
+                print(self.last_error)
                 return False
 
             if os.path.exists(cert_dir):
@@ -422,12 +423,18 @@ class KMIPHelper:
                 check=False,
             )
             if result.returncode != 0:
-                print(f"Failed to execute script {setup_script}, (exit code: {result.returncode})")
+                detail = (result.stderr or result.stdout or "").strip()
+                self.last_error = (
+                    f"HashiCorp setup script exited with code {result.returncode}"
+                    + (f": {detail}" if detail else "")
+                )
+                print(f"Failed to execute script {setup_script}: {self.last_error}")
                 return False
 
             self.generate_kmip_config(kmip_type, addr, port, cert_dir)
         except Exception as e:
-            print(f"Failed to setup HashiCorp: {e}")
+            self.last_error = f"Failed to setup HashiCorp: {e}"
+            print(self.last_error)
             return False
 
         self.kmip_config["cert_dir"] = cert_dir

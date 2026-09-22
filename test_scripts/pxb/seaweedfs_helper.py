@@ -92,7 +92,14 @@ class SeaweedFSHelper:
             print("SeaweedFS is already running.")
         elif status == "stopped":
             print("Found stopped SeaweedFS container. Starting it...")
-            subprocess.run(["docker", "start", CONTAINER_NAME], check=False)
+            result = subprocess.run(
+                ["docker", "start", CONTAINER_NAME],
+                capture_output=True, text=True, check=False,
+            )
+            if result.returncode != 0:
+                self.last_error = result.stderr or result.stdout
+                print(f"ERR: Failed to start SeaweedFS container: {self.last_error}")
+                return False
         else:
             if os.path.isdir(self.data_dir):
                 for entry in os.listdir(self.data_dir):

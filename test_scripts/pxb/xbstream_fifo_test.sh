@@ -89,50 +89,78 @@ cleanup_exit() {
   if [ -f "$PS_DIR/bin/mysqld.my" ]; then
     rm -f "$PS_DIR/bin/mysqld.my"
   fi
+
+  if docker ps --filter "name=seaweedfs" --filter "status=running" | grep -q seaweedfs; then
+    echo "Stopping SeaweedFS container..."
+    docker stop seaweedfs > /dev/null 2>&1
+  fi
 }
 
 trap cleanup_exit EXIT INT TERM
 
-start_minio() {
-    # Check if MinIO is already running
-    if docker ps --filter "name=minio" --filter "status=running" | grep -q minio; then
-        echo "MinIO is already running."
+start_seaweedfs() {
+    # Check if SeaweedFS is already running
+    if docker ps --filter "name=seaweedfs" --filter "status=running" | grep -q seaweedfs; then
+        echo "SeaweedFS is already running."
     else
         # Check if a stopped container exists
-        if docker ps -a --filter "name=minio" | grep -q minio; then
-            echo "Found stopped MinIO container. Starting it..."
-            docker start minio
+        if docker ps -a --filter "name=seaweedfs" | grep -q seaweedfs; then
+            echo "Found stopped SeaweedFS container. Starting it..."
+            docker start seaweedfs
         else
-            if [ -d "$HOME/minio/data" ]; then
-                rm -rf "$HOME/minio/data"/*
+            if [ -d "$HOME/seaweedfs/data" ]; then
+                rm -rf "$HOME/seaweedfs/data"/*
             else
-                mkdir -p "$HOME/minio/data"
+                mkdir -p "$HOME/seaweedfs/data"
             fi
-            echo "No MinIO container found. Creating and starting one..."
+
+            # S3 identity config: keeps the same admin/password credentials xbcloud already uses
+            cat > "$HOME/seaweedfs/s3.json" <<-EOFS
+            {
+              "identities": [
+                {
+                  "name": "admin",
+                  "credentials": [
+                    {
+                      "accessKey": "admin",
+                      "secretKey": "password"
+                    }
+                  ],
+                  "actions": [
+                    "Admin",
+                    "Read",
+                    "Write"
+                  ]
+                }
+              ]
+            }
+EOFS
+
+            echo "No SeaweedFS container found. Creating and starting one..."
             docker run -d \
-                -p 9000:9000 \
-                -p 9001:9001 \
-                --name minio \
-                -v ~/minio/data:/data \
-                -e "MINIO_ROOT_USER=admin" \
-                -e "MINIO_ROOT_PASSWORD=password" \
-                minio/minio:latest server /data --console-address ":9001"
+                -p 9000:8333 \
+                --name seaweedfs \
+                -v ~/seaweedfs/data:/data \
+                -v ~/seaweedfs/s3.json:/etc/seaweedfs/s3.json \
+                chrislusf/seaweedfs:latest \
+                server -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -dir=/data
         fi
     fi
 
-    # Poll the health endpoint
-    echo -n "Waiting for MinIO to become ready"
+    # Poll the S3 gateway port (SeaweedFS has no /minio/health/ready-style endpoint,
+    # so just wait until it accepts HTTP connections)
+    echo -n "Waiting for SeaweedFS to become ready"
     for i in {1..20}; do
-        if curl -s -o /dev/null -w "%{http_code}" http://localhost:9000/minio/health/ready | grep -q 200; then
-            echo -e "\n MinIO is ready!\n"
+        if [ "$(curl -s -o /dev/null -w "%{http_code}" http://localhost:9000/ 2>/dev/null)" != "000" ]; then
+            echo -e "\n SeaweedFS is ready!\n"
             return
         fi
         echo -n "."
         sleep 1
     done
 
-    echo -n "\n MinIO failed to become ready in time."
-    docker logs minio
+    echo -n "\n SeaweedFS failed to become ready in time."
+    docker logs seaweedfs
     exit 1
 }
 
@@ -182,7 +210,7 @@ init_datadir() {
 
     cat > "$PS_DIR/lib/plugin/component_keyring_file.cnf" <<-EOFL
     {
-       "component_keyring_file_data": "${PS_DIR}/keyring",
+       "path": "${PS_DIR}/keyring",
        "read_only": false
     }
 EOFL
@@ -266,7 +294,7 @@ pstress_run_load() {
 
 full_backup_and_restore() {
 echo "=>Taking Backup"
-$XTRABACKUP_DIR/bin/xtrabackup --user=root --password='' --datadir=$DATADIR -S $SOCKET --backup $ENCRYPT $ENCRYPT_KEY --parallel=64 --fifo-streams=$FIFO_STREAM --fifo-dir=$FIFO_DIR --core-file > $LOGDIR/backup.log 2>&1 &
+$XTRABACKUP_DIR/bin/xtrabackup --user=root --password='' --datadir=$DATADIR -S $SOCKET --backup $ENCRYPT $ENCRYPT_KEY $COMPRESS_OPTIONS --parallel=64 --fifo-streams=$FIFO_STREAM --fifo-dir=$FIFO_DIR --core-file > $LOGDIR/backup.log 2>&1 &
 
 xbcloud_put full_backup
 if [ $(cat $LOGDIR/upload.log | grep "Upload failed" | wc -l) -eq 1 ]; then
@@ -312,6 +340,15 @@ echo "..Prepare successful"
 
 incremental_backup_and_restore() {
 local keyring_type=$1
+local keyring_backup_opts=""
+if [ $ENCRYPTION -eq 1 ]; then
+  if [ "$keyring_type" = "keyring_kmip" ]; then
+    keyring_filename="$PS_DIR/lib/plugin/component_keyring_kmip.cnf"
+  elif [ "$keyring_type" = "keyring_file" ]; then
+    keyring_filename="$PS_DIR/lib/plugin/component_keyring_file.cnf"
+  fi
+  keyring_backup_opts="--xtrabackup-plugin-dir=$XTRABACKUP_DIR/lib/plugin --component-keyring-config=$keyring_filename"
+fi
 echo "=>Taking Full Backup"
 if [ ! -d $HOME/lsn/full ]; then
   mkdir -p $HOME/lsn/full
@@ -319,7 +356,7 @@ else
   rm -rf $HOME/lsn/full
   mkdir -p $HOME/lsn/full
 fi
-$XTRABACKUP_DIR/bin/xtrabackup --backup --user=root -S $SOCKET --datadir=$DATADIR --extra-lsndir=$HOME/lsn/full --fifo-streams=$FIFO_STREAM --fifo-dir=$FIFO_DIR --core-file >> $LOGDIR/backup_inc.log 2>&1 &
+$XTRABACKUP_DIR/bin/xtrabackup --backup --user=root -S $SOCKET --datadir=$DATADIR --extra-lsndir=$HOME/lsn/full $keyring_backup_opts --fifo-streams=$FIFO_STREAM --fifo-dir=$FIFO_DIR --core-file >> $LOGDIR/backup_inc.log 2>&1 &
 
 xbcloud_put full
 echo "..Full Backup successful"
@@ -332,7 +369,7 @@ else
   rm -rf $HOME/lsn/inc1
   mkdir -p $HOME/lsn/inc1
 fi
-$XTRABACKUP_DIR/bin/xtrabackup --backup --user=root -S $SOCKET --datadir=$DATADIR --extra-lsndir=$HOME/lsn/inc1 --incremental-basedir=$HOME/lsn/full --fifo-streams=$FIFO_STREAM --fifo-dir=$FIFO_DIR --core-file > $LOGDIR/inc1.log 2>&1 &
+$XTRABACKUP_DIR/bin/xtrabackup --backup --user=root -S $SOCKET --datadir=$DATADIR --extra-lsndir=$HOME/lsn/inc1 --incremental-basedir=$HOME/lsn/full $keyring_backup_opts --fifo-streams=$FIFO_STREAM --fifo-dir=$FIFO_DIR --core-file > $LOGDIR/inc1.log 2>&1 &
 
 xbcloud_put inc1
 echo "..Successful"
@@ -345,7 +382,7 @@ else
   rm -rf $HOME/lsn/inc2
   mkdir -p $HOME/lsn/inc2
 fi
-$XTRABACKUP_DIR/bin/xtrabackup --backup --user=root -S $SOCKET --datadir=$DATADIR --extra-lsndir=$HOME/lsn/inc2 --incremental-basedir=$HOME/lsn/inc1 --fifo-streams=$FIFO_STREAM --fifo-dir=$FIFO_DIR --core-file > $LOGDIR/inc2.log 2>&1 &
+$XTRABACKUP_DIR/bin/xtrabackup --backup --user=root -S $SOCKET --datadir=$DATADIR --extra-lsndir=$HOME/lsn/inc2 --incremental-basedir=$HOME/lsn/inc1 $keyring_backup_opts --fifo-streams=$FIFO_STREAM --fifo-dir=$FIFO_DIR --core-file > $LOGDIR/inc2.log 2>&1 &
 
 xbcloud_put inc2
 echo "..Successful"
@@ -358,7 +395,7 @@ else
   rm -rf $HOME/lsn/inc3
   mkdir -p $HOME/lsn/inc3
 fi
-$XTRABACKUP_DIR/bin/xtrabackup --backup --user=root -S $SOCKET --datadir=$DATADIR --extra-lsndir=$HOME/lsn/inc3 --incremental-basedir=$HOME/lsn/inc2 --fifo-streams=$FIFO_STREAM --fifo-dir=$FIFO_DIR --core-file > $LOGDIR/inc3.log 2>&1 &
+$XTRABACKUP_DIR/bin/xtrabackup --backup --user=root -S $SOCKET --datadir=$DATADIR --extra-lsndir=$HOME/lsn/inc3 --incremental-basedir=$HOME/lsn/inc2 $keyring_backup_opts --fifo-streams=$FIFO_STREAM --fifo-dir=$FIFO_DIR --core-file > $LOGDIR/inc3.log 2>&1 &
 
 xbcloud_put inc3
 echo "..Successful"
@@ -423,7 +460,7 @@ echo "..Successful"
 }
 
 #Actual test begins here..
-start_minio
+start_seaweedfs
 echo "###################################################"
 echo "# 1. Test FIFO xbstream: Full Backup and Restore  #"
 echo "###################################################"

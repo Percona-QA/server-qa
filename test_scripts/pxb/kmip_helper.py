@@ -38,7 +38,7 @@ class KMIPHelper:
     DEFAULT_KMIP_CONFIGS = {
         "pykmip": "addr=127.0.0.1,image=satyapercona/kmip:latest,port=5696,name=kmip_pykmip",
         # "fortanix": "addr=216.180.120.88,port=5696,name=kmip_fortanix,setup_script=fortanix_kmip_setup.py",
-        # "hashicorp": "addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp_kmip_setup.py",
+        "hashicorp": "addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp_kmip_setup.py",
         # "ciphertrust": "addr=127.0.0.1,port=5696,name=kmip_ciphertrust,setup_script=setup_kmip_api.py",
     }
 
@@ -411,9 +411,11 @@ class KMIPHelper:
 
             os.makedirs(cert_dir, exist_ok=True)
 
-            # Execute the script
+            # Execute the script (it's a real Python script, run via
+            # `python3 -` to read it from stdin, matching how the retired
+            # bash kmip_helper.sh invoked it: `python3 - --cert-dir=...`)
             result = subprocess.run(
-                ["bash", "-s", "--", f"--cert-dir={cert_dir}"],
+                ["python3", "-", f"--cert-dir={cert_dir}"],
                 input=script_content,
                 text=True,
                 capture_output=True,

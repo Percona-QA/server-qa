@@ -216,6 +216,8 @@ def test_fifo_kmip_backup(test_helper, cloud_params, vault_type):
         not os.environ.get("FORTANIX_EMAIL", "").strip() or not os.environ.get("FORTANIX_PASSWORD", "").strip()
     ):
         pytest.skip("Fortanix KMIP requires FORTANIX_EMAIL and FORTANIX_PASSWORD environment variables")
+    if vault_type == "hashicorp" and not os.environ.get("VAULT_LICENSE", "").strip():
+        pytest.skip("HashiCorp Vault KMIP requires a VAULT_LICENSE environment variable (Vault Enterprise license)")
 
     if not test_helper.kmip_helper:
         test_helper.kmip_helper = KMIPHelper(KMIP_CONFIGS, cert_base_dir=TEST_BASE_DIR)

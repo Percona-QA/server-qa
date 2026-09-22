@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 import pytest
 from test_helper import CORE_FILE_OPT, KMIP_CONFIGS, TEST_BASE_DIR, BackupTestHelper
@@ -1175,7 +1176,7 @@ PARALLEL_ORDER_ROCKSDB_SCOPE = re.compile(r"\.rocksdb/")
 
 
 def _sysbench_prepare(
-    test_helper, database: str, tables: int, table_size: int, log_name: str, storage_engine: str | None = None
+    test_helper, database: str, tables: int, table_size: int, log_name: str, storage_engine: Optional[str] = None
 ) -> None:
     """Create and populate sbtest1..sbtestN via sysbench 'prepare'."""
     log_path = os.path.join(test_helper.logdir, log_name)

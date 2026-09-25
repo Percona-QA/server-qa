@@ -880,32 +880,19 @@ def test_cloud_backup_md5_delete(test_helper):
     databases = ["test", "test_rocksdb"] if rocksdb_enabled else ["test"]
     orig_data = test_helper.collect_table_data(databases)
 
-    if os.path.exists(test_helper.backup_dir):
-        shutil.rmtree(test_helper.backup_dir)
-    os.makedirs(test_helper.backup_dir)
-
     log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
-    def _take_cloud_md5_backup(backup_name: str, log_file: str) -> None:
-        xb_cmd = test_helper._xtrabackup_cmd_prefix() + [
-            "--no-defaults", f"--user={test_helper.backup_user}", "--password=",
-            "--backup", f"--target-dir={os.path.join(test_helper.backup_dir, backup_name + '_tmp')}",
-            f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}",
-            "--stream=xbstream",
-        ] + test_helper.backup_params.split()
-        pipe_cmd = (
-            f"{' '.join(xb_cmd)} 2>{log_file} | "
-            f"{os.path.join(test_helper.xtrabackup_dir, 'xbcloud')} put {md5_cloud_params} {backup_name} 2>>{log_file}"
-        )
-        result = subprocess.run(pipe_cmd, shell=True, check=False)
-        if result.returncode != 0:
-            pytest.fail(f"ERR: Cloud backup with 'put --md5' failed for '{backup_name}'. Log: {log_file}")
 
     # --- Part 1: 'xbcloud delete' must remove the .md5 sidecar too --------
     print("Test: 'xbcloud delete' must remove the .md5 object created by 'put --md5'")
     delete_backup_name = f"md5_delete_check_{log_date}"
     delete_log = os.path.join(test_helper.logdir, f"cloud_md5_delete_{log_date}_log")
-    _take_cloud_md5_backup(delete_backup_name, delete_log)
+    test_helper.take_backup(
+        backup_type="cloud",
+        cloud_params=md5_cloud_params,
+        cloud_name=delete_backup_name,
+        upload_only=True,
+        log_file=delete_log,
+    )
 
     objects_before = test_helper.s3_list_objects(prefix=delete_backup_name)
     assert any(k.endswith(".md5") for k in objects_before), (
@@ -929,7 +916,13 @@ def test_cloud_backup_md5_delete(test_helper):
     print("Test: removing the .md5 object does not affect xbcloud get/restore")
     restore_backup_name = f"md5_restore_check_{log_date}"
     restore_log = os.path.join(test_helper.logdir, f"cloud_md5_restore_{log_date}_log")
-    _take_cloud_md5_backup(restore_backup_name, restore_log)
+    test_helper.take_backup(
+        backup_type="cloud",
+        cloud_params=md5_cloud_params,
+        cloud_name=restore_backup_name,
+        upload_only=True,
+        log_file=restore_log,
+    )
 
     md5_objects = [k for k in test_helper.s3_list_objects(prefix=restore_backup_name) if k.endswith(".md5")]
     assert md5_objects, f"Expected a .md5 object for '{restore_backup_name}'; found none"
@@ -965,20 +958,10 @@ def test_cloud_backup_md5_delete(test_helper):
     for db in databases:
         replica.check_tables(database=db)
 
-    replica_mysql = os.path.join(replica.basedir, "bin/mysql")
+    restored_data = test_helper.collect_table_data(databases, server=replica)
     for db in databases:
         for table, (orig_count, orig_cksum) in orig_data.get(db, {}).items():
-            count_result = subprocess.run(
-                [replica_mysql, "-uroot", f"-S{replica.socket_path}", "-BNe", f"SELECT COUNT(*) FROM {db}.{table}"],
-                capture_output=True, text=True, check=False,
-            )
-            count = count_result.stdout.strip() if count_result.returncode == 0 else "ERR"
-            cksum_result = subprocess.run(
-                [replica_mysql, "-uroot", f"-S{replica.socket_path}", "-BNe", f"CHECKSUM TABLE {db}.{table}"],
-                capture_output=True, text=True, check=False,
-            )
-            cksum_parts = cksum_result.stdout.strip().split() if cksum_result.returncode == 0 else []
-            cksum = cksum_parts[1] if len(cksum_parts) >= 2 else "ERR"
+            count, cksum = restored_data.get(db, {}).get(table, ("ERR", "ERR"))
             assert count == orig_count, f"{db}.{table}: row count mismatch after restore ({count} != {orig_count})"
             assert cksum == orig_cksum, f"{db}.{table}: checksum mismatch after restore ({cksum} != {orig_cksum})"
 

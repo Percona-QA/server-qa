@@ -568,6 +568,22 @@ pt_read_eff_supports_merge_gap() {
   "${xtrabackup_dir}"/xtrabackup --help 2>&1 | grep -q -- "--page-tracking-merge-gap"
 }
 
+# Is this xtrabackup build new enough for the PXB-3853 range_get_next_page()
+# fix? It landed separately on each release line (8.4.0-7 on 8.x, 9.7.1-2
+# on 9.x; 9.0 was cut before 8.4.0-7 and did not inherit it). Compare a
+# build only to the threshold for its own major. There is no CLI flag to
+# probe for this one (unlike PXB-3862's --page-tracking-merge-gap).
+pt_read_eff_pxb3853_fixed() {
+  local major=$(( ${PXB_VERSION:-0} / 1000000 ))
+  if [ "$major" -eq 8 ]; then
+    [ "${PXB_VERSION:-0}" -ge "$(normalize_xtrabackup_version "8.4.0-7")" ]
+  elif [ "$major" -ge 9 ]; then
+    [ "${PXB_VERSION:-0}" -ge "$(normalize_xtrabackup_version "9.7.1-2")" ]
+  else
+    return 1
+  fi
+}
+
 # Sum the bytes actually read from $2 (a path substring, e.g. "t1.ibd")
 # out of an strace -y -e trace=pread64 log at $1.
 pt_read_eff_bytes_read_for_file() {
@@ -665,8 +681,8 @@ test_pxb3853_sparse_read_amplification() {
     echo "SKIP: strace not available"
     return
   fi
-  if [ "${PXB_VERSION:-0}" -lt "$(normalize_xtrabackup_version "8.4.0-7")" ]; then
-    echo "SKIP: PXB-3853 requires PXB >= 8.4.0-7 (found ${PXB_VER:-unknown})"
+  if ! pt_read_eff_pxb3853_fixed; then
+    echo "SKIP: PXB-3853 requires PXB >= 8.4.0-7 (8.x) or >= 9.7.1-2 (9.x) (found ${PXB_VER:-unknown})"
     return
   fi
 

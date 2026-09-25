@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import shlex
 import time
 from urllib.parse import quote
@@ -8,6 +9,27 @@ from docker_helper import DockerHelper
 from generic_helper import js_str, sql_ident, sql_str
 
 _logger = logging.getLogger("GR")
+
+_DEFAULT_ROUTER_IMAGE = "percona/percona-mysql-router:8.4"
+
+
+def default_router_image(server_image: str) -> str:
+    """Pick a MySQL Router image matching the server's version.
+
+    Router refuses to bootstrap against a cluster whose server/metadata is newer than
+    itself, so a fixed 8.4 router crash-loops in front of e.g. a 9.7 server. Map
+    <repo>/percona-server:<X.Y[.Z]...> to <repo>/percona-mysql-router:<X.Y[.Z]>, keeping
+    the registry/namespace (percona vs perconalab publish different tags) and dropping any
+    build suffix, which differs between the server and router tags. Anything that doesn't
+    fit that shape (other repos, digests, "latest") falls back to the 8.4 default.
+    """
+    repo, sep, tag = server_image.rpartition(":")
+    if not sep or "/" in tag or "@" in server_image:
+        return _DEFAULT_ROUTER_IMAGE
+    m = re.match(r"\d+\.\d+(?:\.\d+)?", tag)
+    if not m or not repo.endswith("percona-server"):
+        return _DEFAULT_ROUTER_IMAGE
+    return f"{repo[: -len('percona-server')]}percona-mysql-router:{m.group()}"
 
 
 class GroupReplication:
@@ -66,7 +88,9 @@ class GroupReplication:
         self.single_primary = single_primary
         self.start_on_boot = start_on_boot
         self.mysql_router = mysql_router
-        self.router_image = router_image or os.environ.get("ROUTER_IMAGE") or "percona/percona-mysql-router:8.4"
+        self.router_image = (
+            router_image or os.environ.get("ROUTER_IMAGE") or default_router_image(self.server_image)
+        )
         self.router_name = f"{node_prefix}router"
         self.router_rw_port = router_rw_port
         self.router_ro_port = router_ro_port
@@ -1205,6 +1229,11 @@ class GroupReplication:
         Cluster bootstrap and instance-add go through mysqlsh's AdminAPI (see create()),
         so a server build without it cannot run this suite. Probed with a throwaway
         --rm container running `mysqlsh --version` (no node startup, no connection).
+
+        Only a missing binary (exit 127, how docker/podman report "executable file not
+        found") returns False. Any other failure (daemon down, permission denied on the
+        socket, image pull error) raises with the real error instead of being misreported
+        as a missing mysqlsh.
         """
         result = self.docker.run(
             image=self.server_image,
@@ -1212,7 +1241,14 @@ class GroupReplication:
             command=["--version"],
             check=False,
         )
-        return result.ok
+        if result.ok:
+            return True
+        if result.returncode == 127:
+            return False
+        raise RuntimeError(
+            f"could not probe mysqlsh in server image {self.server_image!r} "
+            f"(exit {result.returncode}): {(result.stderr or result.stdout).strip()}"
+        )
 
     def create(self) -> None:
         """Create the network and nodes, bootstrap the cluster, add instances, and persist GR settings."""

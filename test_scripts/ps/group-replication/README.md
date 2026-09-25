@@ -355,9 +355,16 @@ internal registry mirror without editing code.
 |--------------------|----------------|-------------------------------------|
 | `SERVER_IMAGE`     | Percona Server | `percona/percona-server:8.4`        |
 | `HAPROXY_IMAGE`    | HAProxy        | `percona/haproxy:2`                 |
-| `ROUTER_IMAGE`     | MySQL Router   | `percona/percona-mysql-router:8.4`  |
+| `ROUTER_IMAGE`     | MySQL Router   | derived from `SERVER_IMAGE`¹        |
 | `XTRABACKUP_IMAGE` | XtraBackup     | `percona/percona-xtrabackup:8.4`    |
 | `SYSBENCH_IMAGE`   | sysbench       | `pingwinator/sysbench:latest`       |
+
+¹ Router can't bootstrap against a newer server, so when `ROUTER_IMAGE` is unset it
+follows the server version: `<repo>/percona-server:<X.Y.Z>` → `<repo>/percona-mysql-router:<X.Y.Z>`
+(e.g. `perconalab/percona-server:9.7.2` → `perconalab/percona-mysql-router:9.7.2`).
+Build suffixes are dropped; images that don't match that pattern fall back to
+`percona/percona-mysql-router:8.4`. Set `ROUTER_IMAGE` explicitly if the matching tag
+isn't published.
 
 ```bash
 SERVER_IMAGE=percona/percona-server:8.4.5 pytest -v test_basic.py

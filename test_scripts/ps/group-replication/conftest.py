@@ -30,6 +30,25 @@ PROXIES = {
 }
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """On a failed setup/call, attach each node's container state and log tail to the report.
+
+    Teardown destroys the containers, so without this a failure leaves no server-side
+    evidence (e.g. whether mysqld crashed and restart=always brought it back).
+    """
+    outcome = yield
+    report = outcome.get_result()
+    cluster = item.funcargs.get("gr_cluster") if hasattr(item, "funcargs") else None
+    if report.when == "teardown" or not report.failed or not isinstance(cluster, GroupReplication):
+        return
+    for name in [*cluster.containers, cluster.proxy_name]:
+        if not name or not cluster.docker.container_exists(name):
+            continue
+        state = cluster.docker.container_state(name)
+        report.sections.append((f"docker logs {name} ({state})", cluster.docker.logs(name)))
+
+
 def _worker_id(request) -> str:
     """Return the pytest-xdist worker id (e.g. 'gw0'), or '0' when running serially.
 
@@ -157,6 +176,7 @@ def xtrabackup(request, gr_cluster):
         gr_cluster.docker,
         network=gr_cluster.network,
         backup_volume=backup_volume,
+        server_image=gr_cluster.server_image,
         root_password=gr_cluster.root_password,
         name_prefix=f"xtrabackup_{prefix}",
         log=gr_cluster.log,

@@ -6,12 +6,16 @@ Assumption: PS and PXB are already installed as tarballs.
 """
 
 import os
-import sys
+import re
+import shutil
 import subprocess
+import sys
 import time
-import pytest
+from datetime import datetime, timezone
+from typing import Optional
 
-from test_helper import BackupTestHelper, TEST_BASE_DIR, KMIP_CONFIGS, CORE_FILE_OPT
+import pytest
+from test_helper import CORE_FILE_OPT, KMIP_CONFIGS, TEST_BASE_DIR, BackupTestHelper
 
 
 @pytest.fixture(scope="function")
@@ -20,6 +24,7 @@ def test_helper(request):
     test_name = request.node.name if hasattr(request, "node") else None
     helper = BackupTestHelper(test_name=test_name)
     helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
+    helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
     yield helper
     if os.environ.get("DISABLE_CLEANUP") != "1":
         helper.cleanup()
@@ -838,6 +843,131 @@ def test_cloud_inc_backup(test_helper):
             test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True)
 
 
+def test_cloud_backup_md5_delete(test_helper):
+    """xbcloud put --md5: 'xbcloud delete' must also remove the .md5 sidecar.
+
+    ``xbcloud put --md5`` uploads an additional ``<name>.md5`` object
+    alongside a backup's chunk objects, for integrity verification.
+
+    On PXB 8.4.0-6 (and earlier), ``xbcloud delete <name>`` removed every
+    chunk object but left ``<name>.md5`` orphaned in the bucket forever,
+    with no option to remove it afterwards -- confirmed by manual repro
+    against a real backup/MinIO before writing this test. This was fixed in
+    PXB 8.4.0-7, where ``xbcloud delete <name>`` removes the ``.md5`` object
+    too. This test is a regression guard for that fix, and separately
+    confirms that removing the ``.md5`` object does not affect ``xbcloud
+    get``/restore of the backup (manual repro also confirmed this holds on
+    the older, buggy build).
+    """
+    if test_helper.xtrabackup_version_normalized < test_helper.normalize_xtrabackup_version("8.4.0-7"):
+        pytest.skip(
+            f"xbcloud delete of --md5 sidecar requires PXB >= 8.4.0-7 "
+            f"(found {test_helper.xtrabackup_version})"
+        )
+    cloud_params = test_helper.build_cloud_params()
+    md5_cloud_params = f"{cloud_params} --md5"
+
+    test_helper.mysqld_options = _default_mysqld_options()
+    test_helper.backup_params = f"--parallel=10 {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
+    test_helper.restore_params = ""
+    test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
+    _run_load(test_helper, time_sec=10)
+    while test_helper.is_load_running():
+        time.sleep(1)
+
+    rocksdb_enabled = test_helper.rocksdb == "enabled"
+    databases = ["test", "test_rocksdb"] if rocksdb_enabled else ["test"]
+    orig_data = test_helper.collect_table_data(databases)
+
+    log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    # --- Part 1: 'xbcloud delete' must remove the .md5 sidecar too --------
+    print("Test: 'xbcloud delete' must remove the .md5 object created by 'put --md5'")
+    delete_backup_name = f"md5_delete_check_{log_date}"
+    delete_log = os.path.join(test_helper.logdir, f"cloud_md5_delete_{log_date}_log")
+    test_helper.take_backup(
+        backup_type="cloud",
+        cloud_params=md5_cloud_params,
+        cloud_name=delete_backup_name,
+        upload_only=True,
+        log_file=delete_log,
+    )
+
+    objects_before = test_helper.s3_list_objects(prefix=delete_backup_name)
+    assert any(k.endswith(".md5") for k in objects_before), (
+        f"Expected 'xbcloud put --md5' to create a .md5 object for '{delete_backup_name}'; "
+        f"found none among: {objects_before}"
+    )
+
+    del_cmd = f"{os.path.join(test_helper.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {delete_backup_name} 2>>{delete_log}"
+    result = subprocess.run(del_cmd, shell=True, check=False)
+    if result.returncode != 0:
+        pytest.fail(f"ERR: xbcloud delete failed for '{delete_backup_name}'. Log: {delete_log}")
+
+    leftover = test_helper.s3_list_objects(prefix=delete_backup_name)
+    assert not leftover, (
+        f"xbcloud delete left object(s) behind for '{delete_backup_name}': {leftover}. "
+        "xbcloud delete is not removing the .md5 sidecar object created by 'put --md5' "
+        "(reproduces on PXB 8.4.0-6 and earlier; fixed in PXB 8.4.0-7)."
+    )
+
+    # --- Part 2: removing the .md5 object must not affect get/restore -----
+    print("Test: removing the .md5 object does not affect xbcloud get/restore")
+    restore_backup_name = f"md5_restore_check_{log_date}"
+    restore_log = os.path.join(test_helper.logdir, f"cloud_md5_restore_{log_date}_log")
+    test_helper.take_backup(
+        backup_type="cloud",
+        cloud_params=md5_cloud_params,
+        cloud_name=restore_backup_name,
+        upload_only=True,
+        log_file=restore_log,
+    )
+
+    md5_objects = [k for k in test_helper.s3_list_objects(prefix=restore_backup_name) if k.endswith(".md5")]
+    assert md5_objects, f"Expected a .md5 object for '{restore_backup_name}'; found none"
+    for key in md5_objects:
+        test_helper.s3_delete_object(key)
+    remaining_md5 = [k for k in test_helper.s3_list_objects(prefix=restore_backup_name) if k.endswith(".md5")]
+    assert not remaining_md5, f"Failed to remove .md5 object(s) before the download check: {remaining_md5}"
+
+    full_target = os.path.join(test_helper.backup_dir, "full")
+    if os.path.exists(full_target):
+        shutil.rmtree(full_target)
+    os.makedirs(full_target, exist_ok=True)
+    get_cmd = (
+        f"{os.path.join(test_helper.xtrabackup_dir, 'xbcloud')} get {cloud_params} {restore_backup_name} 2>>{restore_log} | "
+        f"{os.path.join(test_helper.xtrabackup_dir, 'xbstream')} -xvC {full_target} 2>>{restore_log}"
+    )
+    result = subprocess.run(get_cmd, shell=True, check=False)
+    if result.returncode != 0:
+        pytest.fail(f"ERR: xbcloud get failed after removing .md5 object(s). Log: {restore_log}")
+    test_helper._decrypt_decompress(full_target, test_helper.backup_params)
+
+    del_cmd = f"{os.path.join(test_helper.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {restore_backup_name} 2>>{restore_log}"
+    subprocess.run(del_cmd, shell=True, check=False)
+
+    test_helper.prepare_full_backup(test_helper.prepare_params, log_date)
+
+    replica = test_helper.create_replica(
+        name="md5_restore_check", server_id=110, port=18630,
+        mysqld_options=test_helper.mysqld_options,
+    )
+    test_helper.restore_backup_to(replica.datadir, test_helper.restore_params, log_date)
+    replica.start()
+    for db in databases:
+        replica.check_tables(database=db)
+
+    restored_data = test_helper.collect_table_data(databases, server=replica)
+    for db in databases:
+        for table, (orig_count, orig_cksum) in orig_data.get(db, {}).items():
+            count, cksum = restored_data.get(db, {}).get(table, ("ERR", "ERR"))
+            assert count == orig_count, f"{db}.{table}: row count mismatch after restore ({count} != {orig_count})"
+            assert cksum == orig_cksum, f"{db}.{table}: checksum mismatch after restore ({cksum} != {orig_cksum})"
+
+    print("Restore succeeded and data matched with the .md5 objects removed from cloud storage")
+
+
 # ============================================================================
 # InnoDB params and redo archive tests
 # ============================================================================
@@ -947,6 +1077,319 @@ def test_ssl_backup(test_helper):
 
 
 # ============================================================================
+# Parallel processing order tests (PXB-3502)
+# ============================================================================
+#
+# Before PXB-3502, xtrabackup's parallel worker pools (used by --decompress,
+# --decrypt, --copy-back/--move-back and incremental --prepare) consumed a
+# plain FIFO queue built by walking the backup directory in raw filesystem
+# order. If the single largest file in the backup happened to be discovered
+# late by that walk, one worker thread would still be grinding through it
+# long after every other thread had run out of (smaller) work -- turning the
+# largest file into an unnecessary long-tail straggler.
+#
+# PXB-3502 changed the underlying queue to a priority queue ordered by
+# descending file size (ties broken by path, for determinism), so the
+# largest file(s) are handed to worker threads first regardless of where
+# they land in the directory walk.
+#
+# These tests build an adversarial dataset -- many tiny tables created first
+# (so they're both alphabetically first and discovered first by a plain
+# directory scan) followed by one much larger table created last (the worst
+# case for a scheduler that ignores size) -- then check, from xtrabackup's
+# own per-file dispatch log lines, how many small files were handed to a
+# worker thread before the single largest file in the backup. A size-aware
+# scheduler dispatches the largest file in its very first batch; a naive
+# FIFO scheduler dispatches nearly everything else first.
+#
+# test_copy_back_largest_file_first always exercises InnoDB, and -- like the
+# rest of this suite (e.g. `databases = ["test", "test_rocksdb"] if
+# rocksdb_enabled else ["test"]`) -- folds RocksDB (MyRocks) coverage into the
+# *same* test rather than a separate parametrized variant, gated on the
+# global ROCKSDB setting:
+#
+#  - InnoDB: sysbench (oltp_insert.lua) 'prepare' builds NUM_SMALL_TABLES
+#    tiny tables in SMALL_DB, then a single much bigger table in LARGE_DB
+#    (created afterwards, so it sorts and is discovered last). Each table is
+#    its own .ibd file, so "the largest file" is unambiguous.
+#
+#  - RocksDB (only when ROCKSDB=enabled): MyRocks has no per-table file --
+#    all tables share one on-disk LSM-tree (a '.rocksdb' directory of
+#    numbered .sst/.log files with no table correlation in their names), and
+#    confirmed empirically that xtrabackup copies '.rocksdb' contents
+#    through a *separate* pass of the same size-sorted queue (dispatched as
+#    its own batch, after the ordinary per-table files). So instead of
+#    naming a specific table's file, the RocksDB check stats every file
+#    actually produced under '.rocksdb' and checks that the single largest
+#    one (by real byte size, whichever file that turns out to be) is
+#    dispatched first within that batch. Built with the same sysbench
+#    'prepare' as InnoDB, just with --mysql-storage-engine=ROCKSDB. (If this
+#    errors with "doesn't yet support 'InnoDB page COMPRESSION for the
+#    RocksDB storage engine'", the environment's oltp_common.lua has been
+#    hand-patched to force COMPRESSION='zlib' onto every CREATE TABLE --
+#    `dpkg -V sysbench` will flag it; reinstall the package to fix.)
+#
+# Confirmed against real PXB builds before writing this test: reproduces on
+# PXB 8.4.0-6 and earlier (for both InnoDB and RocksDB), and passes on PXB
+# 8.4.0-7 and later, which ships the PXB-3502 fix.
+
+# Number of small "decoy" tables created before the one large table. Kept
+# well above PARALLEL_DEGREE so a FIFO scheduler has plenty of small work to
+# hand out before it would ever reach the large table.
+NUM_SMALL_TABLES = 30
+SMALL_TABLE_ROWS = 50
+LARGE_TABLE_ROWS = 100000
+PARALLEL_DEGREE = 4
+
+SMALL_DB = "aaa_small"
+LARGE_DB = "zzz_large"
+# Separate database names for the RocksDB dataset (built alongside the
+# InnoDB one, only when ROCKSDB=enabled -- see test_copy_back_largest_file_first)
+# so the two engines' sbtestN tables don't collide.
+SMALL_DB_ROCKSDB = "aaa_small_rdb"
+LARGE_DB_ROCKSDB = "zzz_large_rdb"
+SYSBENCH_SCRIPT = "/usr/share/sysbench/oltp_insert.lua"
+
+# Scopes the dispatch-log scan and the "largest file" search to only the
+# files this test controls, engine-dependent: InnoDB tables land at
+# <SMALL_DB|LARGE_DB>/sbtest<N>.ibd[.zst]; RocksDB tables share the single
+# '.rocksdb/' LSM directory instead.
+PARALLEL_ORDER_INNODB_SCOPE = re.compile(r"(?:" + re.escape(SMALL_DB) + r"|" + re.escape(LARGE_DB) + r")/")
+PARALLEL_ORDER_ROCKSDB_SCOPE = re.compile(r"\.rocksdb/")
+
+
+def _sysbench_prepare(
+    test_helper, database: str, tables: int, table_size: int, log_name: str, storage_engine: Optional[str] = None
+) -> None:
+    """Create and populate sbtest1..sbtestN via sysbench 'prepare'."""
+    log_path = os.path.join(test_helper.logdir, log_name)
+    cmd = [
+        "sysbench", SYSBENCH_SCRIPT,
+        f"--tables={tables}", f"--table-size={table_size}",
+        f"--mysql-db={database}", "--mysql-user=root", "--threads=10",
+        "--db-driver=mysql", f"--mysql-socket={test_helper.socket_path}",
+    ]
+    if storage_engine:
+        cmd.append(f"--mysql-storage-engine={storage_engine}")
+    cmd.append("prepare")
+    with open(log_path, "w") as f:
+        result = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, check=False)
+    if result.returncode != 0:
+        pytest.fail(f"ERR: sysbench prepare for database '{database}' failed. Log: {log_path}")
+
+
+def _build_adversarial_dataset(
+    test_helper, rocksdb: bool = False, small_db: str = SMALL_DB, large_db: str = LARGE_DB
+) -> None:
+    """Build the small-tables/one-large-table dataset.
+
+    small_db gets NUM_SMALL_TABLES tiny tables (sbtest1..sbtestN); large_db,
+    created afterwards, gets a single much bigger sbtest1. large_db sorts
+    alphabetically after small_db and is discovered after it by a plain
+    directory scan -- the worst case for a scheduler that ignores size.
+    """
+    storage_engine = "ROCKSDB" if rocksdb else None
+    test_helper.primary.mysql(f"CREATE DATABASE IF NOT EXISTS {small_db}")
+    test_helper.primary.mysql(f"CREATE DATABASE IF NOT EXISTS {large_db}")
+    _sysbench_prepare(
+        test_helper, small_db, NUM_SMALL_TABLES, SMALL_TABLE_ROWS,
+        f"adv_sysbench_{small_db}_prepare.log", storage_engine=storage_engine,
+    )
+    _sysbench_prepare(
+        test_helper, large_db, 1, LARGE_TABLE_ROWS,
+        f"adv_sysbench_{large_db}_prepare.log", storage_engine=storage_engine,
+    )
+
+
+def _dispatch_rank_of_largest(target_dir: str, log_path: str, dispatch_pattern: str, scope_pattern: "re.Pattern") -> tuple:
+    """Find the single largest real file under target_dir whose relative
+    path matches scope_pattern, then return its 1-based dispatch rank among
+    log lines that match both dispatch_pattern and scope_pattern (i.e. how
+    many other in-scope files were dispatched to a worker thread before it).
+
+    Returns (rank, total_in_scope, largest_relpath, largest_size). rank is
+    None if the largest file's line never appears in the log.
+    """
+    largest_relpath = None
+    largest_size = -1
+    for root, _dirs, files in os.walk(target_dir):
+        for name in files:
+            relpath = os.path.relpath(os.path.join(root, name), target_dir)
+            if not scope_pattern.search(relpath):
+                continue
+            try:
+                size = os.path.getsize(os.path.join(root, name))
+            except OSError:
+                continue
+            if size > largest_size:
+                largest_size = size
+                largest_relpath = relpath
+
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        lines = [
+            line for line in f
+            if re.search(dispatch_pattern, line) and scope_pattern.search(line)
+        ]
+
+    rank = None
+    for idx, line in enumerate(lines, start=1):
+        if largest_relpath and largest_relpath in line:
+            rank = idx
+            break
+    return rank, len(lines), largest_relpath, largest_size
+
+
+def test_decompress_largest_file_first(test_helper):
+    """PXB-3502: 'xtrabackup --decompress --parallel=N' must dispatch the
+    largest compressed file to a worker thread before the bulk of the small
+    decoy tables, not after them.
+    """
+    if test_helper.xtrabackup_version_normalized < test_helper.normalize_xtrabackup_version("8.4.0-7"):
+        pytest.skip(
+            f"PXB-3502 size-ordered decompress requires PXB >= 8.4.0-7 "
+            f"(found {test_helper.xtrabackup_version})"
+        )
+    test_helper.mysqld_options = ""
+    test_helper.backup_params = f"--compress --compress-threads={PARALLEL_DEGREE} {CORE_FILE_OPT}"
+    test_helper.initialize_db()
+    _build_adversarial_dataset(test_helper)
+
+    if os.path.exists(test_helper.backup_dir):
+        shutil.rmtree(test_helper.backup_dir)
+    os.makedirs(test_helper.backup_dir)
+    full_target = os.path.join(test_helper.backup_dir, "full")
+
+    log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    backup_log = os.path.join(test_helper.logdir, f"adv_backup_{log_date}_log")
+    xb_cmd = test_helper._xtrabackup_cmd_prefix() + [
+        "--no-defaults", f"--user={test_helper.backup_user}", "--password=",
+        "--backup", f"--target-dir={full_target}",
+        f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}",
+    ] + test_helper.backup_params.split()
+    result = test_helper.run_command(xb_cmd, check=False, log_file=backup_log)
+    if result.returncode != 0:
+        pytest.fail(f"ERR: Compressed backup failed. Log: {backup_log}")
+
+    decompress_log = os.path.join(test_helper.logdir, f"adv_decompress_{log_date}_log")
+    cmd = test_helper._xtrabackup_cmd_prefix() + [
+        "--no-defaults", "--decompress", f"--target-dir={full_target}", f"--parallel={PARALLEL_DEGREE}",
+    ]
+    result = test_helper.run_command(cmd, check=False, log_file=decompress_log)
+    if result.returncode != 0:
+        pytest.fail(f"ERR: Decompress failed. Log: {decompress_log}")
+
+    rank, total, largest, size = _dispatch_rank_of_largest(
+        full_target, decompress_log, r"decompressing ", PARALLEL_ORDER_INNODB_SCOPE
+    )
+    assert rank is not None, f"largest in-scope file '{largest}' never appeared in the decompress dispatch log: {decompress_log}"
+    assert rank == 1, (
+        f"{rank - 1}/{total} smaller files were decompressed before the largest one "
+        f"('{largest}', {size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
+        f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {decompress_log}"
+    )
+
+
+def test_copy_back_largest_file_first(test_helper):
+    """PXB-3502: 'xtrabackup --copy-back --parallel=N' must dispatch the
+    largest data file to a worker thread before the bulk of the small decoy
+    tables, not after them.
+
+    Always exercises InnoDB's per-table files. When ROCKSDB=enabled, the
+    same backup/copy-back cycle additionally carries a RocksDB dataset, and
+    RocksDB's shared '.rocksdb' checkpoint files are checked too -- one test,
+    with scope extended by the global ROCKSDB setting, matching how the rest
+    of this suite folds RocksDB in (e.g. ``databases = ["test", "test_rocksdb"]
+    if rocksdb_enabled else ["test"]``) rather than a separate parametrized
+    variant.
+    """
+    if test_helper.xtrabackup_version_normalized < test_helper.normalize_xtrabackup_version("8.4.0-7"):
+        pytest.skip(
+            f"PXB-3502 size-ordered copy-back requires PXB >= 8.4.0-7 "
+            f"(found {test_helper.xtrabackup_version})"
+        )
+    rocksdb_enabled = test_helper.rocksdb == "enabled"
+
+    test_helper.mysqld_options = ""
+    test_helper.backup_params = f"{CORE_FILE_OPT}"
+    test_helper.prepare_params = f"{CORE_FILE_OPT}"
+    test_helper.restore_params = ""
+    test_helper.initialize_db(rocksdb=rocksdb_enabled)
+    _build_adversarial_dataset(test_helper)
+    if rocksdb_enabled:
+        _build_adversarial_dataset(test_helper, rocksdb=True, small_db=SMALL_DB_ROCKSDB, large_db=LARGE_DB_ROCKSDB)
+
+    if os.path.exists(test_helper.backup_dir):
+        shutil.rmtree(test_helper.backup_dir)
+    os.makedirs(test_helper.backup_dir)
+    full_target = os.path.join(test_helper.backup_dir, "full")
+
+    log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    backup_log = os.path.join(test_helper.logdir, f"adv_backup_{log_date}_log")
+    xb_cmd = test_helper._xtrabackup_cmd_prefix() + [
+        "--no-defaults", f"--user={test_helper.backup_user}", "--password=",
+        "--backup", f"--target-dir={full_target}",
+        f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}",
+    ] + test_helper.backup_params.split()
+    result = test_helper.run_command(xb_cmd, check=False, log_file=backup_log)
+    if result.returncode != 0:
+        pytest.fail(f"ERR: Backup failed. Log: {backup_log}")
+
+    test_helper.prepare_full_backup(test_helper.prepare_params, log_date)
+
+    restore_dir = os.path.join(test_helper.backup_dir, "restored_datadir")
+    if os.path.exists(restore_dir):
+        shutil.rmtree(restore_dir)
+    os.makedirs(restore_dir)
+
+    copyback_log = os.path.join(test_helper.logdir, f"adv_copyback_{log_date}_log")
+    cmd = test_helper._xtrabackup_cmd_prefix() + [
+        "--no-defaults", "--copy-back", f"--target-dir={full_target}",
+        f"--datadir={restore_dir}", f"--parallel={PARALLEL_DEGREE}",
+    ] + test_helper.restore_params.split()
+    result = test_helper.run_command(cmd, check=False, log_file=copyback_log)
+    if result.returncode != 0:
+        pytest.fail(f"ERR: Copy-back failed. Log: {copyback_log}")
+
+    rank, total, largest, size = _dispatch_rank_of_largest(full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_INNODB_SCOPE)
+    assert rank is not None, f"largest in-scope file '{largest}' never appeared in the copy-back dispatch log: {copyback_log}"
+    assert rank == 1, (
+        f"{rank - 1}/{total} smaller InnoDB files were copied back before the largest one "
+        f"('{largest}', {size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
+        f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {copyback_log}"
+    )
+
+    if rocksdb_enabled:
+        rdb_rank, rdb_total, rdb_largest, rdb_size = _dispatch_rank_of_largest(
+            full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_ROCKSDB_SCOPE
+        )
+        assert rdb_rank is not None, f"largest in-scope file '{rdb_largest}' never appeared in the copy-back dispatch log: {copyback_log}"
+        assert rdb_rank == 1, (
+            f"{rdb_rank - 1}/{rdb_total} smaller RocksDB files were copied back before the largest one "
+            f"('{rdb_largest}', {rdb_size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
+            f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {copyback_log}"
+        )
+
+    # Functional guard: reordering the queue must not skip, duplicate, or
+    # corrupt any file.
+    for i in range(1, NUM_SMALL_TABLES + 1):
+        restored = os.path.join(restore_dir, SMALL_DB, f"sbtest{i}.ibd")
+        backed_up = os.path.join(full_target, SMALL_DB, f"sbtest{i}.ibd")
+        assert os.path.isfile(restored), f"sbtest{i}.ibd missing from restored datadir: {restored}"
+        assert os.path.getsize(restored) == os.path.getsize(backed_up), f"sbtest{i}.ibd size mismatch after copy-back"
+    restored_large = os.path.join(restore_dir, LARGE_DB, "sbtest1.ibd")
+    backed_up_large = os.path.join(full_target, LARGE_DB, "sbtest1.ibd")
+    assert os.path.isfile(restored_large), f"{LARGE_DB}/sbtest1.ibd missing from restored datadir: {restored_large}"
+    assert os.path.getsize(restored_large) == os.path.getsize(backed_up_large), (
+        f"{LARGE_DB}/sbtest1.ibd size mismatch after copy-back"
+    )
+    if rocksdb_enabled:
+        restored_rocksdb = os.path.join(restore_dir, ".rocksdb")
+        assert os.path.isdir(restored_rocksdb) and os.listdir(restored_rocksdb), (
+            f".rocksdb missing or empty in restored datadir: {restored_rocksdb}"
+        )
+
+
+# ============================================================================
 # __main__ block with argparse and suite-to-test mapping
 # ============================================================================
 
@@ -971,6 +1414,7 @@ if __name__ == "__main__":
             "Cloud_backup_tests",
             "Innodb_params_redo_archive_tests",
             "SSL_tests",
+            "Parallel_processing_order_tests",
         ],
         help="Test suites to run",
     )
@@ -1012,6 +1456,7 @@ if __name__ == "__main__":
         print("   Cloud_backup_tests")
         print("   Innodb_params_redo_archive_tests")
         print("   SSL_tests")
+        print("   Parallel_processing_order_tests")
         print("")
         print("3. Logs are available at:", TEST_BASE_DIR, "(test-specific directories)")
         sys.exit(1)
@@ -1063,12 +1508,16 @@ if __name__ == "__main__":
         "Encryption_PXB2_4_MS5_7_tests": [
             "test_encryption_2_4[keyring_file_plugin]",
         ],
-        "Cloud_backup_tests": ["test_cloud_inc_backup"],
+        "Cloud_backup_tests": ["test_cloud_inc_backup", "test_cloud_backup_md5_delete"],
         "Innodb_params_redo_archive_tests": [
             "test_inc_backup_innodb_params",
             "test_inc_backup_archive_log",
         ],
         "SSL_tests": ["test_ssl_backup"],
+        "Parallel_processing_order_tests": [
+            "test_decompress_largest_file_first",
+            "test_copy_back_largest_file_first",
+        ],
     }
 
     pytest_args = [__file__, "-v"]

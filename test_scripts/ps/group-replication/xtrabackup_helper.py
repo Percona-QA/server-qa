@@ -3,6 +3,7 @@ import shlex
 from collections.abc import Callable
 
 from docker_helper import DockerHelper
+from generic_helper import companion_image
 
 
 class XtraBackup:
@@ -20,6 +21,7 @@ class XtraBackup:
         network: str,
         backup_volume: str,
         image: str | None = None,
+        server_image: str | None = None,
         platform: str | None = None,
         root_password: str = "rootpass",
         name_prefix: str = "xtrabackup",
@@ -28,7 +30,15 @@ class XtraBackup:
         self.docker = docker
         self.network = network
         self.backup_volume = backup_volume
-        self.image = image or os.environ.get("XTRABACKUP_IMAGE") or "percona/percona-xtrabackup:8.4"
+        # XtraBackup only backs up a server of its own X.Y ("Please use Percona XtraBackup
+        # 9.7 for this database"), so follow the server image's major.minor.
+        self.image = (
+            image
+            or os.environ.get("XTRABACKUP_IMAGE")
+            or companion_image(
+                server_image or "", "percona-xtrabackup", 2, "percona/percona-xtrabackup:8.4"
+            )
+        )
         self.platform = platform
         self.root_password = root_password
         self.name_prefix = name_prefix

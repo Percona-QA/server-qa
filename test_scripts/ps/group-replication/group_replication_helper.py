@@ -5,10 +5,9 @@ import time
 from urllib.parse import quote
 
 from docker_helper import DockerHelper
-from generic_helper import js_str, sql_ident, sql_str
+from generic_helper import companion_image, js_str, sql_ident, sql_str
 
 _logger = logging.getLogger("GR")
-
 
 class GroupReplication:
     def __init__(
@@ -66,7 +65,14 @@ class GroupReplication:
         self.single_primary = single_primary
         self.start_on_boot = start_on_boot
         self.mysql_router = mysql_router
-        self.router_image = router_image or os.environ.get("ROUTER_IMAGE") or "percona/percona-mysql-router:8.4"
+        self.router_image = (
+            router_image
+            or os.environ.get("ROUTER_IMAGE")
+            # Router can't bootstrap against a newer server: follow the server's X.Y.Z.
+            or companion_image(
+                self.server_image, "percona-mysql-router", 3, "percona/percona-mysql-router:8.4"
+            )
+        )
         self.router_name = f"{node_prefix}router"
         self.router_rw_port = router_rw_port
         self.router_ro_port = router_ro_port
@@ -1205,6 +1211,11 @@ class GroupReplication:
         Cluster bootstrap and instance-add go through mysqlsh's AdminAPI (see create()),
         so a server build without it cannot run this suite. Probed with a throwaway
         --rm container running `mysqlsh --version` (no node startup, no connection).
+
+        Only a missing binary (exit 127, how docker/podman report "executable file not
+        found") returns False. Any other failure (daemon down, permission denied on the
+        socket, image pull error) raises with the real error instead of being misreported
+        as a missing mysqlsh.
         """
         result = self.docker.run(
             image=self.server_image,
@@ -1212,7 +1223,14 @@ class GroupReplication:
             command=["--version"],
             check=False,
         )
-        return result.ok
+        if result.ok:
+            return True
+        if result.returncode == 127:
+            return False
+        raise RuntimeError(
+            f"could not probe mysqlsh in server image {self.server_image!r} "
+            f"(exit {result.returncode}): {(result.stderr or result.stdout).strip()}"
+        )
 
     def create(self) -> None:
         """Create the network and nodes, bootstrap the cluster, add instances, and persist GR settings."""

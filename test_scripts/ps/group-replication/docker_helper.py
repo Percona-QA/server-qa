@@ -359,6 +359,11 @@ class DockerHelper:
         )
         return result.stdout.strip() if result.ok else ""
 
+    def logs(self, name: str, tail: int = 80) -> str:
+        """Return the last `tail` lines of a container's output (stdout and stderr), or ""."""
+        result = self._run(["logs", "--tail", str(tail), name], check=False)
+        return (result.stdout + result.stderr).strip() if result.ok else ""
+
     def container_exists(self, name: str) -> bool:
         """Return True if a container with the exact given name exists (running or stopped)."""
         result = self._run(

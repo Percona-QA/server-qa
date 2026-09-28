@@ -58,15 +58,15 @@ def setup_directories(config_dir: Path, data_dir: Path, log_dir: Path, certs_dir
 def check_license(license_path: str | None) -> str:
     info("Checking for license file...")
 
-    # First check environment variable (like bash: export VAULT_LICENSE=...)
-    env_license = os.environ.get("VAULT_LICENSE")
+    # First check environment variable (like bash: export HASHICORP_VAULT_LICENSE=...)
+    env_license = os.environ.get("HASHICORP_VAULT_LICENSE")
     if env_license:
-        info("Using license from environment variable VAULT_LICENSE")
+        info("Using license from environment variable HASHICORP_VAULT_LICENSE")
         return env_license.strip()
 
     # Fall back to --license file path
     if not license_path:
-        error("No license provided. Either set VAULT_LICENSE env var or use --license=/path/to/vault.hclic")
+        error("No license provided. Either set HASHICORP_VAULT_LICENSE env var or use --license=/path/to/vault.hclic")
         sys.exit(1)
 
     p = Path(license_path)
@@ -286,7 +286,7 @@ def parse_args() -> argparse.Namespace:
         epilog="""
 LICENSE:
   Provide via environment variable (recommended):
-    export VAULT_LICENSE=$(cat /path/to/vault.hclic)
+    export HASHICORP_VAULT_LICENSE=$(cat /path/to/vault.hclic)
     python3 hashicorp-kmip-setup.py
 
   Or via file path:
@@ -296,7 +296,7 @@ EXAMPLES:
   python3 hashicorp-kmip-setup.py --license=/path/to/vault.hclic
   python3 hashicorp-kmip-setup.py --license=/path/to/vault.hclic --cert-dir=/custom/path/certs
   python3 hashicorp-kmip-setup.py --license=/path/to/vault.hclic --verbose
-  export VAULT_LICENSE=$(cat vault.hclic) && python3 hashicorp-kmip-setup.py --verbose
+  export HASHICORP_VAULT_LICENSE=$(cat vault.hclic) && python3 hashicorp-kmip-setup.py --verbose
         """,
     )
     parser.add_argument(
@@ -314,7 +314,7 @@ EXAMPLES:
         "--license",
         required=False,
         metavar="FILE",
-        help="Path to vault.hclic. Can also be set via: export VAULT_LICENSE=<content>",
+        help="Path to vault.hclic. Can also be set via: export HASHICORP_VAULT_LICENSE=<content>",
     )
     return parser.parse_args()
 

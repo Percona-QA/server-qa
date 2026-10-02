@@ -117,12 +117,17 @@ class GroupReplication:
         """
         return f"root:{quote(self.root_password, safe='')}@{node}:3306"
 
-    def _add_instance_script(self, node: str) -> str:
-        """Build the mysqlsh AdminAPI script to add a node to the cluster (clone recovery)."""
+    def _add_instance_script(self, node: str, recovery_method: str = "clone") -> str:
+        """Build the mysqlsh AdminAPI script to add a node to the cluster.
+
+        'clone' reseeds the joiner from a donor and is right for an empty node.
+        'incremental' replays the missing transactions instead, which is what a node
+        provisioned from a backup needs — cloning it would throw the restore away.
+        """
         return (
             f"var c = dba.getCluster({js_str(self.cluster_name)});"
             f"c.addInstance({js_str(self._instance_uri(node))}, {{"
-            f"recoveryMethod:'clone',"
+            f"recoveryMethod:{js_str(recovery_method)},"
             f"localAddress:{js_str(self._gr_address(node))}"
             "});"
         )
@@ -758,6 +763,83 @@ class GroupReplication:
                 password=self.root_password,
             )
 
+    def _next_node_index(self) -> int:
+        """Index the next added node will take."""
+        if not self.node_index:
+            raise RuntimeError("Cluster not created yet")
+        return max(self.node_index.values()) + 1
+
+    def next_node_volume(self) -> str:
+        """Data-volume name the next added node will use.
+
+        Lets a backup be restored *into* that volume before the node exists, which is how a
+        node gets provisioned from a backup rather than from a donor. Call it immediately
+        before start_restored_node(), which takes the same index.
+        """
+        return self._volume_name(self._next_node_index())
+
+    def start_restored_node(self) -> str:
+        """Start the next node on an already-restored data volume, without joining it.
+
+        The volume is expected to hold a restored backup (see next_node_volume()). A
+        physical backup is a byte copy of the donor, so two things have to go before the
+        node can be a member in its own right:
+
+        - auto.cnf, which carries the donor's server_uuid — no two members may share one;
+        - mysqld-auto.cnf, which carries the donor's persisted group_replication_local_address,
+          group_seeds and start_on_boot, so the node would otherwise try to join advertising
+          the donor's address.
+
+        Both are owned by the server's non-root user, hence the root helper container. The
+        node then starts with group replication off (its default is ON) so nothing happens
+        until join_node() configures it through AdminAPI.
+
+        Returns the node name; joining is deliberately a separate step, so a caller can
+        first check the node really came up on the restored data.
+        """
+        index = self._next_node_index()
+        volume = self._volume_name(index)
+        self.log(f"scrub donor identity from the restored volume {volume}")
+        self.docker.run(
+            self.server_image,
+            name=f"{self._node_name(index)}-scrub",
+            entrypoint="sh",
+            command=["-c", "rm -f /var/lib/mysql/auto.cnf /var/lib/mysql/mysqld-auto.cnf"],
+            volumes=[f"{volume}:/var/lib/mysql"],
+            user="root",
+            remove=True,
+            check=True,
+        )
+        name = self._start_mysqld_node(
+            index, extra_args=["--group-replication-start-on-boot=OFF"]
+        )
+        self._wait_ready(name)
+        return name
+
+    def join_node(self, name: str, recovery_method: str = "incremental", timeout: int = 300) -> None:
+        """Add an already-running node to the cluster and wait for the group to take it.
+
+        Mirrors scale_up()'s add path for a node that is already started — notably one
+        provisioned from a backup, which joins by replaying what it missed rather than by
+        clone.
+        """
+        self.log(f"add {name} to cluster ({recovery_method} recovery)")
+        self.docker.exec_mysqlsh(
+            self.get_primary(),
+            self._add_instance_script(name, recovery_method=recovery_method),
+            password=self.root_password,
+            timeout=timeout,
+        )
+        if name not in self.active_nodes:
+            self.active_nodes.append(name)
+        self.num_nodes = len(self.containers)
+        self.log("persist GR settings (start_on_boot, group_seeds) on each node that is up")
+        self._persist_gr_settings(self.active_nodes)
+        self.wait_online_count(len(self.active_nodes), timeout=timeout)
+        if self.proxy:
+            self.refresh_proxy()
+            self.wait_proxy_ready()
+
     def scale_up(self, count: int = 1) -> list[str]:
         """Grow the cluster by adding count new instances, then wait for everything ONLINE.
 
@@ -1148,7 +1230,7 @@ class GroupReplication:
             f"(container: {self.docker.container_state(self.proxy_name)!r}, last: {last!r})"
         )
 
-    def _start_mysqld_node(self, index: int) -> str:
+    def _start_mysqld_node(self, index: int, extra_args: list[str] | None = None) -> str:
         """Create and start a single mysqld container for the node at the given index.
 
         Records the node in self.containers and self.node_index and returns its name.
@@ -1164,7 +1246,7 @@ class GroupReplication:
             volumes=[f"{self._volume_name(index)}:/var/lib/mysql"],
             network=self.network,
             ports=[f"{self.base_host_port + index}:3306"],
-            command=self._mysqld_args(server_id=index, hostname=name),
+            command=self._mysqld_args(server_id=index, hostname=name) + list(extra_args or []),
             restart="always",
             # Lets a test blackhole individual peers from inside the container (see
             # sever_link), which is the only way to split the cluster into two halves that

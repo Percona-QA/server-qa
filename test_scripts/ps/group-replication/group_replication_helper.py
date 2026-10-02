@@ -682,6 +682,32 @@ class GroupReplication:
                 return False
             time.sleep(2)
 
+    def set_global(self, name: str, value: str | int, nodes: list[str] | None = None) -> None:
+        """SET GLOBAL a variable on every given node, defaulting to the whole cluster."""
+        targets = nodes if nodes is not None else list(self.containers)
+        self.log(f"set {name}={value} on {', '.join(targets)}")
+        for node in targets:
+            self.docker.exec_mysql(
+                node, f"SET GLOBAL {name}={value};", password=self.root_password
+            )
+
+    def view_id(self, node: str) -> str:
+        """Return the group's current VIEW_ID as seen from `node`, or '' when unreadable.
+
+        A view change is exactly what a membership change produces, so an unchanged VIEW_ID
+        across an outage is precise evidence that a member was never expelled: one that is
+        merely suspected goes UNREACHABLE within the same view.
+        """
+        result = self.docker.exec_mysql(
+            node,
+            "SELECT VIEW_ID FROM performance_schema.replication_group_member_stats "
+            "WHERE MEMBER_ID=@@server_uuid;",
+            password=self.root_password,
+            check=False,
+            timeout=15,
+        )
+        return result.stdout.strip() if result.ok else ""
+
     def clone_status(self, name: str) -> dict[str, str]:
         """Return the node's current/last clone operation as a column->value map, {} if never cloned.
 

@@ -1,0 +1,6 @@
+# The CI fleet's oldest confirmed Python is Oracle/RHEL 9's system python3
+# (3.9). Without this, ruff assumes the newest Python and suggests syntax
+# (e.g. `X | None` unions, UP045) that raises TypeError at import time on
+# any host running an older interpreter -- this repo has no
+# `from __future__ import annotations` to defer evaluation.
+target-version = "py39"

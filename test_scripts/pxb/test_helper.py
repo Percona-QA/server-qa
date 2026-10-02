@@ -77,6 +77,13 @@ S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
 S3_REGION = os.environ.get("S3_REGION", "")
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
+# SHA-256 of an empty string -- the fixed x-amz-content-sha256 value for a
+# request with no body. curl's --aws-sigv4 computes and sends this header
+# itself on some versions but not others (observed missing entirely against
+# real AWS S3 with the curl build on the CI host, even though it works
+# against MinIO either way); passing it explicitly makes the signed request
+# independent of that curl-version behavior.
+S3_EMPTY_PAYLOAD_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 INSTALL_TYPE = os.environ.get("INSTALL_TYPE", "tarball")  # tarball or package
 ROCKSDB = os.environ.get("ROCKSDB", "enabled")  # enabled or disabled
 BACKUP_USER = os.environ.get("BACKUP_USER", "root")
@@ -1256,12 +1263,29 @@ class BackupTestHelper:
                 pass
         return False
 
+    def _upload_streamed_backup(
+        self, xb_cmd: list[str], cloud_params: str, name: str, log_file: str
+    ) -> int:
+        """Pipe an xtrabackup xbstream into ``xbcloud put`` for ``name``.
+
+        Shared by ``take_backup``'s cloud branches and by ``upload_only``
+        callers. Returns the pipeline exit code; the caller reports failure.
+        """
+        pipe_cmd = (
+            f"{' '.join(xb_cmd)} 2>{log_file} | "
+            f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} put {cloud_params} {name} 2>>{log_file}"
+        )
+        return subprocess.run(pipe_cmd, shell=True, check=False).returncode
+
     def take_backup(
         self,
         backup_type: str = "",
         cloud_params: str = "",
         single_incremental: bool = False,
         databases: Optional[List[str]] = None,
+        cloud_name: Optional[str] = None,
+        upload_only: bool = False,
+        log_file: Optional[str] = None,
     ):
         """Take incremental backup with full/inc/prepare/restore cycle.
 
@@ -1270,7 +1294,21 @@ class BackupTestHelper:
             cloud_params: xbcloud options (used when backup_type="cloud").
             single_incremental: when True, take exactly one incremental then stop.
             databases: list of databases to verify (default ["test"]).
+            cloud_name: remote name for the full cloud backup. Default
+                ``full_<timestamp>``. Incremental objects keep their own names.
+            upload_only: with ``backup_type="cloud"``, upload the full backup
+                and return, leaving the remote objects in place. The normal
+                cloud path downloads the backup, deletes the remote objects,
+                then prepares and restores over the primary, which a test
+                that must inspect those objects (or restore onto a replica)
+                cannot use.
+            log_file: log for the full backup. Default is a timestamped file
+                under ``logdir``. Later steps in this method keep their own logs.
         """
+        if upload_only and backup_type != "cloud":
+            pytest.fail("upload_only requires backup_type='cloud'")
+        if upload_only and not cloud_name:
+            pytest.fail("upload_only requires cloud_name")
         if databases is None:
             databases = ["test"]
 
@@ -1293,26 +1331,26 @@ class BackupTestHelper:
                 "--stream=xbstream",
             ] + self.backup_params.split()
 
-            log_file = os.path.join(self.logdir, f"full_backup_{log_date}_log")
+            full_log = log_file or os.path.join(self.logdir, f"full_backup_{log_date}_log")
             if backup_type == "cloud":
-                cloud_name = f"full_{log_date}"
-                pipe_cmd = f"{' '.join(xb_cmd)} 2>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbcloud')} put {cloud_params} {cloud_name} 2>>{log_file}"
-                result = subprocess.run(pipe_cmd, shell=True, check=False)
-                if result.returncode != 0:
-                    pytest.fail(f"ERR: Full cloud backup failed. Please check the log at: {log_file}")
-                get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {full_target} 2>>{log_file}"
+                full_cloud_name = cloud_name or f"full_{log_date}"
+                if self._upload_streamed_backup(xb_cmd, cloud_params, full_cloud_name, full_log) != 0:
+                    pytest.fail(f"ERR: Full cloud backup failed. Please check the log at: {full_log}")
+                if upload_only:
+                    return
+                get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {full_cloud_name} 2>>{full_log} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {full_target} 2>>{full_log}"
                 result = subprocess.run(get_cmd, shell=True, check=False)
                 if result.returncode != 0:
-                    pytest.fail(f"ERR: Full cloud backup download failed. Please check the log at: {log_file}")
+                    pytest.fail(f"ERR: Full cloud backup download failed. Please check the log at: {full_log}")
                 self._decrypt_decompress(full_target, self.backup_params)
-                del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {cloud_name} 2>>{log_file}"
+                del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {full_cloud_name} 2>>{full_log}"
                 subprocess.run(del_cmd, shell=True, check=False)
             else:
                 stream_file = os.path.join(full_target, "full_backup.xbstream")
-                with open(stream_file, "wb") as sf, open(log_file, "w") as lf:
+                with open(stream_file, "wb") as sf, open(full_log, "w") as lf:
                     proc = subprocess.run(xb_cmd, stdout=sf, stderr=lf, check=False)
                 if proc.returncode != 0:
-                    pytest.fail(f"ERR: Full Backup (stream) failed. Please check the log at: {log_file}")
+                    pytest.fail(f"ERR: Full Backup (stream) failed. Please check the log at: {full_log}")
                 self.process_backup("stream", self.backup_params, full_target)
         elif backup_type == "tar":
             os.makedirs(full_target, exist_ok=True)
@@ -1323,7 +1361,7 @@ class BackupTestHelper:
                 "--stream=tar",
             ] + self.backup_params.split()
             tar_file = os.path.join(full_target, "full_backup.tar")
-            log_file = os.path.join(self.logdir, f"full_backup_{log_date}_log")
+            log_file = log_file or os.path.join(self.logdir, f"full_backup_{log_date}_log")
             with open(tar_file, "wb") as tf, open(log_file, "w") as lf:
                 proc = subprocess.run(xb_cmd, stdout=tf, stderr=lf, check=False)
             if proc.returncode != 0:
@@ -1336,7 +1374,7 @@ class BackupTestHelper:
                 f"-S{self.socket_path}", f"--datadir={self.datadir}",
             ] + self.backup_params.split() + ["--register-redo-log-consumer"]
 
-            log_file = os.path.join(self.logdir, f"full_backup_{log_date}_log")
+            log_file = log_file or os.path.join(self.logdir, f"full_backup_{log_date}_log")
             result = self.run_command(cmd, check=False, log_file=log_file)
             if result.returncode != 0:
                 pytest.fail(f"ERR: Full Backup failed. Please check the log at: {log_file}")
@@ -1363,17 +1401,15 @@ class BackupTestHelper:
 
                 log_file = os.path.join(self.logdir, f"inc1_backup_{log_date}_log")
                 if backup_type == "cloud":
-                    cloud_name = f"inc1_{log_date}"
-                    pipe_cmd = f"{' '.join(xb_cmd)} 2>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbcloud')} put {cloud_params} {cloud_name} 2>>{log_file}"
-                    result = subprocess.run(pipe_cmd, shell=True, check=False)
-                    if result.returncode != 0:
+                    inc_cloud_name = f"inc1_{log_date}"
+                    if self._upload_streamed_backup(xb_cmd, cloud_params, inc_cloud_name, log_file) != 0:
                         pytest.fail(f"ERR: Incremental cloud backup failed. Please check the log at: {log_file}")
-                    get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {inc_target} 2>>{log_file}"
+                    get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {inc_cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {inc_target} 2>>{log_file}"
                     result = subprocess.run(get_cmd, shell=True, check=False)
                     if result.returncode != 0:
                         pytest.fail(f"ERR: Inc cloud backup download failed. Please check the log at: {log_file}")
                     self._decrypt_decompress(inc_target, self.backup_params)
-                    del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {cloud_name} 2>>{log_file}"
+                    del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {inc_cloud_name} 2>>{log_file}"
                     subprocess.run(del_cmd, shell=True, check=False)
                 else:
                     stream_file = os.path.join(inc_target, "inc_backup.xbstream")
@@ -1437,17 +1473,15 @@ class BackupTestHelper:
 
                     log_file = os.path.join(self.logdir, f"inc{inc_num}_backup_{log_date}_log")
                     if backup_type == "cloud":
-                        cloud_name = f"inc{inc_num}_{log_date}"
-                        pipe_cmd = f"{' '.join(xb_cmd)} 2>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbcloud')} put {cloud_params} {cloud_name} 2>>{log_file}"
-                        result = subprocess.run(pipe_cmd, shell=True, check=False)
-                        if result.returncode != 0:
+                        inc_cloud_name = f"inc{inc_num}_{log_date}"
+                        if self._upload_streamed_backup(xb_cmd, cloud_params, inc_cloud_name, log_file) != 0:
                             pytest.fail(f"ERR: Inc{inc_num} cloud backup failed. Log: {log_file}")
-                        get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {inc_target} 2>>{log_file}"
+                        get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {inc_cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {inc_target} 2>>{log_file}"
                         result = subprocess.run(get_cmd, shell=True, check=False)
                         if result.returncode != 0:
                             pytest.fail(f"ERR: Inc{inc_num} cloud download failed. Log: {log_file}")
                         self._decrypt_decompress(inc_target, self.backup_params)
-                        del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {cloud_name} 2>>{log_file}"
+                        del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {inc_cloud_name} 2>>{log_file}"
                         subprocess.run(del_cmd, shell=True, check=False)
                     else:
                         stream_file = os.path.join(inc_target, "inc_backup.xbstream")
@@ -1730,16 +1764,28 @@ class BackupTestHelper:
 
         self._decrypt_decompress(target_dir, backup_params)
 
-    def collect_table_data(self, databases: List[str]) -> Dict[str, Dict[str, Tuple[str, str]]]:
+    def collect_table_data(
+        self, databases: list[str], server: Optional["MySQLServer"] = None
+    ) -> dict[str, dict[str, tuple[str, str]]]:
         """Collect per-table COUNT(*) and CHECKSUM for verification.
+
+        Args:
+            databases: databases to inspect.
+            server: MySQLServer to query (default: the primary). Pass a
+                replica here to verify a restored backup on it directly,
+                instead of duplicating this method's query logic against a
+                different socket/basedir.
 
         Returns dict: {db: {table: (count, checksum)}}
         """
+        if server is None:
+            server = self.primary
+        mysql_bin = os.path.join(server.basedir, "bin/mysql")
         data: Dict[str, Dict[str, Tuple[str, str]]] = {}
         for db in databases:
             data[db] = {}
             result = subprocess.run(
-                [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
+                [mysql_bin, "-uroot", f"-S{server.socket_path}", "-BNe",
                  f"SHOW TABLES FROM {db};"],
                 capture_output=True, text=True, check=False,
             )
@@ -1748,13 +1794,13 @@ class BackupTestHelper:
             tables = [t.strip() for t in result.stdout.strip().split("\n") if t.strip()]
             for table in tables:
                 count_result = subprocess.run(
-                    [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
+                    [mysql_bin, "-uroot", f"-S{server.socket_path}", "-BNe",
                      f"SELECT COUNT(*) FROM {db}.{table}"],
                     capture_output=True, text=True, check=False,
                 )
                 count = count_result.stdout.strip() if count_result.returncode == 0 else "ERR"
                 cksum_result = subprocess.run(
-                    [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
+                    [mysql_bin, "-uroot", f"-S{server.socket_path}", "-BNe",
                      f"CHECKSUM TABLE {db}.{table}"],
                     capture_output=True, text=True, check=False,
                 )
@@ -2019,6 +2065,57 @@ class BackupTestHelper:
         """Delete backup from cloud."""
         cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {name}"
         subprocess.run(cmd, shell=True, capture_output=True, check=False)
+
+    def s3_list_objects(self, prefix: str = "") -> list[str]:
+        """List object keys in the S3 bucket, optionally filtered by prefix.
+
+        Talks to the S3-compatible endpoint directly via curl's built-in AWS
+        SigV4 signing (``--aws-sigv4``, curl >= 7.75) so inspecting what
+        xbcloud actually left in the bucket does not require a boto3/awscli
+        dependency that the rest of this test suite doesn't otherwise need.
+
+        curl exits 0 even when the server responds with an HTTP error (e.g.
+        403 for a signature/credentials mismatch), so the response's own
+        status line is checked explicitly here; otherwise an auth/config
+        problem would silently look like "the bucket has no matching
+        objects" instead of a clear, actionable error.
+        """
+        url = f"{self.s3_endpoint}/{self.s3_bucket}?list-type=2"
+        if prefix:
+            url += f"&prefix={prefix}"
+        cmd = [
+            "curl", "-s", "-w", "\n%{http_code}",
+            "--aws-sigv4", f"aws:amz:{self.s3_region}:s3",
+            "--user", f"{self.s3_access_key}:{self.s3_secret_key}",
+            "-H", f"x-amz-content-sha256: {S3_EMPTY_PAYLOAD_SHA256}", url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            pytest.fail(f"ERR: Listing S3 objects (prefix={prefix!r}) failed to run curl: {result.stderr}")
+        body, _, status = result.stdout.rpartition("\n")
+        if status.strip() != "200":
+            pytest.fail(
+                f"ERR: Listing S3 objects (prefix={prefix!r}) failed with HTTP {status.strip()}: {body.strip()}"
+            )
+        return re.findall(r"<Key>(.*?)</Key>", body)
+
+    def s3_delete_object(self, key: str):
+        """Delete a single object directly from the S3 bucket via a REST DELETE.
+
+        Used to simulate the md5-sidecar cleanup option that xbcloud does not
+        currently provide (see ``test_cloud_backup_md5_delete``).
+        """
+        url = f"{self.s3_endpoint}/{self.s3_bucket}/{key}"
+        cmd = [
+            "curl", "-s", "-w", "\n%{http_code}", "-X", "DELETE",
+            "--aws-sigv4", f"aws:amz:{self.s3_region}:s3",
+            "--user", f"{self.s3_access_key}:{self.s3_secret_key}",
+            "-H", f"x-amz-content-sha256: {S3_EMPTY_PAYLOAD_SHA256}", url,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        body, _, status = result.stdout.rpartition("\n")
+        if status.strip() not in ("200", "204"):
+            pytest.fail(f"ERR: Deleting S3 object '{key}' failed with HTTP {status.strip()}: {body.strip()}")
 
     def run_ddl_in_background(self, ddl_func, *args, **kwargs) -> threading.Thread:
         """Launch a DDL operation in a background thread. Returns the thread handle."""

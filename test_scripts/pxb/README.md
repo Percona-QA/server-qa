@@ -421,6 +421,7 @@ python innodb_myrocks_backup_tests.py Encryption_PXB2_4_MS5_7_tests
 python innodb_myrocks_backup_tests.py Cloud_backup_tests
 python innodb_myrocks_backup_tests.py Innodb_params_redo_archive_tests
 python innodb_myrocks_backup_tests.py SSL_tests
+python innodb_myrocks_backup_tests.py Parallel_processing_order_tests
 ```
 
 Verbose (no capture):
@@ -449,9 +450,10 @@ python innodb_myrocks_backup_tests.py SSL_tests Cloud_backup_tests
 | `Encryption_PXB9_0_MS9_0_tests` | `test_encryption_8_0[keyring_file_component]` |
 | `Encryption_PXB2_4_PS5_7_tests` | `test_encryption_2_4[keyring_file_plugin]`, `test_encryption_2_4[keyring_vault_plugin]` |
 | `Encryption_PXB2_4_MS5_7_tests` | `test_encryption_2_4[keyring_file_plugin]` |
-| `Cloud_backup_tests` | `test_cloud_inc_backup` |
+| `Cloud_backup_tests` | `test_cloud_inc_backup`, `test_cloud_backup_md5_delete` |
 | `Innodb_params_redo_archive_tests` | `test_inc_backup_innodb_params`, `test_inc_backup_archive_log` |
 | `SSL_tests` | `test_ssl_backup` |
+| `Parallel_processing_order_tests` | `test_decompress_largest_file_first`, `test_copy_back_largest_file_first` |
 
 Example:
 
@@ -491,9 +493,10 @@ pytest innodb_myrocks_backup_tests.py --collect-only -q
 | `Encryption_PXB9_0_MS9_0_tests` | PXB 9.0 + MS 9.0 encryption with keyring_file component |
 | `Encryption_PXB2_4_PS5_7_tests` | PXB 2.4 + PS 5.7 encryption with keyring_file and keyring_vault plugins |
 | `Encryption_PXB2_4_MS5_7_tests` | PXB 2.4 + MS 5.7 encryption with keyring_file plugin |
-| `Cloud_backup_tests` | Cloud incremental backup using xbcloud (requires `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`, `S3_ENDPOINT`) |
+| `Cloud_backup_tests` | Cloud incremental backup using xbcloud (requires `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`, `S3_ENDPOINT`). `test_cloud_backup_md5_delete` is skipped on PXB < 8.4.0-7 |
 | `Innodb_params_redo_archive_tests` | Backup with custom InnoDB parameters and redo log archiving |
 | `SSL_tests` | Backup with SSL certificates, `--ssl-mode`, `--ssl-cipher`, and FIPS mode |
+| `Parallel_processing_order_tests` | PXB-3502 regression: parallel `--decompress`/`--copy-back` must dispatch the largest file first, not last. Skipped on PXB < 8.4.0-7 |
 
 ---
 
@@ -529,9 +532,12 @@ pytest innodb_myrocks_backup_tests.py --collect-only -q
 | `test_encryption_8_0` | Param | `[keyring_file_plugin]`, `[keyring_vault_plugin]`, `[keyring_vault_component]`, `[keyring_file_component]`, `[keyring_kmip_component]`, `[keyring_kms_component]` — each runs multiple sub-tests (basic, all-options, transition-key, generate-transition-key, lz4/zstd streaming, DDL) |
 | `test_encryption_2_4` | Param | `[keyring_file_plugin]`, `[keyring_vault_plugin]` — PXB 2.4 / PS 5.7 encryption tests |
 | `test_cloud_inc_backup` | Non-param | Cloud incremental backup via xbcloud; requires `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`, `S3_ENDPOINT` |
+| `test_cloud_backup_md5_delete` | Non-param | `xbcloud delete` must also remove the `.md5` sidecar from `put --md5`; skipped on PXB < 8.4.0-7 |
 | `test_inc_backup_innodb_params` | Non-param | Backup with custom InnoDB parameters |
 | `test_inc_backup_archive_log` | Non-param | Backup with redo log archiving; skipped on 5.7 |
 | `test_ssl_backup` | Non-param | Backup with SSL certificates, ssl-mode, ssl-cipher, and FIPS mode |
+| `test_decompress_largest_file_first` | Non-param | PXB-3502: `--decompress --parallel=N` must dispatch the largest compressed file before the bulk of decoy small tables; skipped on PXB < 8.4.0-7 |
+| `test_copy_back_largest_file_first` | Non-param | PXB-3502: `--copy-back --parallel=N` must dispatch the largest data file first; always checks InnoDB `.ibd` files, and additionally checks MyRocks' shared `.rocksdb` checkpoint files when `ROCKSDB=enabled`; skipped on PXB < 8.4.0-7 |
 
 ---
 

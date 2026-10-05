@@ -10,12 +10,13 @@ than being pinned to one host, and the two cases here fail over each side in tur
 - **replica** — kill the replica cluster's primary. The channel should come back on the
   newly elected replica primary and catch up on whatever it missed.
 
-Setting this up has three non-obvious requirements, all of them discovered the hard way and
+Setting this up has four non-obvious requirements, all of them discovered the hard way and
 documented on the helpers that encode them: the two clusters need distinct `server_id`
 ranges, the channel needs `GET_SOURCE_PUBLIC_KEY` because the server's default
-`caching_sha2_password` will not send a password over a non-TLS connection, and the channel
-has to exist on every replica member *before* the primary is configured, or the members
-without it leave the group (MY-013786).
+`caching_sha2_password` will not send a password over a non-TLS connection, the channel has
+to exist on every replica member *before* the primary is configured, or the members without
+it leave the group (MY-013786), and every member needs a filter excluding the InnoDB Cluster
+metadata or the source's copy silently overwrites the replica's (see `set_channel_filter`).
 """
 
 import time
@@ -68,6 +69,15 @@ def _count_rows(replica, node=None):
     ).stdout.strip()
 
 
+def _metadata_owner(cluster, node=None):
+    """The cluster_name this cluster's own InnoDB Cluster metadata claims, or '' if unreadable."""
+    target = node or cluster.get_primary()
+    return cluster.docker.exec_mysql(
+        target, "SELECT cluster_name FROM mysql_innodb_cluster_metadata.clusters;",
+        password=cluster.root_password, check=False, timeout=30,
+    ).stdout.strip()
+
+
 def _wait_rows(replica, expected, node=None, timeout=120):
     """Poll the replica cluster until the probe table has `expected` rows; return what it had."""
     deadline = time.time() + timeout
@@ -104,6 +114,19 @@ def test_async_channel_survives_failover(async_channel, failover):
         for cluster, node in killed:
             if node not in cluster.active_nodes:
                 cluster.rejoin_nodes([node], timeout=300)
+                # A restarted member comes back with no replication filter: CHANGE REPLICATION
+                # FILTER does not persist. Without this the returning replica member would
+                # apply the source's InnoDB Cluster metadata the moment it ran the channel.
+                if cluster is replica:
+                    cluster.set_channel_filter(CHANNEL, node=node)
+
+    # The filter is doing its job: this cluster's metadata still describes *this* cluster.
+    # Unfiltered, the source's rows overwrite these by primary key without any error — the
+    # applier stays ON and every assertion above still passes, so nothing else here catches it.
+    assert _metadata_owner(replica) == replica.cluster_name, (
+        f"replica metadata was overwritten by the source cluster: "
+        f"cluster_name={_metadata_owner(replica)!r}, expected {replica.cluster_name!r}"
+    )
 
 
 def _run_failover(source, replica, failover, before, killed):

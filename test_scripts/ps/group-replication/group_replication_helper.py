@@ -913,6 +913,9 @@ class GroupReplication:
 
         GET_SOURCE_PUBLIC_KEY is required because the server's default caching_sha2_password
         refuses to send a password over the channel's non-TLS connection.
+
+        Each member also gets the metadata filter — see set_channel_filter() for why, and note
+        that a member restarted later needs it applied again.
         """
         primary = self.get_primary()
         change = (
@@ -927,12 +930,45 @@ class GroupReplication:
             self.docker.exec_mysql(node, "STOP GROUP_REPLICATION;", password=self.root_password,
                                    check=False, timeout=120)
             self.docker.exec_mysql(node, change, password=self.root_password, timeout=60)
+            self.set_channel_filter(channel, node=node)
             self.docker.exec_mysql(node, "START GROUP_REPLICATION;", password=self.root_password,
                                    timeout=120)
             self.wait_all_online(timeout=180, node=primary)
         self.log(f"configure channel {channel!r} on primary {primary}")
         self.docker.exec_mysql(primary, change, password=self.root_password, timeout=60)
+        self.set_channel_filter(channel, node=primary)
         self.wait_all_online(timeout=180, node=primary)
+
+    def set_channel_filter(self, channel: str, node: str | None = None) -> None:
+        """Keep the source cluster's InnoDB Cluster metadata out of this channel, on one member.
+
+        Measured, not theoretical. Two clusters bootstrapped independently each get their own
+        mysql_innodb_cluster_metadata, and an auto-positioned channel replays the source's
+        whole history into the replica. Without this filter the replica's metadata is
+        *overwritten*: after a single channel start its clusters.cluster_name read the source's
+        name and instances.address listed the source's hosts instead of its own.
+
+        Nothing errors when that happens. The row images carry the same primary keys
+        (instance_id 1..n on both sides), so they replace rather than collide — the applier
+        stays ON with LAST_ERROR_NUMBER 0 and the data assertions still pass. The corruption is
+        silent, and only shows up later in whatever consults the metadata (mysqlsh AdminAPI).
+
+        REPLICATE_WILD_IGNORE_TABLE rather than REPLICATE_IGNORE_DB: the latter keys off the
+        session's default database for statement-based DDL, which mysqlsh does not reliably
+        set, so schema-qualified DDL would slip past it.
+
+        Must be re-applied whenever a member restarts — CHANGE REPLICATION FILTER does not
+        persist, so a node brought back by rejoin_nodes() comes up with no filter at all.
+        """
+        target = node or self.get_primary()
+        self.log(f"filter InnoDB Cluster metadata out of channel {channel!r} on {target}")
+        self.docker.exec_mysql(
+            target,
+            "CHANGE REPLICATION FILTER REPLICATE_WILD_IGNORE_TABLE="
+            f"({sql_str('mysql_innodb_cluster_metadata.%')}) FOR CHANNEL {sql_str(channel)};",
+            password=self.root_password,
+            timeout=60,
+        )
 
     def add_managed_source(
         self,

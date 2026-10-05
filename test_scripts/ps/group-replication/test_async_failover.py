@@ -114,9 +114,18 @@ def test_async_channel_survives_failover(async_channel, failover):
         for cluster, node in killed:
             if node not in cluster.active_nodes:
                 cluster.rejoin_nodes([node], timeout=300)
-                # A restarted member comes back with no replication filter: CHANGE REPLICATION
-                # FILTER does not persist. Without this the returning replica member would
-                # apply the source's InnoDB Cluster metadata the moment it ran the channel.
+                # A restarted member comes back with no replication filter — CHANGE REPLICATION
+                # FILTER does not persist — so put it back before this member can ever run the
+                # channel. It is not racing the channel: a member rejoining a group that has
+                # already elected someone else returns as a SECONDARY, and Group Replication
+                # keeps async channels stopped on non-primaries (measured: receiver OFF on both
+                # secondaries, and OFF on the returning node both immediately and 15s later).
+                # What this guards is the *next* election — whenever this member is promoted,
+                # GR starts the channel on it, and the filter has to already be there.
+                #
+                # A persistent startup filter would avoid the question entirely but is not
+                # available: a global --replicate-wild-ignore-table makes dba.createCluster
+                # fail, so the channel-specific filter is the only form on offer.
                 if cluster is replica:
                     cluster.set_channel_filter(CHANNEL, node=node)
 

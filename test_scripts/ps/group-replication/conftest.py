@@ -131,6 +131,58 @@ def gr_cluster(request):
         cluster.destroy(remove_volumes=True)
 
 
+@pytest.fixture(scope="module")
+def gr_cluster_pair(request):
+    """Two independent GR clusters on one network, for asynchronous replication between them.
+
+    Both run behind HAProxy, like every other cluster here; the proxies play no part in the
+    async channel, which addresses source members directly through its failover list.
+
+    server_id_offset is what makes the pair usable together: each cluster numbers its nodes
+    from 1, and asynchronous replication refuses a source and replica that share a server_id.
+    """
+    try:
+        helper = DockerHelper()
+    except RuntimeError as exc:
+        pytest.skip(f"no container runtime available: {exc}")
+    workerid = _worker_id(request)
+    safe_workerid = re.sub(r"[^a-zA-Z0-9]", "", workerid) or "0"
+    m = re.search(r"\d+$", workerid)
+    offset = int(m.group()) if m else 0
+    network = f"grnet-async-{safe_workerid}"
+
+    def build(prefix, port_base, group, server_id_offset):
+        return GroupReplication(
+            helper,
+            num_nodes=3,
+            network=network,
+            node_prefix=f"{prefix}{safe_workerid}-",
+            base_host_port=port_base + offset * 1000,
+            cluster_name=f"{prefix}Cluster",
+            group_name=group,
+            server_id_offset=server_id_offset,
+            haproxy=True,
+        )
+
+    source = build("src", 34000, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa1111", 0)
+    replica = build("rep", 34500, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbb2222", 100)
+    if not source.mysqlsh_available():
+        pytest.skip(f"mysqlsh not available in server image {source.server_image!r}")
+    try:
+        source.create()
+        replica.create()
+        yield SimpleNamespace(source=source, replica=replica)
+    finally:
+        # Replica first, then source; the shared network only goes once nothing is attached,
+        # so the first destroy()'s network_remove is a no-op (it uses check=False).
+        for cluster in (replica, source):
+            try:
+                cluster.destroy(remove_volumes=True)
+            except Exception as exc:  # noqa: BLE001 - teardown must not mask a test failure
+                source.log(f"teardown of {cluster.node_prefix} failed: {exc}")
+        helper.network_remove(network)
+
+
 @pytest.fixture
 def sysbench(request, gr_cluster):
     # Container names allow only [a-zA-Z0-9_.-]; the parametrized "[router]" suffix in the

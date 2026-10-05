@@ -100,18 +100,25 @@ class XtraBackup:
             network=self.network,
         )
 
-    def prepare(self):
-        """Prepare the full backup and merge the incremental into it, ready to restore.
+    def prepare(self, incremental: bool = True):
+        """Prepare the backup chain so it can be restored.
 
-        The base is prepared with --apply-log-only (no rollback yet); the single/last
-        incremental is then merged without --apply-log-only so the final rollback runs
-        and the backup becomes consistent.
+        With an incremental to merge, the base is prepared with --apply-log-only (no
+        rollback yet) and the single/last incremental is then merged without it, so the
+        final rollback runs and the backup becomes consistent. For a full backup on its own
+        one plain --prepare does both; merging would fail anyway, since /backup/inc1 exists
+        but is empty.
         """
-        self.log("xtrabackup prepare (full + incremental)")
-        command = (
-            f"xtrabackup --prepare --apply-log-only --target-dir={self.full_dir} && "
-            f"xtrabackup --prepare --target-dir={self.full_dir} --incremental-dir={self.inc_dir}"
-        )
+        if incremental:
+            self.log("xtrabackup prepare (full + incremental)")
+            command = (
+                f"xtrabackup --prepare --apply-log-only --target-dir={self.full_dir} && "
+                f"xtrabackup --prepare --target-dir={self.full_dir} "
+                f"--incremental-dir={self.inc_dir}"
+            )
+        else:
+            self.log("xtrabackup prepare (full)")
+            command = f"xtrabackup --prepare --target-dir={self.full_dir}"
         return self._run(
             "prepare",
             volumes=[f"{self.backup_volume}:{self.backup_mount}"],

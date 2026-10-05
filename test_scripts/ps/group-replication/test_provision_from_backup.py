@@ -53,7 +53,14 @@ def test_provision_from_backup(gr_cluster, sysbench, xtrabackup):
     assert not gr_cluster.gtid_subset(new_node, missed_gtids), (
         f"{new_node} is already up to date before joining, so nothing would be replayed"
     )
-    gr_cluster.log(f"{new_node} restored at {gr_cluster.gtid_executed(new_node)!r}")
+    # Clone history as the restore left it. The backup donor is a secondary that create()
+    # added with recoveryMethod:'clone', so its datadir carries a completed clone row that the
+    # byte copy can bring along — start_restored_node() scrubs auto.cnf and mysqld-auto.cnf,
+    # nothing else. "No row" is therefore not a safe expectation, the same trap the IST/SST
+    # tests document on clone_status(); compare before/after instead.
+    clone_before = gr_cluster.clone_status(new_node)
+    gr_cluster.log(f"{new_node} restored at {gr_cluster.gtid_executed(new_node)!r}, "
+                   f"clone history {clone_before or 'empty'}")
 
     # Join by replaying the delta. recoveryMethod:'incremental' makes AdminAPI fail outright
     # rather than silently falling back to clone if the donors cannot serve it.
@@ -70,9 +77,13 @@ def test_provision_from_backup(gr_cluster, sysbench, xtrabackup):
         f"expected exactly one PRIMARY across the four nodes, got {members}"
     )
 
-    # Provisioned from the backup, not reseeded: a clone would have left a row behind.
-    clone = gr_cluster.clone_status(new_node)
-    assert clone == {}, f"{new_node} was cloned instead of using the restored data: {clone}"
+    # Provisioned from the backup, not reseeded: a join that cloned would have replaced the
+    # row captured above.
+    clone_after = gr_cluster.clone_status(new_node)
+    assert clone_after == clone_before, (
+        f"{new_node} was cloned instead of using the restored data:\n"
+        f"before: {clone_before!r}\nafter: {clone_after!r}"
+    )
 
     # ...and it replayed what the backup was missing.
     assert gr_cluster.gtid_subset(new_node, missed_gtids), (

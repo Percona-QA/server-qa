@@ -296,7 +296,19 @@ class BinlogServer:
         except subprocess.TimeoutExpired as exc:
             raise TestFailure(f"fetch did not finish within {timeout}s") from exc
         if result.returncode != 0:
-            raise TestFailure(f"fetch failed (exit {result.returncode}): {result.stderr[-4000:]}")
+            # binlog_server logs to stdout (cout_logger) for any failure
+            # that happens before main_config.json has been successfully
+            # parsed -- e.g. a schema/version mismatch -- since the
+            # file-based logger (and binsrv.log) only gets set up *after*
+            # that succeeds. Surfacing only stderr here would silently
+            # drop exactly that class of error: a bare "fetch failed
+            # (exit 1):" with nothing else, no binsrv.log, and the real
+            # reason sitting unseen in stdout.
+            details = "\n".join(
+                f"{name}:\n{text[-4000:]}" for name, text in (("stdout", result.stdout), ("stderr", result.stderr))
+                if text.strip()
+            ) or "<no output on stdout or stderr>"
+            raise TestFailure(f"fetch failed (exit {result.returncode}):\n{details}")
 
     def start_pull(self, config_path: Path) -> subprocess.Popen:
         LOG.info("starting pull against %s", config_path)

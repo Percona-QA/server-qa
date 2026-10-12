@@ -30,23 +30,45 @@ PROXIES = {
 }
 
 
+def _clusters_under_test(item):
+    """Every GroupReplication this test used — from gr_cluster, or both halves of a pair.
+
+    gr_cluster_pair yields a namespace rather than a GroupReplication, and async_channel
+    re-yields that same object, so look one level into attributes and de-duplicate by
+    identity. Scanning beats naming each fixture: looking up "gr_cluster" alone is how the
+    async tests came to lose their logs entirely, and a future cluster-bearing fixture would
+    hit the same gap.
+
+    getattr(..., "__dict__", {}) rather than vars(): funcargs also holds plain strings (a
+    parametrized case id) and ints, and vars() raises TypeError on those.
+    """
+    seen, clusters = set(), []
+    for value in getattr(item, "funcargs", {}).values():
+        for candidate in (value, *getattr(value, "__dict__", {}).values()):
+            if isinstance(candidate, GroupReplication) and id(candidate) not in seen:
+                seen.add(id(candidate))
+                clusters.append(candidate)
+    return clusters
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
-    """On a failed setup/call, attach each node's container state and log tail to the report.
+    """On a failed setup/call, attach container state and log tails for every cluster used.
 
     Teardown destroys the containers, so without this a failure leaves no server-side
-    evidence (e.g. whether mysqld crashed and restart=always brought it back).
+    evidence (e.g. whether mysqld crashed and restart=always brought it back). That applies
+    to both clusters of a gr_cluster_pair, whose teardown destroys the pair as well.
     """
     outcome = yield
     report = outcome.get_result()
-    cluster = item.funcargs.get("gr_cluster") if hasattr(item, "funcargs") else None
-    if report.when == "teardown" or not report.failed or not isinstance(cluster, GroupReplication):
+    if report.when == "teardown" or not report.failed:
         return
-    for name in [*cluster.containers, cluster.proxy_name]:
-        if not name or not cluster.docker.container_exists(name):
-            continue
-        state = cluster.docker.container_state(name)
-        report.sections.append((f"docker logs {name} ({state})", cluster.docker.logs(name)))
+    for cluster in _clusters_under_test(item):
+        for name in [*cluster.containers, cluster.proxy_name]:
+            if not name or not cluster.docker.container_exists(name):
+                continue
+            state = cluster.docker.container_state(name)
+            report.sections.append((f"docker logs {name} ({state})", cluster.docker.logs(name)))
 
 
 def _worker_id(request) -> str:
@@ -129,6 +151,58 @@ def gr_cluster(request):
         yield cluster
     finally:
         cluster.destroy(remove_volumes=True)
+
+
+@pytest.fixture(scope="module")
+def gr_cluster_pair(request):
+    """Two independent GR clusters on one network, for asynchronous replication between them.
+
+    Both run behind HAProxy, like every other cluster here; the proxies play no part in the
+    async channel, which addresses source members directly through its failover list.
+
+    server_id_offset is what makes the pair usable together: each cluster numbers its nodes
+    from 1, and asynchronous replication refuses a source and replica that share a server_id.
+    """
+    try:
+        helper = DockerHelper()
+    except RuntimeError as exc:
+        pytest.skip(f"no container runtime available: {exc}")
+    workerid = _worker_id(request)
+    safe_workerid = re.sub(r"[^a-zA-Z0-9]", "", workerid) or "0"
+    m = re.search(r"\d+$", workerid)
+    offset = int(m.group()) if m else 0
+    network = f"grnet-async-{safe_workerid}"
+
+    def build(prefix, port_base, group, server_id_offset):
+        return GroupReplication(
+            helper,
+            num_nodes=3,
+            network=network,
+            node_prefix=f"{prefix}{safe_workerid}-",
+            base_host_port=port_base + offset * 1000,
+            cluster_name=f"{prefix}Cluster",
+            group_name=group,
+            server_id_offset=server_id_offset,
+            haproxy=True,
+        )
+
+    source = build("src", 34000, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaa1111", 0)
+    replica = build("rep", 34500, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbb2222", 100)
+    if not source.mysqlsh_available():
+        pytest.skip(f"mysqlsh not available in server image {source.server_image!r}")
+    try:
+        source.create()
+        replica.create()
+        yield SimpleNamespace(source=source, replica=replica)
+    finally:
+        # Replica first, then source; the shared network only goes once nothing is attached,
+        # so the first destroy()'s network_remove is a no-op (it uses check=False).
+        for cluster in (replica, source):
+            try:
+                cluster.destroy(remove_volumes=True)
+            except Exception as exc:  # noqa: BLE001 - teardown must not mask a test failure
+                source.log(f"teardown of {cluster.node_prefix} failed: {exc}")
+        helper.network_remove(network)
 
 
 @pytest.fixture

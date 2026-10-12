@@ -22,6 +22,7 @@ class GroupReplication:
         cluster_name: str = "testCluster",
         group_name: str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
         gr_port: int = 33061,
+        server_id_offset: int = 0,
         communication_stack: str = "XCOM",
         single_primary: bool = True,
         start_on_boot: bool = True,
@@ -61,6 +62,11 @@ class GroupReplication:
         self.cluster_name = cluster_name
         self.group_name = group_name
         self.gr_port = gr_port
+        # server_id must be unique across every server that replicates with this one, not
+        # just within the group: two clusters wired together by an asynchronous channel
+        # otherwise collide ("source and replica have equal MySQL server ids") because both
+        # number their nodes from 1. Offsetting the second cluster keeps them distinct.
+        self.server_id_offset = server_id_offset
         self.communication_stack = communication_stack
         self.single_primary = single_primary
         self.start_on_boot = start_on_boot
@@ -117,12 +123,17 @@ class GroupReplication:
         """
         return f"root:{quote(self.root_password, safe='')}@{node}:3306"
 
-    def _add_instance_script(self, node: str) -> str:
-        """Build the mysqlsh AdminAPI script to add a node to the cluster (clone recovery)."""
+    def _add_instance_script(self, node: str, recovery_method: str = "clone") -> str:
+        """Build the mysqlsh AdminAPI script to add a node to the cluster.
+
+        'clone' reseeds the joiner from a donor and is right for an empty node.
+        'incremental' replays the missing transactions instead, which is what a node
+        provisioned from a backup needs — cloning it would throw the restore away.
+        """
         return (
             f"var c = dba.getCluster({js_str(self.cluster_name)});"
             f"c.addInstance({js_str(self._instance_uri(node))}, {{"
-            f"recoveryMethod:'clone',"
+            f"recoveryMethod:{js_str(recovery_method)},"
             f"localAddress:{js_str(self._gr_address(node))}"
             "});"
         )
@@ -677,6 +688,32 @@ class GroupReplication:
                 return False
             time.sleep(2)
 
+    def set_global(self, name: str, value: str | int, nodes: list[str] | None = None) -> None:
+        """SET GLOBAL a variable on every given node, defaulting to the whole cluster."""
+        targets = nodes if nodes is not None else list(self.containers)
+        self.log(f"set {name}={value} on {', '.join(targets)}")
+        for node in targets:
+            self.docker.exec_mysql(
+                node, f"SET GLOBAL {name}={value};", password=self.root_password
+            )
+
+    def view_id(self, node: str) -> str:
+        """Return the group's current VIEW_ID as seen from `node`, or '' when unreadable.
+
+        A view change is exactly what a membership change produces, so an unchanged VIEW_ID
+        across an outage is precise evidence that a member was never expelled: one that is
+        merely suspected goes UNREACHABLE within the same view.
+        """
+        result = self.docker.exec_mysql(
+            node,
+            "SELECT VIEW_ID FROM performance_schema.replication_group_member_stats "
+            "WHERE MEMBER_ID=@@server_uuid;",
+            password=self.root_password,
+            check=False,
+            timeout=15,
+        )
+        return result.stdout.strip() if result.ok else ""
+
     def clone_status(self, name: str) -> dict[str, str]:
         """Return the node's current/last clone operation as a column->value map, {} if never cloned.
 
@@ -757,6 +794,257 @@ class GroupReplication:
                 f"SET PERSIST group_replication_group_seeds='{seeds}';",
                 password=self.root_password,
             )
+
+    def _next_node_index(self) -> int:
+        """Index the next added node will take."""
+        if not self.node_index:
+            raise RuntimeError("Cluster not created yet")
+        return max(self.node_index.values()) + 1
+
+    def next_node_volume(self) -> str:
+        """Data-volume name the next added node will use.
+
+        Lets a backup be restored *into* that volume before the node exists, which is how a
+        node gets provisioned from a backup rather than from a donor. Call it immediately
+        before start_restored_node(), which takes the same index.
+        """
+        return self._volume_name(self._next_node_index())
+
+    def start_restored_node(self) -> str:
+        """Start the next node on an already-restored data volume, without joining it.
+
+        The volume is expected to hold a restored backup (see next_node_volume()). A
+        physical backup is a byte copy of the donor, so two things have to go before the
+        node can be a member in its own right:
+
+        - auto.cnf, which carries the donor's server_uuid — no two members may share one;
+        - mysqld-auto.cnf, which carries the donor's persisted group_replication_local_address,
+          group_seeds and start_on_boot, so the node would otherwise try to join advertising
+          the donor's address.
+
+        Both are owned by the server's non-root user, hence the root helper container. The
+        node then starts with group replication off (its default is ON) so nothing happens
+        until join_node() configures it through AdminAPI.
+
+        Returns the node name; joining is deliberately a separate step, so a caller can
+        first check the node really came up on the restored data.
+        """
+        index = self._next_node_index()
+        volume = self._volume_name(index)
+        self.log(f"scrub donor identity from the restored volume {volume}")
+        self.docker.run(
+            self.server_image,
+            name=f"{self._node_name(index)}-scrub",
+            entrypoint="sh",
+            command=["-c", "rm -f /var/lib/mysql/auto.cnf /var/lib/mysql/mysqld-auto.cnf"],
+            volumes=[f"{volume}:/var/lib/mysql"],
+            user="root",
+            remove=True,
+            check=True,
+        )
+        name = self._start_mysqld_node(
+            index, extra_args=["--group-replication-start-on-boot=OFF"]
+        )
+        self._wait_ready(name)
+        return name
+
+    def join_node(self, name: str, recovery_method: str = "incremental", timeout: int = 300) -> None:
+        """Add an already-running node to the cluster and wait for the group to take it.
+
+        Mirrors scale_up()'s add path for a node that is already started — notably one
+        provisioned from a backup, which joins by replaying what it missed rather than by
+        clone.
+        """
+        self.log(f"add {name} to cluster ({recovery_method} recovery)")
+        self.docker.exec_mysqlsh(
+            self.get_primary(),
+            self._add_instance_script(name, recovery_method=recovery_method),
+            password=self.root_password,
+            timeout=timeout,
+        )
+        if name not in self.active_nodes:
+            self.active_nodes.append(name)
+        self.num_nodes = len(self.containers)
+        self.log("persist GR settings (start_on_boot, group_seeds) on each node that is up")
+        self._persist_gr_settings(self.active_nodes)
+        self.wait_online_count(len(self.active_nodes), timeout=timeout)
+        if self.proxy:
+            self.refresh_proxy()
+            self.wait_proxy_ready()
+
+    # ------------------------------------------------------------------ async channel
+
+    def create_replication_user(self, user: str = "repl", password: str = "replpass") -> None:
+        """Create, on this (source) cluster, the account a replica's channel connects with.
+
+        SELECT on performance_schema is needed as well as REPLICATION SLAVE: a replica
+        tracking a *managed* source group reads the source's replication_group_members to
+        expand its failover list to every member.
+        """
+        primary = self.get_primary()
+        self.log(f"create replication user {user} on {primary}")
+        for stmt in (
+            f"CREATE USER IF NOT EXISTS {sql_str(user)}@'%' IDENTIFIED BY {sql_str(password)};",
+            f"GRANT REPLICATION SLAVE ON *.* TO {sql_str(user)}@'%';",
+            f"GRANT SELECT ON performance_schema.* TO {sql_str(user)}@'%';",
+        ):
+            self.docker.exec_mysql(primary, stmt, password=self.root_password, timeout=60)
+
+    def configure_async_channel(
+        self,
+        channel: str,
+        source_host: str,
+        user: str = "repl",
+        password: str = "replpass",
+        source_port: int = 3306,
+    ) -> None:
+        """Configure an async channel on every member of this (replica) cluster.
+
+        Order matters and is not obvious. CHANGE REPLICATION SOURCE is rejected outright on a
+        secondary ("ERROR 4049 … must be done on the group primary"), while running it on the
+        primary propagates SOURCE_CONNECTION_AUTO_FAILOVER to the other members — and a member
+        that does not already have that channel leaves the group with MY-013786, "Unable to set
+        SOURCE_CONNECTION_AUTO_FAILOVER on a non-existent or misconfigured replication channel
+        …, please create the channel and rejoin the server to the group".
+
+        So each secondary is configured with its Group Replication stopped (where the statement
+        is allowed and nothing propagates), rejoins, and only then is the primary configured —
+        by which point every member already has the channel.
+
+        GET_SOURCE_PUBLIC_KEY is required because the server's default caching_sha2_password
+        refuses to send a password over the channel's non-TLS connection.
+
+        Each member also gets the metadata filter — see set_channel_filter() for why, and note
+        that a member restarted later needs it applied again.
+        """
+        primary = self.get_primary()
+        change = (
+            f"CHANGE REPLICATION SOURCE TO SOURCE_HOST={sql_str(source_host)}, "
+            f"SOURCE_PORT={source_port}, SOURCE_USER={sql_str(user)}, "
+            f"SOURCE_PASSWORD={sql_str(password)}, SOURCE_AUTO_POSITION=1, "
+            f"SOURCE_CONNECTION_AUTO_FAILOVER=1, GET_SOURCE_PUBLIC_KEY=1, "
+            f"SOURCE_RETRY_COUNT=20, SOURCE_CONNECT_RETRY=2 FOR CHANNEL {sql_str(channel)};"
+        )
+        for node in [n for n in self.active_nodes if n != primary]:
+            self.log(f"configure channel {channel!r} on secondary {node} (GR stopped)")
+            self.docker.exec_mysql(node, "STOP GROUP_REPLICATION;", password=self.root_password,
+                                   check=False, timeout=120)
+            self.docker.exec_mysql(node, change, password=self.root_password, timeout=60)
+            self.set_channel_filter(channel, node=node)
+            self.docker.exec_mysql(node, "START GROUP_REPLICATION;", password=self.root_password,
+                                   timeout=120)
+            self.wait_all_online(timeout=180, node=primary)
+        self.log(f"configure channel {channel!r} on primary {primary}")
+        self.docker.exec_mysql(primary, change, password=self.root_password, timeout=60)
+        self.set_channel_filter(channel, node=primary)
+        self.wait_all_online(timeout=180, node=primary)
+
+    def set_channel_filter(self, channel: str, node: str | None = None) -> None:
+        """Keep the source cluster's InnoDB Cluster metadata out of this channel, on one member.
+
+        Measured, not theoretical. Two clusters bootstrapped independently each get their own
+        mysql_innodb_cluster_metadata, and an auto-positioned channel replays the source's
+        whole history into the replica. Without this filter the replica's metadata is
+        *overwritten*: after a single channel start its clusters.cluster_name read the source's
+        name and instances.address listed the source's hosts instead of its own.
+
+        Nothing errors when that happens. The row images carry the same primary keys
+        (instance_id 1..n on both sides), so they replace rather than collide — the applier
+        stays ON with LAST_ERROR_NUMBER 0 and the data assertions still pass. The corruption is
+        silent, and only shows up later in whatever consults the metadata (mysqlsh AdminAPI).
+
+        REPLICATE_WILD_IGNORE_TABLE rather than REPLICATE_IGNORE_DB: the latter keys off the
+        session's default database for statement-based DDL, which mysqlsh does not reliably
+        set, so schema-qualified DDL would slip past it.
+
+        Must be re-applied whenever a member restarts — CHANGE REPLICATION FILTER does not
+        persist, so a node brought back by rejoin_nodes() comes up with no filter at all.
+        """
+        target = node or self.get_primary()
+        self.log(f"filter InnoDB Cluster metadata out of channel {channel!r} on {target}")
+        self.docker.exec_mysql(
+            target,
+            "CHANGE REPLICATION FILTER REPLICATE_WILD_IGNORE_TABLE="
+            f"({sql_str('mysql_innodb_cluster_metadata.%')}) FOR CHANNEL {sql_str(channel)};",
+            password=self.root_password,
+            timeout=60,
+        )
+
+    def add_managed_source(
+        self,
+        channel: str,
+        source_group_name: str,
+        source_host: str,
+        source_port: int = 3306,
+        primary_weight: int = 80,
+        secondary_weight: int = 60,
+    ) -> str:
+        """Register a source *group* so the channel follows that group's primary.
+
+        Takes eight arguments — the seven-argument form fails with "You need to specify all
+        mandatory arguments", leaving the failover list silently empty and the channel pinned
+        to whichever host it first connected to. Once registered, the entry expands by itself
+        to every member of the source group.
+        """
+        node = self.get_primary()
+        self.log(f"register managed source group {source_group_name} for channel {channel!r}")
+        result = self.docker.exec_mysql(
+            node,
+            f"SELECT asynchronous_connection_failover_add_managed({sql_str(channel)}, "
+            f"'GroupReplication', {sql_str(source_group_name)}, {sql_str(source_host)}, "
+            f"{source_port}, '', {primary_weight}, {secondary_weight});",
+            password=self.root_password,
+            timeout=60,
+        )
+        return result.stdout.strip()
+
+    def start_async_channel(self, channel: str, node: str | None = None) -> None:
+        """START REPLICA for the channel on this cluster's primary."""
+        target = node or self.get_primary()
+        self.log(f"start channel {channel!r} on {target}")
+        self.docker.exec_mysql(target, f"START REPLICA FOR CHANNEL {sql_str(channel)};",
+                               password=self.root_password, check=False, timeout=60)
+
+    def channel_status(self, channel: str, node: str | None = None) -> tuple[str, str]:
+        """Return (service_state, source_host) for the channel as seen on `node`."""
+        target = node or self.get_primary()
+        result = self.docker.exec_mysql(
+            target,
+            "SELECT s.SERVICE_STATE, c.HOST FROM "
+            "performance_schema.replication_connection_status s JOIN "
+            "performance_schema.replication_connection_configuration c "
+            f"USING (CHANNEL_NAME) WHERE s.CHANNEL_NAME={sql_str(channel)};",
+            password=self.root_password, check=False, timeout=30,
+        )
+        parts = result.stdout.strip().split("\t") if result.ok else []
+        return (parts[0], parts[1]) if len(parts) >= 2 else ("", "")
+
+    def wait_channel_connected(
+        self, channel: str, node: str | None = None, source: str | None = None,
+        timeout: int = 180,
+    ) -> tuple[str, str]:
+        """Wait until the channel is ON (optionally against `source`); return its last state."""
+        self.log(f"wait for channel {channel!r} to connect"
+                 + (f" to {source}" if source else ""))
+        deadline = time.time() + timeout
+        while True:
+            state, host = self.channel_status(channel, node=node)
+            if state == "ON" and (source is None or host == source):
+                return state, host
+            if time.time() >= deadline:
+                return state, host
+            time.sleep(3)
+
+    def async_failover_sources(self, channel: str, node: str | None = None) -> list[str]:
+        """Hosts currently in the channel's asynchronous connection failover source list."""
+        target = node or self.get_primary()
+        result = self.docker.exec_mysql(
+            target,
+            "SELECT HOST FROM performance_schema.replication_asynchronous_connection_failover "
+            f"WHERE CHANNEL_NAME={sql_str(channel)} ORDER BY HOST;",
+            password=self.root_password, check=False, timeout=30,
+        )
+        return [h.strip() for h in result.stdout.splitlines() if h.strip()] if result.ok else []
 
     def scale_up(self, count: int = 1) -> list[str]:
         """Grow the cluster by adding count new instances, then wait for everything ONLINE.
@@ -1148,7 +1436,7 @@ class GroupReplication:
             f"(container: {self.docker.container_state(self.proxy_name)!r}, last: {last!r})"
         )
 
-    def _start_mysqld_node(self, index: int) -> str:
+    def _start_mysqld_node(self, index: int, extra_args: list[str] | None = None) -> str:
         """Create and start a single mysqld container for the node at the given index.
 
         Records the node in self.containers and self.node_index and returns its name.
@@ -1164,7 +1452,8 @@ class GroupReplication:
             volumes=[f"{self._volume_name(index)}:/var/lib/mysql"],
             network=self.network,
             ports=[f"{self.base_host_port + index}:3306"],
-            command=self._mysqld_args(server_id=index, hostname=name),
+            command=self._mysqld_args(server_id=self.server_id_offset + index, hostname=name)
+            + list(extra_args or []),
             restart="always",
             # Lets a test blackhole individual peers from inside the container (see
             # sever_link), which is the only way to split the cluster into two halves that

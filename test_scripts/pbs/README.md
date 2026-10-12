@@ -3,6 +3,25 @@
 Scripts and tests for QA of [percona-binlog-server](https://github.com/Percona-Lab/percona-binlog-server)
 (branch `0.4`), Percona's utility for streaming and archiving MySQL binary logs.
 
+## Table of Contents
+
+- [Project Structure](#project-structure)
+- [`scripts/generate_config.py`](#scriptsgenerate_configpy)
+  - [Usage](#usage)
+  - [`scripts/pbs_env.sh`](#scriptspbs_envsh)
+- [`tests/` — fetch/pull streaming tests](#tests--fetchpull-streaming-tests)
+  - [`tests/rewrite_mode_transition_test.py`](#testsrewrite_mode_transition_testpy)
+  - [`tests/pull_restart_resilience_test.py`](#testspull_restart_resilience_testpy)
+  - [`tests/pull_purge_resume_test.py`](#testspull_purge_resume_testpy)
+    - [Self-healing after a hard kill: orphaned binlog files](#self-healing-after-a-hard-kill-orphaned-binlog-files)
+  - [`tests/binlog_event_diversity_test.py`](#testsbinlog_event_diversity_testpy)
+  - [`config.json`](#configjson)
+  - [Databases and accounts the tests create](#databases-and-accounts-the-tests-create)
+  - [Using an already-running server instead of starting one](#using-an-already-running-server-instead-of-starting-one)
+  - [Running](#running)
+- [`pbs_test_runner.py`](#pbs_test_runnerpy)
+- [Requirements](#requirements)
+
 ## Project Structure
 
 ```text

@@ -15,7 +15,7 @@ import re
 import socket
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Optional
 
 LOG = logging.getLogger("pbs_streaming_test")
 
@@ -41,13 +41,13 @@ def configure_logging(verbose: bool) -> None:
 _SENSITIVE_FLAGS = ("--password", "--s3-secret-access-key", "--mysql-password")
 
 
-def redact_command(cmd: list) -> List[str]:
+def redact_command(cmd: list) -> list[str]:
     """Returns cmd as a list of display-safe strings, with any value that
     follows (or is combined via "=" with) a flag in _SENSITIVE_FLAGS
     replaced by a placeholder. For logging/error messages only -- never
     pass this to subprocess.run(); the caller must keep the original,
     unredacted cmd for that."""
-    redacted: List[str] = []
+    redacted: list[str] = []
     mask_next = False
     for arg in cmd:
         text = str(arg)
@@ -88,7 +88,7 @@ def find_free_port() -> int:
         return s.getsockname()[1]
 
 
-def load_key_value_config(path: Path) -> Dict[str, str]:
+def load_key_value_config(path: Path) -> dict[str, str]:
     """Parses a simple flat `key=value` config file: one assignment per
     line, blank lines and lines starting with '#' ignored, whitespace
     around the key/value stripped. Returns {} if the file doesn't exist --
@@ -96,7 +96,7 @@ def load_key_value_config(path: Path) -> Dict[str, str]:
     as an error, so a test with no such file just keeps its own defaults."""
     if not path.is_file():
         return {}
-    values: Dict[str, str] = {}
+    values: dict[str, str] = {}
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -151,7 +151,7 @@ _STORAGE_NON_PAYLOAD_SUFFIXES = (".json", ".tmp")
 _BINLOG_NAME_PATTERN = re.compile(r"^(?P<base>.+)\.(?P<seq>\d+)$")
 
 
-def _parse_binlog_name(name: str) -> Optional[Tuple[str, int]]:
+def _parse_binlog_name(name: str) -> Optional[tuple[str, int]]:
     """Splits a binlog file name into (base_name, sequence_number) via the
     "<base>.<digits>" pattern, or None if it doesn't match."""
     m = _BINLOG_NAME_PATTERN.match(name)

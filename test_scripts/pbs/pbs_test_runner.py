@@ -81,7 +81,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 LOG = logging.getLogger("pbs_test_runner")
 
@@ -188,11 +188,11 @@ def normalize_parallel(requested: int) -> int:
     return max(requested, MIN_PARALLEL_WORKERS)
 
 
-def discover_all_tests(tests_dir: Path) -> List[Path]:
+def discover_all_tests(tests_dir: Path) -> list[Path]:
     return sorted(tests_dir.glob("*_test.py"))
 
 
-def resolve_tests(raw_names: List[str], tests_dir: Path) -> List[Path]:
+def resolve_tests(raw_names: list[str], tests_dir: Path) -> list[Path]:
     """Resolve each requested name to a script under tests_dir. Validates
     every name before returning anything -- a run is only ever all-or-nothing,
     so a typo late in the list is reported alongside everything else wrong,
@@ -212,8 +212,8 @@ def resolve_tests(raw_names: List[str], tests_dir: Path) -> List[Path]:
             raise TestRunnerFailure(f"no *_test.py files found under {tests_dir}")
         return tests
 
-    resolved: List[Path] = []
-    problems: List[str] = []
+    resolved: list[Path] = []
+    problems: list[str] = []
     for name in names:
         filename = name if name.endswith(".py") else f"{name}.py"
         if filename in FRAMEWORK_MODULES:
@@ -275,7 +275,7 @@ class TestResult:
     failed_logs_path: Optional[Path] = None
 
 
-def run_one_test(test_path: Path, *, cwd: Path, extra_args: List[str], log_file: Path) -> "tuple[int, float]":
+def run_one_test(test_path: Path, *, cwd: Path, extra_args: list[str], log_file: Path) -> tuple[int, float]:
     cwd.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, str(test_path)] + extra_args
     start = time.time()
@@ -315,7 +315,7 @@ def preserve_failed_logs(run_dir: Path, name: str, log_file: Path) -> Optional[P
         return None
 
 
-def run_sequential(tests: List[Path], *, log_dir: Path, extra_args: List[str]) -> List[TestResult]:
+def run_sequential(tests: list[Path], *, log_dir: Path, extra_args: list[str]) -> list[TestResult]:
     """Every test runs with log_dir itself as its working directory --
     log_dir is the sequential "workdir", reused by every test in turn
     (each test's own setup_scenario() wipes/recreates ./logs at the start
@@ -326,7 +326,7 @@ def run_sequential(tests: List[Path], *, log_dir: Path, extra_args: List[str]) -
     test's logs are preserved the same way parallel mode preserves a
     worker slot's, and for the same reason: the next test's own setup
     would otherwise wipe them."""
-    results: List[TestResult] = []
+    results: list[TestResult] = []
     for test_path in tests:
         name = test_path.stem
         log_file = log_dir / f"{name}.log"
@@ -342,7 +342,7 @@ def run_sequential(tests: List[Path], *, log_dir: Path, extra_args: List[str]) -
     return results
 
 
-def run_parallel(tests: List[Path], *, log_dir: Path, workers: int, extra_args: List[str]) -> List[TestResult]:
+def run_parallel(tests: list[Path], *, log_dir: Path, workers: int, extra_args: list[str]) -> list[TestResult]:
     slot_ids = [f"w{i}" for i in range(1, workers + 1)]
     for slot in slot_ids:
         slot_dir = log_dir / slot
@@ -354,7 +354,7 @@ def run_parallel(tests: List[Path], *, log_dir: Path, workers: int, extra_args: 
     for slot in slot_ids:
         free_slots.put(slot)
 
-    results: List[TestResult] = []
+    results: list[TestResult] = []
     results_lock = threading.Lock()
 
     def worker(test_path: Path) -> None:
@@ -388,7 +388,7 @@ def run_parallel(tests: List[Path], *, log_dir: Path, workers: int, extra_args: 
     return results
 
 
-def write_summary_json(results: List[TestResult], log_dir: Path) -> None:
+def write_summary_json(results: list[TestResult], log_dir: Path) -> None:
     payload = [
         {
             "name": r.name,
@@ -405,7 +405,7 @@ def write_summary_json(results: List[TestResult], log_dir: Path) -> None:
     (log_dir / "summary.json").write_text(json.dumps(payload, indent=2))
 
 
-def print_summary(results: List[TestResult], log_dir: Path) -> int:
+def print_summary(results: list[TestResult], log_dir: Path) -> int:
     name_width = max((len(r.name) for r in results), default=4)
     passed = sum(1 for r in results if r.returncode == 0)
 

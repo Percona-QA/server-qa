@@ -19,9 +19,16 @@ from test_helper import (
     CORE_FILE_OPT,
     KMIP_CONFIGS,
     MYSQL_PORT,
+    S3_SCOPED_ACCESS_KEY,
+    S3_SCOPED_PREFIX,
+    S3_SCOPED_SECRET_KEY,
     TEST_BASE_DIR,
     BackupTestHelper,
 )
+
+# PXB-3502 and PXB-3609 shipped in 8.4.0-7 on the 8.4 line and 9.7.2-2 on the
+# 9.7 line; 9.7.0/9.7.1 and the 9.x innovation releases do not have them.
+FIXED_IN_8_4_0_7 = {"8.4": "8.4.0-7", "9.7": "9.7.2-2"}
 
 
 @pytest.fixture(scope="function")
@@ -865,11 +872,7 @@ def test_cloud_backup_md5_delete(test_helper):
     get``/restore of the backup (manual repro also confirmed this holds on
     the older, buggy build).
     """
-    if test_helper.xtrabackup_version_normalized < test_helper.normalize_xtrabackup_version("8.4.0-7"):
-        pytest.skip(
-            f"xbcloud delete of --md5 sidecar requires PXB >= 8.4.0-7 "
-            f"(found {test_helper.xtrabackup_version})"
-        )
+    test_helper.require_pxb_fix("PXB-3609", FIXED_IN_8_4_0_7)
     cloud_params = test_helper.build_cloud_params()
     md5_cloud_params = f"{cloud_params} --md5"
 
@@ -972,6 +975,81 @@ def test_cloud_backup_md5_delete(test_helper):
             assert cksum == orig_cksum, f"{db}.{table}: checksum mismatch after restore ({cksum} != {orig_cksum})"
 
     print("Restore succeeded and data matched with the .md5 objects removed from cloud storage")
+
+
+def test_cloud_backup_md5_delete_prefix_scope(test_helper):
+    """PXB-3609: 'xbcloud delete' by a user whose rights end at the backup's
+    prefix must still succeed, quietly, and leave '<name>.md5' alone.
+
+    The fix makes 'xbcloud delete <name>' also remove '<name>.md5', which
+    sits outside '<name>/'. A user scoped to '<name>/' cannot delete it; the
+    delete must not fail or complain about that. Ported from the PXB dev
+    test suites/xbcloud/md5_delete_prefix_scope.sh. This guards the fix; it
+    passes on builds without it too, which never touched '<name>.md5'.
+
+    Needs a pre-provisioned user (S3_SCOPED_ACCESS_KEY / S3_SCOPED_SECRET_KEY)
+    that may list S3_BUCKET and write/delete only under '<S3_SCOPED_PREFIX>/';
+    see the README for SeaweedFS and MinIO examples. Skipped if unset.
+    """
+    test_helper.require_pxb_fix("PXB-3609", FIXED_IN_8_4_0_7)
+    if not (S3_SCOPED_ACCESS_KEY and S3_SCOPED_SECRET_KEY and S3_SCOPED_PREFIX):
+        pytest.skip("requires S3_SCOPED_ACCESS_KEY, S3_SCOPED_SECRET_KEY and S3_SCOPED_PREFIX (a prefix-scoped S3 user)")
+    xbcloud = os.path.join(test_helper.xtrabackup_dir, "xbcloud")
+    cloud_params = test_helper.build_cloud_params()
+    # Not verbose: the curl trace would show the expected 403 on '<name>.md5'.
+    scoped_params = test_helper.build_cloud_params(
+        verbose=False, access_key=S3_SCOPED_ACCESS_KEY, secret_key=S3_SCOPED_SECRET_KEY
+    )
+    name = S3_SCOPED_PREFIX
+    log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    put_log = os.path.join(test_helper.logdir, f"cloud_md5_scoped_put_{log_date}_log")
+    delete_log = os.path.join(test_helper.logdir, f"cloud_md5_scoped_delete_{log_date}_log")
+
+    test_helper.mysqld_options = ""
+    test_helper.backup_params = f"{CORE_FILE_OPT}"
+    test_helper.initialize_db()
+    test_helper.primary.mysql("CREATE TABLE test.t (a INT PRIMARY KEY, b VARCHAR(64))")
+    test_helper.primary.mysql("INSERT INTO test.t VALUES (1,'one'),(2,'two'),(3,'three')")
+
+    def remove_leftovers(log: str) -> None:
+        # The name is fixed by the user's rights, so runs reuse it. Remove
+        # '<name>.md5' directly too: builds without the fix leave it behind.
+        subprocess.run(f"{xbcloud} delete {cloud_params} {name} 2>>{log}", shell=True, check=False)
+        if f"{name}.md5" in test_helper.s3_list_objects(prefix=name):
+            test_helper.s3_delete_object(f"{name}.md5")
+
+    remove_leftovers(put_log)
+    test_helper.take_backup(
+        backup_type="cloud", cloud_params=f"{cloud_params} --md5", cloud_name=name,
+        upload_only=True, log_file=put_log,
+    )
+    assert f"{name}.md5" in test_helper.s3_list_objects(prefix=name), (
+        f"test setup: expected '{name}.md5' after 'xbcloud put --md5'; log: {put_log}"
+    )
+
+    print(f"Test: delete '{name}' as the prefix-scoped user")
+    result = subprocess.run(
+        f"{xbcloud} delete {scoped_params} {name}", shell=True, check=False, capture_output=True, text=True
+    )
+    with open(delete_log, "w", encoding="utf-8") as f:
+        f.write(result.stdout + result.stderr)
+    try:
+        assert result.returncode == 0, (
+            f"PXB-3609: delete failed for a prefix-scoped user -- being unable to remove "
+            f"'{name}.md5' must not fail the delete; log: {delete_log}"
+        )
+        noise = re.findall(r"(?i)warning|failed to delete|access denied|forbidden|403", result.stdout + result.stderr)
+        assert not noise, (
+            f"PXB-3609: delete complained about '{name}.md5', which this user has no rights on "
+            f"({sorted(set(noise))}); log: {delete_log}"
+        )
+        remaining = test_helper.s3_list_objects(prefix=f"{name}/")
+        assert not remaining, f"backup objects left behind by the scoped delete: {remaining}"
+        assert f"{name}.md5" in test_helper.s3_list_objects(prefix=name), (
+            f"unexpected: '{name}.md5' was removed by a user with no rights on it"
+        )
+    finally:
+        remove_leftovers(delete_log)
 
 
 # ============================================================================
@@ -1263,6 +1341,58 @@ def _dispatch_rank_of_largest(target_dir: str, log_path: str, dispatch_pattern: 
     return rank, len(lines), largest_relpath, largest_size
 
 
+def _build_mixed_dataset(test_helper) -> None:
+    """Build NUM_SMALL_TABLES small and PARALLEL_DEGREE large InnoDB tables, all in SMALL_DB.
+
+    A directory walk returns each directory's files together, so large
+    tables left in their own schema are all dispatched first whenever that
+    directory happens to be walked first. Moving them in among the decoys
+    leaves a size-blind scheduler only a 1 / C(34, 4) chance of looking right.
+    """
+    _build_adversarial_dataset(test_helper, large_tables=PARALLEL_DEGREE)
+    for n in range(1, PARALLEL_DEGREE + 1):
+        test_helper.primary.mysql(f"RENAME TABLE {LARGE_DB}.sbtest{n} TO {SMALL_DB}.large{n}")
+    test_helper.primary.mysql(f"DROP DATABASE {LARGE_DB}")
+
+
+def _processing_order(log_path: str, line_pattern: str, size_dir: str, suffix: str = "") -> list:
+    """Return [(relpath, size)] for every log line matching line_pattern, in log order.
+
+    line_pattern's first group is the file's path relative to size_dir
+    (minus `suffix`, which is appended to find it on disk).
+    """
+    order = []
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            match = re.search(line_pattern, line)
+            if match:
+                path = os.path.join(size_dir, match.group(1) + suffix)
+                order.append((match.group(1), os.path.getsize(path) if os.path.exists(path) else -1))
+    return order
+
+
+def _assert_largest_first(order: list, minimum: int, what: str, log_path: str) -> None:
+    """Fail unless `order` (from _processing_order) has >= minimum entries in non-increasing size."""
+    assert len(order) >= minimum, f"only {len(order)} {what} found in the log, need at least {minimum}; log: {log_path}"
+    for (prev, prev_size), (cur, cur_size) in zip(order, order[1:]):
+        assert cur_size <= prev_size, (
+            f"{what} not processed largest-first (PXB-3502): '{cur}' ({cur_size} bytes) came after "
+            f"'{prev}' ({prev_size} bytes); log: {log_path}"
+        )
+
+
+def _incremental_option_names(test_helper) -> tuple:
+    """(backup base, prepare dir, redo-only) option names this xtrabackup spells natively.
+
+    PXB-3758/PXB-3840 renamed them; using the native names keeps the
+    PXB-3502 tests independent of those renames and free of deprecation noise.
+    """
+    help_out = test_helper.run_command(test_helper._xtrabackup_cmd_prefix() + ["--help"], check=False).stdout or ""
+    if "--prepare-incremental-from-dir" in help_out:
+        return "--backup-incremental-base", "--prepare-incremental-from-dir", "--apply-redo-only"
+    return "--incremental-basedir", "--incremental-dir", "--apply-log-only"
+
+
 def _first_dispatched_vs_largest(
     target_dir: str, log_path: str, dispatch_pattern: str, scope_pattern: "re.Pattern", count: int
 ) -> tuple:
@@ -1307,21 +1437,11 @@ def test_decompress_largest_file_first(test_helper):
     PARALLEL_DEGREE largest compressed files to worker threads before any of
     the small decoy tables.
     """
-    if test_helper.xtrabackup_version_normalized < test_helper.normalize_xtrabackup_version("8.4.0-7"):
-        pytest.skip(
-            f"PXB-3502 size-ordered decompress requires PXB >= 8.4.0-7 "
-            f"(found {test_helper.xtrabackup_version})"
-        )
+    test_helper.require_pxb_fix("PXB-3502", FIXED_IN_8_4_0_7)
     test_helper.mysqld_options = ""
     test_helper.backup_params = f"--compress --compress-threads={PARALLEL_DEGREE} {CORE_FILE_OPT}"
     test_helper.initialize_db()
-    _build_adversarial_dataset(test_helper, large_tables=PARALLEL_DEGREE)
-    # A directory walk returns each directory's files together, so large
-    # tables left in their own schema are all dispatched first whenever that
-    # directory happens to be walked first. Move them in among the decoys.
-    for n in range(1, PARALLEL_DEGREE + 1):
-        test_helper.primary.mysql(f"RENAME TABLE {LARGE_DB}.sbtest{n} TO {SMALL_DB}.large{n}")
-    test_helper.primary.mysql(f"DROP DATABASE {LARGE_DB}")
+    _build_mixed_dataset(test_helper)
 
     if os.path.exists(test_helper.backup_dir):
         shutil.rmtree(test_helper.backup_dir)
@@ -1373,11 +1493,7 @@ def test_copy_back_largest_file_first(test_helper):
     if rocksdb_enabled else ["test"]``) rather than a separate parametrized
     variant.
     """
-    if test_helper.xtrabackup_version_normalized < test_helper.normalize_xtrabackup_version("8.4.0-7"):
-        pytest.skip(
-            f"PXB-3502 size-ordered copy-back requires PXB >= 8.4.0-7 "
-            f"(found {test_helper.xtrabackup_version})"
-        )
+    test_helper.require_pxb_fix("PXB-3502", FIXED_IN_8_4_0_7)
     rocksdb_enabled = test_helper.rocksdb == "enabled"
 
     test_helper.mysqld_options = ""
@@ -1460,6 +1576,108 @@ def test_copy_back_largest_file_first(test_helper):
         )
 
 
+def _xtrabackup_or_fail(test_helper, args: list, log_path: str, what: str) -> None:
+    result = test_helper.run_command(
+        test_helper._xtrabackup_cmd_prefix() + ["--no-defaults", *args], check=False, log_file=log_path
+    )
+    if result.returncode != 0:
+        pytest.fail(f"ERR: {what} failed. Log: {log_path}")
+
+
+def _backup_cmd_args(test_helper, target_dir: str) -> list:
+    return [
+        f"--user={test_helper.backup_user}", "--password=", "--backup", f"--target-dir={target_dir}",
+        f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}", *CORE_FILE_OPT.split(),
+    ]
+
+
+def test_backup_largest_file_first(test_helper):
+    """PXB-3502: 'xtrabackup --backup --parallel=1' must copy data files in
+    non-increasing size order -- InnoDB .ibd files, and, when ROCKSDB=enabled,
+    the RocksDB checkpoint's .sst files.
+
+    Ported from the PXB dev tests t/pxb_largest_first_innodb.sh and
+    suites/rocksdb/largest_first.sh, on this suite's mixed dataset. With
+    --parallel=1 there is a single worker, so the copy order is the queue
+    order and the whole sequence can be checked, not just the first file.
+    """
+    test_helper.require_pxb_fix("PXB-3502", FIXED_IN_8_4_0_7)
+    rocksdb_enabled = test_helper.rocksdb == "enabled"
+    test_helper.mysqld_options = ""
+    test_helper.initialize_db(rocksdb=rocksdb_enabled)
+    _build_mixed_dataset(test_helper)
+    if rocksdb_enabled:
+        # Flush the small tables to their own SST before creating the large
+        # ones: the older, lower-numbered SST is then the smaller one, so
+        # name order and size order disagree.
+        test_helper.primary.mysql(f"CREATE DATABASE IF NOT EXISTS {SMALL_DB_ROCKSDB}")
+        _sysbench_prepare(test_helper, SMALL_DB_ROCKSDB, NUM_SMALL_TABLES, SMALL_TABLE_ROWS,
+                          "rdb_small_prepare.log", storage_engine="ROCKSDB")
+        test_helper.primary.mysql("SET GLOBAL rocksdb_force_flush_memtable_now = ON")
+        test_helper.primary.mysql(f"CREATE DATABASE IF NOT EXISTS {LARGE_DB_ROCKSDB}")
+        _sysbench_prepare(test_helper, LARGE_DB_ROCKSDB, 1, LARGE_TABLE_ROWS,
+                          "rdb_large_prepare.log", storage_engine="ROCKSDB")
+        test_helper.primary.mysql("SET GLOBAL rocksdb_force_flush_memtable_now = ON")
+
+    full_target = os.path.join(test_helper.backup_dir, "full")
+    os.makedirs(test_helper.backup_dir, exist_ok=True)
+    backup_log = os.path.join(test_helper.logdir, "largest_first_backup_log")
+    _xtrabackup_or_fail(test_helper, _backup_cmd_args(test_helper, full_target) + ["--parallel=1"], backup_log, "Backup")
+
+    order = _processing_order(
+        backup_log, rf"\] (?:space_id: \d+, )?Copying \./({re.escape(SMALL_DB)}/\S+\.ibd) to ", full_target
+    )
+    _assert_largest_first(order, NUM_SMALL_TABLES + PARALLEL_DEGREE, "InnoDB files", backup_log)
+
+    if rocksdb_enabled:
+        sst_order = _processing_order(
+            backup_log, r"\] Copying \.xtrabackup_rocksdb_checkpoint_\d+/(\d+\.sst) to ",
+            os.path.join(full_target, ".rocksdb"),
+        )
+        _assert_largest_first(sst_order, 2, "RocksDB .sst files", backup_log)
+
+
+def test_incremental_prepare_largest_delta_first(test_helper):
+    """PXB-3502: applying an incremental with 'xtrabackup --prepare
+    --parallel=1' must apply .delta files in non-increasing size order.
+
+    Ported from the PXB dev test t/pxb_largest_first_delta.sh, on this
+    suite's mixed dataset: every row is updated, so each table's .delta is
+    proportional to its size.
+    """
+    test_helper.require_pxb_fix("PXB-3502", FIXED_IN_8_4_0_7)
+    base_opt, inc_dir_opt, redo_only_opt = _incremental_option_names(test_helper)
+    test_helper.mysqld_options = ""
+    test_helper.initialize_db()
+    _build_mixed_dataset(test_helper)
+
+    full_target = os.path.join(test_helper.backup_dir, "full")
+    inc_target = os.path.join(test_helper.backup_dir, "inc")
+    os.makedirs(test_helper.backup_dir, exist_ok=True)
+    _xtrabackup_or_fail(test_helper, _backup_cmd_args(test_helper, full_target),
+                        os.path.join(test_helper.logdir, "full_backup_log"), "Full backup")
+
+    tables = [f"sbtest{i}" for i in range(1, NUM_SMALL_TABLES + 1)] + [f"large{n}" for n in range(1, PARALLEL_DEGREE + 1)]
+    for table in tables:
+        test_helper.primary.mysql(f"UPDATE {SMALL_DB}.{table} SET c = REPEAT('u', 120)")
+
+    _xtrabackup_or_fail(test_helper, _backup_cmd_args(test_helper, inc_target) + [f"{base_opt}={full_target}"],
+                        os.path.join(test_helper.logdir, "inc_backup_log"), "Incremental backup")
+    _xtrabackup_or_fail(test_helper, ["--prepare", redo_only_opt, f"--target-dir={full_target}"],
+                        os.path.join(test_helper.logdir, "prepare_full_log"), "Prepare of the full backup")
+    apply_log = os.path.join(test_helper.logdir, "prepare_inc_log")
+    _xtrabackup_or_fail(
+        test_helper,
+        ["--prepare", redo_only_opt, f"--target-dir={full_target}", f"{inc_dir_opt}={inc_target}", "--parallel=1"],
+        apply_log, "Prepare of the incremental backup",
+    )
+
+    order = _processing_order(
+        apply_log, rf"Applying \S+/({re.escape(SMALL_DB)}/\S+\.ibd)\.delta to ", inc_target, suffix=".delta"
+    )
+    _assert_largest_first(order, len(tables), ".delta files", apply_log)
+
+
 # ============================================================================
 # __main__ block with argparse and suite-to-test mapping
 # ============================================================================
@@ -1510,6 +1728,8 @@ if __name__ == "__main__":
         print("   export S3_SECRET_KEY=<your-secret-access-key>")
         print("   export S3_REGION=us-west-2")
         print("   export S3_ENDPOINT=https://s3.us-west-2.amazonaws.com")
+        print("   # Optional prefix-scoped user (test_cloud_backup_md5_delete_prefix_scope):")
+        print("   export S3_SCOPED_ACCESS_KEY=<key> S3_SCOPED_SECRET_KEY=<secret> S3_SCOPED_PREFIX=<prefix>")
         print("   export INSTALL_TYPE=tarball  # or package")
         print("2. Run the script as: pytest innodb_myrocks_backup_tests.py -k <test_name> -s -v")
         print("   Or: python innodb_myrocks_backup_tests.py <Test Suites>")
@@ -1579,7 +1799,7 @@ if __name__ == "__main__":
         "Encryption_PXB2_4_MS5_7_tests": [
             "test_encryption_2_4[keyring_file_plugin]",
         ],
-        "Cloud_backup_tests": ["test_cloud_inc_backup", "test_cloud_backup_md5_delete"],
+        "Cloud_backup_tests": ["test_cloud_inc_backup", "test_cloud_backup_md5_delete", "test_cloud_backup_md5_delete_prefix_scope"],
         "Innodb_params_redo_archive_tests": [
             "test_inc_backup_innodb_params",
             "test_inc_backup_archive_log",
@@ -1588,6 +1808,8 @@ if __name__ == "__main__":
         "Parallel_processing_order_tests": [
             "test_decompress_largest_file_first",
             "test_copy_back_largest_file_first",
+            "test_backup_largest_file_first",
+            "test_incremental_prepare_largest_delta_first",
         ],
     }
 

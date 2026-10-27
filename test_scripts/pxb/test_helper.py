@@ -79,6 +79,11 @@ S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
 S3_REGION = os.environ.get("S3_REGION", "")
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
+# Optional restricted S3 user for test_cloud_backup_md5_delete_prefix_scope:
+# may list the bucket and write/delete only under "<S3_SCOPED_PREFIX>/".
+S3_SCOPED_ACCESS_KEY = os.environ.get("S3_SCOPED_ACCESS_KEY", "")
+S3_SCOPED_SECRET_KEY = os.environ.get("S3_SCOPED_SECRET_KEY", "")
+S3_SCOPED_PREFIX = os.environ.get("S3_SCOPED_PREFIX", "")
 # SHA-256 of an empty string -- the fixed x-amz-content-sha256 value for a
 # request with no body. curl's --aws-sigv4 computes and sends this header
 # itself on some versions but not others (observed missing entirely against
@@ -571,6 +576,27 @@ class BackupTestHelper:
         patch = int(match.group(3))
         release = int(match.group(4)) if match.group(4) else 0
         return major * 1_000_000 + minor * 10_000 + patch * 100 + release
+
+    def require_pxb_fix(self, ticket: str, fixed_in: dict[str, str]) -> None:
+        """Skip the calling test unless this xtrabackup build ships ``ticket``'s fix.
+
+        ``fixed_in`` maps each release line that got the fix to its first fixed
+        version, e.g. ``{"8.4": "8.4.0-8", "9.7": "9.7.2-2"}``. A build on a
+        listed line must be at least that version; a build on a line newer
+        than every listed one is assumed to carry the fix; any other line
+        (older, or an innovation release in between) is skipped.
+        """
+        if self.xtrabackup_version_normalized is None:
+            self.xtrabackup_version, self.xtrabackup_version_normalized = self.get_xtrabackup_version()
+        line = tuple(int(p) for p in self.xtrabackup_version.split(".")[:2])
+        lines = {tuple(int(p) for p in k.split(".")): v for k, v in fixed_in.items()}
+        if line in lines:
+            if self.xtrabackup_version_normalized >= self.normalize_xtrabackup_version(lines[line]):
+                return
+        elif line > max(lines):
+            return
+        fixed = ", ".join(f">= {v}" for v in fixed_in.values())
+        pytest.skip(f"{ticket} requires PXB {fixed} (found {self.xtrabackup_version})")
 
     def get_mysql_version(self) -> Tuple[str, int]:
         """Get MySQL version and normalized version. Also sets server_type from version output."""
@@ -1998,7 +2024,9 @@ class BackupTestHelper:
             if os.path.isfile(path):
                 os.remove(path)
 
-    def build_cloud_params(self, verbose: bool = True) -> str:
+    def build_cloud_params(
+        self, verbose: bool = True, access_key: Optional[str] = None, secret_key: Optional[str] = None
+    ) -> str:
         """Assemble the xbcloud option string from S3 env vars.
 
         Reads S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_REGION and S3_ENDPOINT
@@ -2012,6 +2040,9 @@ class BackupTestHelper:
         xbcloud's underlying MySQL load_defaults() only honors --defaults-file
         when it is argv[1]; placing it after the subcommand silently falls back
         to the Swift storage backend.
+
+        access_key / secret_key override S3_ACCESS_KEY / S3_SECRET_KEY, to act
+        as a different (e.g. restricted) user on the same bucket.
 
         If any required env var is missing the test fails with a message
         naming the missing variables, so it is obvious that the test was
@@ -2036,8 +2067,8 @@ class BackupTestHelper:
             f"--s3-endpoint={self.s3_endpoint}",
             f"--s3-region={self.s3_region}",
             f"--s3-bucket={self.s3_bucket}",
-            f"--s3-access-key={self.s3_access_key}",
-            f"--s3-secret-key={self.s3_secret_key}",
+            f"--s3-access-key={access_key or self.s3_access_key}",
+            f"--s3-secret-key={secret_key or self.s3_secret_key}",
             "--s3-bucket-lookup=auto",
             "--s3-api-version=4",
             "--parallel=4",
@@ -3292,6 +3323,7 @@ class BackupTestHelper:
         print("\n################################## CleanUp #######################################")
 
         # Destroy replicas first (stop mysqld + remove each datadir).
+        replica_datadirs = [replica.datadir for replica in self.replicas]
         for replica in list(self.replicas):
             try:
                 replica.destroy()
@@ -3307,12 +3339,14 @@ class BackupTestHelper:
 
         print("Killing any previously running mysqld process")
 
-        # Kill mysqld processes
+        # Kill leftover mysqld processes of this helper only (matched by
+        # datadir): other suites' servers on the same host must survive.
+        own_datadirs = {f"--datadir={d}" for d in [self.primary.datadir, *replica_datadirs]}
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
                 if "mysqld" in proc.info["name"].lower():
-                    cmdline = proc.info.get("cmdline", [])
-                    if cmdline and "error.log" in " ".join(cmdline):
+                    cmdline = proc.info.get("cmdline") or []
+                    if own_datadirs.intersection(cmdline):
                         proc.kill()
                         proc.wait()
             except (psutil.NoSuchProcess, psutil.AccessDenied):

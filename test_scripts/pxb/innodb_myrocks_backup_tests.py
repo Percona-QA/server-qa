@@ -15,7 +15,13 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import pytest
-from test_helper import CORE_FILE_OPT, KMIP_CONFIGS, TEST_BASE_DIR, BackupTestHelper
+from test_helper import (
+    CORE_FILE_OPT,
+    KMIP_CONFIGS,
+    MYSQL_PORT,
+    TEST_BASE_DIR,
+    BackupTestHelper,
+)
 
 
 @pytest.fixture(scope="function")
@@ -1068,7 +1074,7 @@ def test_ssl_backup(test_helper):
         [os.path.join(test_helper.mysqldir, "bin/mysql"), "-uroot", f"-S{test_helper.socket_path}", "-Bse", "SELECT @@port;"],
         capture_output=True, text=True, check=False,
     )
-    mysql_port = port_result.stdout.strip() if port_result.returncode == 0 else "21000"
+    mysql_port = port_result.stdout.strip() if port_result.returncode == 0 else str(MYSQL_PORT)
     test_helper.backup_params = f"{ssl_opts} --ssl-mode=REQUIRED --host=127.0.0.1 -P {mysql_port} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     _run_load(test_helper)
     test_helper.take_backup(single_incremental=True, databases=databases)
@@ -1132,6 +1138,19 @@ def test_ssl_backup(test_helper):
 # Confirmed against real PXB builds before writing this test: reproduces on
 # PXB 8.4.0-6 and earlier (for both InnoDB and RocksDB), and passes on PXB
 # 8.4.0-7 and later, which ships the PXB-3502 fix.
+#
+# test_decompress_largest_file_first cannot rely on "created last" alone:
+# a raw directory walk on ext4 returns entries in hash order, not creation
+# or name order, so with just two schema directories in scope an unfixed
+# build hands out LARGE_DB first about half the time and passes by luck.
+# It also cannot require rank == 1: workers pop under the queue mutex but
+# log their "decompressing" line after releasing it, so the first
+# PARALLEL_DEGREE lines may interleave even on a fixed build. Instead it
+# builds PARALLEL_DEGREE large tables, moves them into SMALL_DB next to the
+# decoys (a walk returns one directory's files together, so a separate
+# schema would still be all-or-nothing), and checks that the first
+# PARALLEL_DEGREE in-scope dispatches are exactly those, in any order --
+# a random walk passes that with probability 1 / C(34, 4) (~1 in 46,000).
 
 # Number of small "decoy" tables created before the one large table. Kept
 # well above PARALLEL_DEGREE so a FIFO scheduler has plenty of small work to
@@ -1156,6 +1175,7 @@ SYSBENCH_SCRIPT = "/usr/share/sysbench/oltp_insert.lua"
 # '.rocksdb/' LSM directory instead.
 PARALLEL_ORDER_INNODB_SCOPE = re.compile(r"(?:" + re.escape(SMALL_DB) + r"|" + re.escape(LARGE_DB) + r")/")
 PARALLEL_ORDER_ROCKSDB_SCOPE = re.compile(r"\.rocksdb/")
+COMPRESSED_SUFFIXES = (".zst", ".lz4", ".qp")
 
 
 def _sysbench_prepare(
@@ -1179,14 +1199,18 @@ def _sysbench_prepare(
 
 
 def _build_adversarial_dataset(
-    test_helper, rocksdb: bool = False, small_db: str = SMALL_DB, large_db: str = LARGE_DB
+    test_helper,
+    rocksdb: bool = False,
+    small_db: str = SMALL_DB,
+    large_db: str = LARGE_DB,
+    large_tables: int = 1,
 ) -> None:
-    """Build the small-tables/one-large-table dataset.
+    """Build the small-tables/large-tables dataset.
 
     small_db gets NUM_SMALL_TABLES tiny tables (sbtest1..sbtestN); large_db,
-    created afterwards, gets a single much bigger sbtest1. large_db sorts
-    alphabetically after small_db and is discovered after it by a plain
-    directory scan -- the worst case for a scheduler that ignores size.
+    created afterwards, gets large_tables much bigger tables (sbtest1..M).
+    large_db sorts alphabetically after small_db -- the worst case for a
+    scheduler that walks names in order and ignores size.
     """
     storage_engine = "ROCKSDB" if rocksdb else None
     test_helper.primary.mysql(f"CREATE DATABASE IF NOT EXISTS {small_db}")
@@ -1196,7 +1220,7 @@ def _build_adversarial_dataset(
         f"adv_sysbench_{small_db}_prepare.log", storage_engine=storage_engine,
     )
     _sysbench_prepare(
-        test_helper, large_db, 1, LARGE_TABLE_ROWS,
+        test_helper, large_db, large_tables, LARGE_TABLE_ROWS,
         f"adv_sysbench_{large_db}_prepare.log", storage_engine=storage_engine,
     )
 
@@ -1239,10 +1263,49 @@ def _dispatch_rank_of_largest(target_dir: str, log_path: str, dispatch_pattern: 
     return rank, len(lines), largest_relpath, largest_size
 
 
+def _first_dispatched_vs_largest(
+    target_dir: str, log_path: str, dispatch_pattern: str, scope_pattern: "re.Pattern", count: int
+) -> tuple:
+    """Compare the first `count` in-scope files dispatched to a worker thread
+    (per log lines matching both dispatch_pattern and scope_pattern) with the
+    `count` largest in-scope files under target_dir.
+
+    Returns (largest, dispatched, total_in_scope): `largest` is the set of the
+    `count` largest relpaths; `dispatched` is the list of relpaths named by
+    the first `count` in-scope dispatch lines, in log order.
+    """
+    sizes = {}
+    for root, _dirs, files in os.walk(target_dir):
+        for name in files:
+            relpath = os.path.relpath(os.path.join(root, name), target_dir)
+            # Compressed originals (kept without --remove-original) are named
+            # by the decompressed path plus a suffix; size the real files only.
+            if not scope_pattern.search(relpath) or relpath.endswith(COMPRESSED_SUFFIXES):
+                continue
+            try:
+                sizes[relpath] = os.path.getsize(os.path.join(root, name))
+            except OSError:
+                continue
+    largest = set(sorted(sizes, key=sizes.get, reverse=True)[:count])
+
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        lines = [
+            line for line in f
+            if re.search(dispatch_pattern, line) and scope_pattern.search(line)
+        ]
+
+    dispatched = []
+    for line in lines[:count]:
+        # Longest match first, so a path is never mistaken for its prefix.
+        match = next((p for p in sorted(sizes, key=len, reverse=True) if p in line), line.strip())
+        dispatched.append(match)
+    return largest, dispatched, len(lines)
+
+
 def test_decompress_largest_file_first(test_helper):
     """PXB-3502: 'xtrabackup --decompress --parallel=N' must dispatch the
-    largest compressed file to a worker thread before the bulk of the small
-    decoy tables, not after them.
+    PARALLEL_DEGREE largest compressed files to worker threads before any of
+    the small decoy tables.
     """
     if test_helper.xtrabackup_version_normalized < test_helper.normalize_xtrabackup_version("8.4.0-7"):
         pytest.skip(
@@ -1252,7 +1315,13 @@ def test_decompress_largest_file_first(test_helper):
     test_helper.mysqld_options = ""
     test_helper.backup_params = f"--compress --compress-threads={PARALLEL_DEGREE} {CORE_FILE_OPT}"
     test_helper.initialize_db()
-    _build_adversarial_dataset(test_helper)
+    _build_adversarial_dataset(test_helper, large_tables=PARALLEL_DEGREE)
+    # A directory walk returns each directory's files together, so large
+    # tables left in their own schema are all dispatched first whenever that
+    # directory happens to be walked first. Move them in among the decoys.
+    for n in range(1, PARALLEL_DEGREE + 1):
+        test_helper.primary.mysql(f"RENAME TABLE {LARGE_DB}.sbtest{n} TO {SMALL_DB}.large{n}")
+    test_helper.primary.mysql(f"DROP DATABASE {LARGE_DB}")
 
     if os.path.exists(test_helper.backup_dir):
         shutil.rmtree(test_helper.backup_dir)
@@ -1278,14 +1347,16 @@ def test_decompress_largest_file_first(test_helper):
     if result.returncode != 0:
         pytest.fail(f"ERR: Decompress failed. Log: {decompress_log}")
 
-    rank, total, largest, size = _dispatch_rank_of_largest(
-        full_target, decompress_log, r"decompressing ", PARALLEL_ORDER_INNODB_SCOPE
+    largest, dispatched, total = _first_dispatched_vs_largest(
+        full_target, decompress_log, r"decompressing ", PARALLEL_ORDER_INNODB_SCOPE, PARALLEL_DEGREE
     )
-    assert rank is not None, f"largest in-scope file '{largest}' never appeared in the decompress dispatch log: {decompress_log}"
-    assert rank == 1, (
-        f"{rank - 1}/{total} smaller files were decompressed before the largest one "
-        f"('{largest}', {size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
-        f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {decompress_log}"
+    assert len(largest) == PARALLEL_DEGREE, (
+        f"expected {PARALLEL_DEGREE} large in-scope files under {full_target}, found {sorted(largest)}"
+    )
+    assert set(dispatched) == largest, (
+        f"first {PARALLEL_DEGREE} of {total} in-scope files decompressed were {dispatched}; expected "
+        f"the {PARALLEL_DEGREE} largest {sorted(largest)} (--parallel={PARALLEL_DEGREE}) to be "
+        f"dispatched ahead of everything smaller (PXB-3502); log: {decompress_log}"
     )
 
 

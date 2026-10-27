@@ -30,6 +30,8 @@ HOME = os.path.expanduser("~")
 MYSQL_START_TIMEOUT = int(os.environ.get("MYSQL_START_TIMEOUT", "180"))
 # Graceful shutdown wait for mysqladmin shutdown (seconds); default 5 minutes.
 MYSQL_SHUTDOWN_TIMEOUT = int(os.environ.get("MYSQL_SHUTDOWN_TIMEOUT", "300"))
+# TCP port of the primary server; override via MYSQL_PORT to run suites side by side.
+MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "21000"))
 # Each xtrabackup invocation opens its own KMIP/TLS session and pays a fresh
 # Fortanix cold-start; occasional invocations exceed xtrabackup's internal ~60s
 # tolerance and fail with MY-013714 + 'Encryption can't find master key'.
@@ -186,6 +188,10 @@ class MySQLServer:
             f"--socket={self.socket_path}",
             f"--plugin-dir={self.basedir}/lib/plugin",
             f"--log-error={self.error_log}",
+            # No test uses X Protocol; its default 33060 port and
+            # /tmp/mysqlx.sock would collide with any other mysqld on the
+            # host. "loose-" keeps 5.7 (no mysqlx plugin) starting.
+            "--loose-mysqlx=OFF",
         ]
         if self.server_id is not None:
             cmd.append(f"--server-id={self.server_id}")
@@ -447,7 +453,7 @@ class BackupTestHelper:
             name="primary",
             datadir=primary_datadir,
             socket_path=primary_socket,
-            port=21000,
+            port=MYSQL_PORT,
             basedir=self.mysqldir,
             error_log=os.path.join(self.logdir, "error.log"),
             logdir=self.logdir,

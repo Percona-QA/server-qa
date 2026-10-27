@@ -25,6 +25,16 @@ init_pxb_version
 export qascripts="$HOME/percona-qa"
 export logdir="$HOME/backuplogs"
 export mysql_start_timeout=60
+# TCP port of the test server; override via MYSQL_PORT to run suites side by side.
+export mysql_port="${MYSQL_PORT:-21000}"
+# Run mysqld and xtrabackup under rr (record and replay): set USE_RR=1 to
+# enable (requires rr in PATH). Disabled by default.
+export use_rr="${USE_RR:-0}"
+RR=""
+if [ "${use_rr}" = "1" ]; then
+  command -v rr > /dev/null 2>&1 || { echo "ERR: USE_RR=1 but rr is not in PATH"; exit 1; }
+  RR="rr"
+fi
 declare -A KMIP_CONFIGS=(
     ["hashicorp"]="addr=127.0.0.1,port=5696,name=kmip_hashicorp,setup_script=hashicorp-kmip-setup.py"
 
@@ -175,7 +185,7 @@ run_crash_tests_pstress() {
     echo "..Metadata created"
     run_load "${load_options} --step 2"
     echo "=>Taking full backup"
-    rr "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/full -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} 2>"${logdir}"/full_backup_"${log_date}"_log
+    $RR "${xtrabackup_dir}"/xtrabackup --no-defaults --user=root --password='' --backup --target-dir="${backup_dir}"/full -S "${mysqldir}"/socket.sock --datadir="${datadir}" ${BACKUP_PARAMS} 2>"${logdir}"/full_backup_"${log_date}"_log
     if [ "$?" -ne 0 ]; then
         echo "ERR: Full Backup failed. Please check the log at: ${logdir}/full_backup_${log_date}_log"
         exit 1
@@ -202,9 +212,9 @@ run_crash_tests_pstress() {
     for inc_num in $(seq 1 4); do
       echo "Taking incremental backup: $inc_num"
       if [ ${inc_num} -eq 1 ]; then
-        rr ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/full -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} 2>${logdir}/inc${inc_num}_backup_${log_date}_log
+        $RR ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/full -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} 2>${logdir}/inc${inc_num}_backup_${log_date}_log
       else
-        rr ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/inc$((inc_num - 1)) -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} 2>${logdir}/inc${inc_num}_backup_${log_date}_log
+        $RR ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/inc$((inc_num - 1)) -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} 2>${logdir}/inc${inc_num}_backup_${log_date}_log
       fi
       if [ "$?" -ne 0 ]; then
         echo "ERR: Incremental Backup failed. Please check the log at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
@@ -226,9 +236,9 @@ run_crash_tests_pstress() {
     for ((inc_num=5;inc_num<9;inc_num++)); do
       echo "Taking incremental backup: $inc_num"
       if [ ${inc_num} -eq 1 ]; then
-        rr ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/full -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} 2>${logdir}/inc${inc_num}_${i}_backup_${log_date}_log
+        $RR ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/full -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} 2>${logdir}/inc${inc_num}_${i}_backup_${log_date}_log
       else
-        rr ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/inc$((inc_num - 1)) -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} 2>${logdir}/inc${inc_num}_backup_${log_date}_log
+        $RR ${xtrabackup_dir}/xtrabackup --no-defaults --user=root --password='' --backup --target-dir=${backup_dir}/inc${inc_num} --incremental-basedir=${backup_dir}/inc$((inc_num - 1)) -S ${mysqldir}/socket.sock --datadir=${datadir} ${BACKUP_PARAMS} 2>${logdir}/inc${inc_num}_backup_${log_date}_log
       fi
       if [ "$?" -ne 0 ]; then
         echo "ERR: Incremental Backup failed. Please check the log at: ${logdir}/inc${inc_num}_backup_${log_date}_log"
@@ -243,7 +253,7 @@ run_crash_tests_pstress() {
 
     echo "Preparing full backup"
     PREPARE_PARAMS=$(prepare_args_for_pxb_version "$PREPARE_PARAMS")
-    rr ${xtrabackup_dir}/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=${backup_dir}/full ${PREPARE_PARAMS} 2>${logdir}/prepare_full_backup_${log_date}_log
+    $RR ${xtrabackup_dir}/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=${backup_dir}/full ${PREPARE_PARAMS} 2>${logdir}/prepare_full_backup_${log_date}_log
     if [ "$?" -ne 0 ]; then
         echo "ERR: Prepare of full backup failed. Please check the log at: ${logdir}/prepare_full_backup_${log_date}_log"
         exit 1
@@ -254,9 +264,9 @@ run_crash_tests_pstress() {
     for ((i=1; i<$inc_num; i++)); do
       echo "Preparing incremental backup: $i"
         if [[ "${i}" -eq "${inc_num}-1" ]]; then
-          rr ${xtrabackup_dir}/xtrabackup --no-defaults --prepare --target_dir=${backup_dir}/full --incremental-dir=${backup_dir}/inc${i} ${PREPARE_PARAMS} 2>${logdir}/prepare_inc${i}_backup_${log_date}_log
+          $RR ${xtrabackup_dir}/xtrabackup --no-defaults --prepare --target_dir=${backup_dir}/full --incremental-dir=${backup_dir}/inc${i} ${PREPARE_PARAMS} 2>${logdir}/prepare_inc${i}_backup_${log_date}_log
         else
-          rr ${xtrabackup_dir}/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=${backup_dir}/full --incremental-dir=${backup_dir}/inc${i} ${PREPARE_PARAMS} 2>${logdir}/prepare_inc${i}_backup_${log_date}_log
+          $RR ${xtrabackup_dir}/xtrabackup --no-defaults --prepare --apply-log-only --target_dir=${backup_dir}/full --incremental-dir=${backup_dir}/inc${i} ${PREPARE_PARAMS} 2>${logdir}/prepare_inc${i}_backup_${log_date}_log
         fi
       if [ "$?" -ne 0 ]; then
         echo "ERR: Prepare of incremental backup failed. Please check the log at: ${logdir}/prepare_inc${i}_backup_${log_date}_log"
@@ -439,7 +449,9 @@ take_backup() {
 start_server() {
   # This function starts the server
   echo "=>Starting MySQL server"
-  rr $mysqldir/bin/mysqld --no-defaults --basedir=$mysqldir --datadir=$datadir $MYSQLD_OPTIONS --port=21000 --socket=$mysqldir/socket.sock --plugin-dir=$mysqldir/lib/plugin --max-connections=1024 --log-error=$mysqldir/error.log  --general-log --log-error-verbosity=3 --core-file > /dev/null 2>&1 &
+  # --loose-mysqlx=OFF: no test uses X Protocol, and the default 33060 port /
+  # /tmp/mysqlx.sock would collide with any other mysqld on the host.
+  $RR $mysqldir/bin/mysqld --no-defaults --basedir=$mysqldir --datadir=$datadir $MYSQLD_OPTIONS --port=${mysql_port} --socket=$mysqldir/socket.sock --plugin-dir=$mysqldir/lib/plugin --max-connections=1024 --log-error=$mysqldir/error.log  --general-log --log-error-verbosity=3 --core-file --loose-mysqlx=OFF > /dev/null 2>&1 &
   MPID="$!"
 
   for X in $(seq 0 ${mysql_start_timeout}); do
@@ -449,7 +461,7 @@ start_server() {
       break
     fi
     if [ $X -eq ${mysql_start_timeout} ]; then
-      echo "ERR: Database could not be started. Please check error logs: ${mysqldir}/data/error.log"
+      echo "ERR: Database could not be started. Please check error logs: ${mysqldir}/error.log"
       exit 1
     fi
   done
@@ -610,19 +622,42 @@ pt_read_eff_issued_batches() { # $1=log
 # taken right after an UPDATE can see none (or only some) of the pages
 # we just touched, making the assertions below meaningless. Force a full
 # drain before every backup call.
+#
+# Draining is not enough on its own: the checkpoint is written
+# asynchronously after the flush. If the next backup starts before the
+# checkpoint LSN moves past the UPDATE, xtrabackup sees "incremental backup
+# LSN is same as last checkpoint LSN", skips the page-tracking component
+# and picks the change up from redo instead -- so no changed pages (and no
+# PXB-3862 grouping log line) are reported. Also wait for the checkpoint to
+# catch up with the LSN current at drain time.
+pt_read_eff_status_var() {
+  pt_mysql -Ns -e "SELECT VARIABLE_VALUE FROM performance_schema.global_status \
+    WHERE VARIABLE_NAME = '$1';"
+}
+
 pt_read_eff_flush_dirty_pages() {
-  local dirty=-1 i
+  local dirty=-1 i target_lsn checkpoint_lsn=""
   pt_mysql -e "SET GLOBAL innodb_max_dirty_pages_pct_lwm = 0;" > /dev/null
   pt_mysql -e "SET GLOBAL innodb_max_dirty_pages_pct = 0;" > /dev/null
   for i in $(seq 1 120); do
-    dirty=$(pt_mysql -Ns -e "SELECT VARIABLE_VALUE FROM performance_schema.global_status \
-      WHERE VARIABLE_NAME = 'Innodb_buffer_pool_pages_dirty';")
+    dirty=$(pt_read_eff_status_var Innodb_buffer_pool_pages_dirty)
     [ "${dirty}" -eq 0 ] && break
     sleep 1
   done
   pt_mysql -e "SET GLOBAL innodb_max_dirty_pages_pct = DEFAULT;" > /dev/null
   pt_mysql -e "SET GLOBAL innodb_max_dirty_pages_pct_lwm = DEFAULT;" > /dev/null
   [ "${dirty}" -eq 0 ] || { echo "ERR: buffer pool did not drain, ${dirty} dirty pages remain"; exit 1; }
+
+  # Innodb_redo_log_*_lsn exist from 8.0.30; on older servers skip the wait.
+  target_lsn=$(pt_read_eff_status_var Innodb_redo_log_current_lsn)
+  [ -n "${target_lsn}" ] || return 0
+  for i in $(seq 1 60); do
+    checkpoint_lsn=$(pt_read_eff_status_var Innodb_redo_log_checkpoint_lsn)
+    [ "${checkpoint_lsn}" -ge "${target_lsn}" ] && return 0
+    sleep 1
+  done
+  echo "ERR: checkpoint LSN ${checkpoint_lsn} did not reach ${target_lsn}"
+  exit 1
 }
 
 # Fresh datadir, a 200k-row/~70MB single-table dataset (enough pages to
@@ -818,7 +853,9 @@ run_pagetracking_read_efficiency_tests() {
 cleanup() {
   echo "################################## CleanUp #######################################"
   echo "Killing any previously running mysqld process"
-  MPID=( $(ps -ef | grep -e mysqld | grep error.log | grep -v grep | awk '{print $2}') )
+  # Only this script's mysqld (matched by its datadir): other suites' servers
+  # on the same host must survive.
+  MPID=( $(pgrep -f -- "mysqld .*--datadir=${datadir} ") )
   {  kill -15 $MPID && wait $MPID; } 2>/dev/null
 
   if [ -d $mysqldir/data ]; then

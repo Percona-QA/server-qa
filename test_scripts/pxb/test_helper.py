@@ -1632,72 +1632,98 @@ class BackupTestHelper:
 
         self.start_server()
 
+        # --- Replay binlog written after the backup ---
+        # The "before" snapshot was taken from the live server after the
+        # backup, so the restored data only matches it once the binlog
+        # events from the backup position onward have been replayed.
+        binlog_applied = self._apply_binlog_since_backup(full_target, data_orig)
+
         # --- Verify ---
         if use_detailed_verify:
-            self.verify_data_integrity(databases, orig_data)
+            self.verify_data_integrity(databases, orig_data, compare_data=binlog_applied)
+        elif binlog_applied:
+            print("Collecting table count after restore")
+            old_cwd = os.getcwd()
+            os.chdir(self.logdir)
+            try:
+                with open("file2", "w") as f:
+                    result = subprocess.run(
+                        ["pt-table-checksum", f"S={self.socket_path},u=root",
+                         "-d", "test", "--recursion-method", "none", "--no-check-binlog-format"],
+                        stdout=f, check=False,
+                    )
+                    if result.returncode not in (0, 64):
+                        raise subprocess.CalledProcessError(result.returncode, result.args)
+                with open("file2", "r") as f:
+                    lines = f.readlines()
+                with open("file2", "w") as f:
+                    for line in lines:
+                        parts = line.split()
+                        if len(parts) >= 9:
+                            f.write(f"{parts[3]} {parts[8]}\n")
+                result = subprocess.run(["diff", "file1", "file2"], capture_output=True, text=True)
+                if result.returncode != 0:
+                    print("ERR: Difference found in table count before and after restore.")
+                else:
+                    print("Data is the same before and after restore: Pass")
+                    os.remove("file1")
+                    os.remove("file2")
+            finally:
+                os.chdir(old_cwd)
         else:
-            if (
-                "binlog-encryption" not in self.mysqld_options
-                and "encrypt-binlog" not in self.mysqld_options
-                and "skip-log-bin" not in self.mysqld_options
-            ):
-                print("Check xtrabackup for binlog position")
-                binlog_info_file = os.path.join(full_target, "xtrabackup_binlog_info")
-                with open(binlog_info_file, "r") as f:
-                    line = f.readline().strip()
-                    parts = line.split()
-                    xb_binlog_file = parts[0] if parts else ""
-                    xb_binlog_pos = parts[1] if len(parts) > 1 else ""
+            print("Binlog applying skipped, ignore differences between actual data and restored data")
 
-                print(f"Xtrabackup binlog position: {xb_binlog_file}, {xb_binlog_pos}")
-                print(f"Applying binlog to restored data starting from {xb_binlog_file}, {xb_binlog_pos}")
-                binlog_path = os.path.join(data_orig, xb_binlog_file)
-                if os.path.exists(binlog_path):
-                    mysqlbinlog = subprocess.Popen(
-                        [os.path.join(self.mysqldir, "bin/mysqlbinlog"), binlog_path, f"--start-position={xb_binlog_pos}"],
-                        stdout=subprocess.PIPE,
-                    )
-                    mysql = subprocess.Popen(
-                        [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}"],
-                        stdin=mysqlbinlog.stdout,
-                    )
-                    mysqlbinlog.stdout.close()
-                    mysql.communicate()
-                    if mysql.returncode != 0:
-                        print("ERR: The binlog could not be applied to the restored data")
+    def _apply_binlog_since_backup(self, full_target: str, data_orig: str) -> bool:
+        """Replay binlog events written after the backup onto the restored server.
 
-                time.sleep(5)
+        Reads the binlog file/position from ``xtrabackup_binlog_info`` in the
+        backup and pipes ``mysqlbinlog --start-position`` from the original
+        (moved-aside) datadir into the restored server.
 
-                print("Collecting table count after restore")
-                old_cwd = os.getcwd()
-                os.chdir(self.logdir)
-                try:
-                    with open("file2", "w") as f:
-                        result = subprocess.run(
-                            ["pt-table-checksum", f"S={self.socket_path},u=root",
-                             "-d", "test", "--recursion-method", "none", "--no-check-binlog-format"],
-                            stdout=f, check=False,
-                        )
-                        if result.returncode not in (0, 64):
-                            raise subprocess.CalledProcessError(result.returncode, result.args)
-                    with open("file2", "r") as f:
-                        lines = f.readlines()
-                    with open("file2", "w") as f:
-                        for line in lines:
-                            parts = line.split()
-                            if len(parts) >= 9:
-                                f.write(f"{parts[3]} {parts[8]}\n")
-                    result = subprocess.run(["diff", "file1", "file2"], capture_output=True, text=True)
-                    if result.returncode != 0:
-                        print("ERR: Difference found in table count before and after restore.")
-                    else:
-                        print("Data is the same before and after restore: Pass")
-                        os.remove("file1")
-                        os.remove("file2")
-                finally:
-                    os.chdir(old_cwd)
-            else:
-                print("Binlog applying skipped, ignore differences between actual data and restored data")
+        Returns True if the binlog was replayed, so before/after data can be
+        compared; False if replay is not possible (binlog encrypted or
+        disabled, or the binlog info/file is missing).
+        """
+        if (
+            "binlog-encryption" in self.mysqld_options
+            or "encrypt-binlog" in self.mysqld_options
+            or "skip-log-bin" in self.mysqld_options
+        ):
+            return False
+
+        print("Check xtrabackup for binlog position")
+        binlog_info_file = os.path.join(full_target, "xtrabackup_binlog_info")
+        if not os.path.isfile(binlog_info_file):
+            print(f"ERR: {binlog_info_file} not found, cannot apply binlog to restored data")
+            return False
+        with open(binlog_info_file, "r") as f:
+            parts = f.readline().strip().split()
+        xb_binlog_file = parts[0] if parts else ""
+        xb_binlog_pos = parts[1] if len(parts) > 1 else ""
+
+        print(f"Xtrabackup binlog position: {xb_binlog_file}, {xb_binlog_pos}")
+        binlog_path = os.path.join(data_orig, xb_binlog_file)
+        if not xb_binlog_file or not os.path.exists(binlog_path):
+            print(f"ERR: Binlog file {binlog_path} not found, cannot apply binlog to restored data")
+            return False
+
+        print(f"Applying binlog to restored data starting from {xb_binlog_file}, {xb_binlog_pos}")
+        mysqlbinlog = subprocess.Popen(
+            [os.path.join(self.mysqldir, "bin/mysqlbinlog"), binlog_path, f"--start-position={xb_binlog_pos}"],
+            stdout=subprocess.PIPE,
+        )
+        mysql = subprocess.Popen(
+            [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}"],
+            stdin=mysqlbinlog.stdout,
+        )
+        mysqlbinlog.stdout.close()
+        mysql.communicate()
+        mysqlbinlog.wait()
+        if mysql.returncode != 0:
+            print("ERR: The binlog could not be applied to the restored data")
+
+        time.sleep(5)
+        return True
 
     def _decrypt_decompress(self, target_dir: str, backup_params: str):
         """Run decrypt / decompress passes if backup_params requested them and
@@ -1809,9 +1835,26 @@ class BackupTestHelper:
                 data[db][table] = (count, cksum)
         return data
 
-    def verify_data_integrity(self, databases: List[str], orig_data: Optional[Dict] = None):
-        """Per-table CHECK TABLE, record count comparison, checksum comparison, and ID gap detection."""
-        check_err = 0
+    def verify_data_integrity(
+        self, databases: List[str], orig_data: Optional[Dict] = None, compare_data: bool = True
+    ):
+        """Per-table CHECK TABLE, plus record count and checksum comparison with ``orig_data``.
+
+        Args:
+            databases: databases to check.
+            orig_data: ``collect_table_data()`` snapshot taken before restore.
+            compare_data: compare row counts/checksums with ``orig_data``. Pass
+                False when the binlog could not be replayed onto the restored
+                data, since differences are then expected.
+
+        Fails the test if the server went down or if any table does not pass
+        ``CHECK TABLE``. Row count/checksum differences from ``orig_data`` are
+        printed as ERR but do not fail the test (same as the bash script).
+        """
+        check_failures: List[str] = []
+        mismatches: List[str] = []
+        if not compare_data:
+            print("Binlog applying skipped, ignore differences between actual data and restored data")
         for db in databases:
             result = subprocess.run(
                 [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
@@ -1829,10 +1872,11 @@ class BackupTestHelper:
                     capture_output=True, text=True, check=False,
                 )
                 if check_result.returncode != 0 or "OK" not in check_result.stdout:
-                    print(f"ERR: CHECK TABLE {db}.{table} failed: {check_result.stdout}")
-                    check_err = 1
+                    status = check_result.stdout.strip() or check_result.stderr.strip()
+                    print(f"ERR: CHECK TABLE {db}.{table} failed: {status}")
+                    check_failures.append(f"{db}.{table}: {status}")
 
-                if orig_data and db in orig_data and table in orig_data[db]:
+                if compare_data and orig_data and db in orig_data and table in orig_data[db]:
                     orig_count, orig_cksum = orig_data[db][table]
                     count_result = subprocess.run(
                         [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
@@ -1841,7 +1885,9 @@ class BackupTestHelper:
                     )
                     new_count = count_result.stdout.strip() if count_result.returncode == 0 else "ERR"
                     if new_count != orig_count:
-                        print(f"Warning: Row count mismatch for {db}.{table}: before={orig_count}, after={new_count}")
+                        msg = f"Row count mismatch for {db}.{table}: before={orig_count}, after={new_count}"
+                        print(f"ERR: {msg}")
+                        mismatches.append(msg)
 
                     cksum_result = subprocess.run(
                         [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
@@ -1851,7 +1897,9 @@ class BackupTestHelper:
                     cksum_parts = cksum_result.stdout.strip().split() if cksum_result.returncode == 0 else []
                     new_cksum = cksum_parts[1] if len(cksum_parts) >= 2 else "ERR"
                     if new_cksum != orig_cksum:
-                        print(f"Warning: Checksum mismatch for {db}.{table}: before={orig_cksum}, after={new_cksum}")
+                        msg = f"Checksum mismatch for {db}.{table}: before={orig_cksum}, after={new_cksum}"
+                        print(f"ERR: {msg}")
+                        mismatches.append(msg)
 
         ping_result = subprocess.run(
             [os.path.join(self.mysqldir, "bin/mysqladmin"), "ping", "--user=root", f"--socket={self.socket_path}"],
@@ -1860,10 +1908,21 @@ class BackupTestHelper:
         if ping_result.returncode != 0:
             pytest.fail("ERR: The database has gone down due to corruption, the restore was unsuccessful")
 
-        if check_err == 0:
-            print("All table status: OK")
-        else:
-            print("After restore, some tables may be corrupt, check table status is not OK")
+        if check_failures:
+            pytest.fail(
+                "ERR: After restore, some tables may be corrupt, check table status is not OK:\n  "
+                + "\n  ".join(check_failures)
+            )
+        print("All table status: OK")
+
+        # Like the bash script, a row count/checksum mismatch is reported as
+        # ERR but does not fail the test.
+        if compare_data and orig_data:
+            db_list = " ".join(databases)
+            if not any(m.startswith("Row count") for m in mismatches):
+                print(f"Match record count of tables in databases {db_list} with original data: Pass")
+            if not any(m.startswith("Checksum") for m in mismatches):
+                print(f"Match checksum of all tables in databases {db_list} with original data: Pass")
 
     def stop_vault_server(self) -> None:
         """Kill any running HashiCorp Vault server process."""

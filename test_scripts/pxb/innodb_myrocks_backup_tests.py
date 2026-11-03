@@ -982,6 +982,19 @@ def test_cloud_backup_md5_delete(test_helper):
 # InnoDB params and redo archive tests
 # ============================================================================
 
+def _innodb_log_file_size_opt(test_helper, size: int) -> str:
+    """Return the xtrabackup ``--innodb-log-file-size`` option for *size*.
+
+    ``innodb_log_file_size`` was removed in MySQL 9.3 (replaced by
+    ``innodb_redo_log_capacity``), and PXB built on 9.3+ rejects it with
+    "unknown variable". The redo log size is taken from the server/backup
+    anyway, so the option is simply omitted there.
+    """
+    if test_helper.server_version_normalized >= 90300:
+        return ""
+    return f"--innodb-log-file-size={size}"
+
+
 def test_inc_backup_innodb_params(test_helper):
     """Backup and Restore with different InnoDB parameter values."""
     if test_helper.server_version_normalized < 80000:
@@ -990,14 +1003,17 @@ def test_inc_backup_innodb_params(test_helper):
     test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     test_helper.restore_params = ""
 
+    lfs_200m = _innodb_log_file_size_opt(test_helper, 209715200)
+    lfs_2g = _innodb_log_file_size_opt(test_helper, 2147483648)
+    lfs_8m = _innodb_log_file_size_opt(test_helper, 8388608)
     configs = [
-        {"mysqld": "--innodb-redo-log-capacity=209715200", "backup_extra": "--innodb-log-file-size=209715200",
-         "prepare_extra": f"--innodb-log-file-size=209715200 {CORE_FILE_OPT}"},
-        {"mysqld": "--innodb-redo-log-capacity=2147483648", "backup_extra": "--innodb-log-file-size=2147483648",
-         "prepare_extra": f"--innodb-log-file-size=2147483648 {CORE_FILE_OPT}"},
+        {"mysqld": "--innodb-redo-log-capacity=209715200", "backup_extra": lfs_200m,
+         "prepare_extra": f"{lfs_200m} {CORE_FILE_OPT}".strip()},
+        {"mysqld": "--innodb-redo-log-capacity=2147483648", "backup_extra": lfs_2g,
+         "prepare_extra": f"{lfs_2g} {CORE_FILE_OPT}".strip()},
         {"mysqld": "--innodb-redo-log-capacity=8388608 --innodb-buffer-pool-size=2G",
-         "backup_extra": "--innodb-log-file-size=8388608 --innodb-buffer-pool-size=2G",
-         "prepare_extra": f"--innodb-log-file-size=8388608 --innodb-buffer-pool-size=2G {CORE_FILE_OPT}"},
+         "backup_extra": f"{lfs_8m} --innodb-buffer-pool-size=2G".strip(),
+         "prepare_extra": f"{lfs_8m} --innodb-buffer-pool-size=2G {CORE_FILE_OPT}".strip()},
         {"mysqld": "--skip-log-bin", "backup_extra": "", "prepare_extra": f"{CORE_FILE_OPT}"},
     ]
 
@@ -1036,7 +1052,7 @@ def test_inc_backup_archive_log(test_helper):
         f"--binlog-transaction-compression-level-zstd=22 --innodb-extend-and-initialize=OFF "
         f"--innodb-log-writer-threads=OFF --innodb-redo-log-archive-dirs=archive:{archive_dir}"
     )
-    test_helper.prepare_params = f"--innodb-log-file-size=536870912 {CORE_FILE_OPT}"
+    test_helper.prepare_params = f"{_innodb_log_file_size_opt(test_helper, 536870912)} {CORE_FILE_OPT}".strip()
     test_helper.initialize_db()
     _run_load(test_helper)
     test_helper.take_backup(single_incremental=True)

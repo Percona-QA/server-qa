@@ -25,6 +25,12 @@ def test_helper(request):
     helper = BackupTestHelper(test_name=test_name)
     helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
     helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
+    # MyRocks is a Percona Server-only engine: on upstream MySQL (MS) skip
+    # RocksDB data creation/load and all RocksDB-specific checks, regardless
+    # of the ROCKSDB env setting.
+    if helper.server_type == "MS" and helper.rocksdb == "enabled":
+        print("RocksDB is unsupported in MS, disabling RocksDB for this test")
+        helper.rocksdb = "disabled"
     yield helper
     if os.environ.get("DISABLE_CLEANUP") != "1":
         helper.cleanup()
@@ -169,6 +175,8 @@ def test_change_row_format(test_helper):
 
 def test_copy_data_across_engine(test_helper):
     """Backup and Restore after cross engine table copy."""
+    if test_helper.server_type == "MS":
+        pytest.skip("RocksDB is unsupported in MS")
     if test_helper.rocksdb != "enabled":
         pytest.skip("RocksDB disabled")
     databases = _init_for_ddl(test_helper)
@@ -210,6 +218,8 @@ def test_copy_data_across_engine(test_helper):
 
 def test_add_data_across_engine(test_helper):
     """Backup and Restore when data is added in both engines simultaneously."""
+    if test_helper.server_type == "MS":
+        pytest.skip("RocksDB is unsupported in MS")
     if test_helper.rocksdb != "enabled":
         pytest.skip("RocksDB disabled")
     databases = _init_for_ddl(test_helper)

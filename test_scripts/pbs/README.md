@@ -400,7 +400,9 @@ is stopped gracefully (`SIGTERM`), and a final `search_by_gtid_set` (same
 `GTID_SUBTRACT` approach against the final tail) confirms completeness.
 
 There is no `--resume-timeout` flag: the resume timeout used in step 3 is
-always `--kill-wait-max-seconds + 80`, recomputed every run, so it scales
+always `--kill-wait-max-seconds + 80` (`+ 150` with the S3 backend, where
+every `list`/`search_by_gtid_set` call is itself much slower), recomputed
+every run, so it scales
 automatically with whatever `--kill-wait-max-seconds` (or its
 `pull_purge_resume_test.config` override) ends up being — a longer
 kill-wait window means more backlog can build up while `pull` is dead, so
@@ -410,7 +412,11 @@ being tuned separately.
 GTID mode, no rewrite. Uses `--max-binlog-size` `4096` (mysqld's documented
 minimum) so the server rotates aggressively and multiple binlog files
 accumulate quickly, giving every iteration a real, multi-file purge to
-exercise. The background
+exercise. With the S3 backend the default is `256K` instead: each stored
+file costs `pull` several S3 requests (~0.4–0.5s per file observed), so with
+4096-byte binlogs `pull` writes ~2 files/s while sysbench produces ~25/s and
+never catches up. `256K` still rotates about once a second under the default
+load. An explicit `--max-binlog-size` overrides either default. The background
 sysbench duration is computed from the phase parameters, with
 `--background-duration` acting as a floor for extra soak time (same as
 `pull_restart_resilience_test.py`).

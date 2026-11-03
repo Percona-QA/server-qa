@@ -78,7 +78,7 @@ def apply_test_config_overrides(p: argparse.ArgumentParser) -> None:
     key that's actually set to a valid non-zero value, replaces that
     flag's argparse default -- so an explicit CLI flag still overrides the
     file, and the file still overrides the hardcoded default, exactly like
-    pull_purge_resume_test.py's own p.set_defaults(max_binlog_size=...)
+    pull_purge_resume_test.py's own p.set_defaults(...) calls
     already does for a single value."""
     values = load_key_value_config(TEST_CONFIG_PATH)
     overrides = {}

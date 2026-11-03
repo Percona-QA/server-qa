@@ -35,14 +35,22 @@ config.json in pbs/), not from command-line flags.
 --max-binlog-size defaults to 4096 bytes -- mysqld's documented minimum --
 so the server rotates aggressively and multiple binlog files accumulate
 quickly, giving every iteration a real, multi-file purge to exercise
-instead of "nothing yet" or a single file.
+instead of "nothing yet" or a single file. With the S3 storage backend the
+default is 256K instead: every stored file costs pull several S3 requests
+(~0.4-0.5s per file observed), so with 4096-byte binlogs pull can only
+write ~2 files/s while sysbench produces ~25/s, and it falls further
+behind on every iteration. 256K still rotates roughly once a second under
+the default load, so each iteration still gets a multi-file purge. An
+explicit --max-binlog-size always wins over either default.
 
---resume-timeout is not a flag: it's always --kill-wait-max-seconds + 80,
-computed fresh each run, so it scales automatically with whatever
---kill-wait-max-seconds (or its pull_purge_resume_test.config override,
-see below) ends up being -- a longer kill-wait window means more backlog
-can build up while pull is dead, so the resume/catch-up budget needs to
-grow with it rather than being tuned separately.
+--resume-timeout is not a flag: it's always --kill-wait-max-seconds + 80
+(+ 150 with the S3 backend, where every list/search_by_gtid_set call is
+itself much slower), computed fresh each run, so it scales automatically
+with whatever --kill-wait-max-seconds (or its
+pull_purge_resume_test.config override, see below) ends up being -- a
+longer kill-wait window means more backlog can build up while pull is
+dead, so the resume/catch-up budget needs to grow with it rather than
+being tuned separately.
 
 An optional pull_purge_resume_test.config file next to this script (a
 flat "key=value" file, blank lines and "#" comments ignored) can override
@@ -76,8 +84,14 @@ NAME = "pull-purge-resume"
 TEST_CONFIG_PATH = Path(__file__).resolve().parent / "pull_purge_resume_test.config"
 
 # resume_timeout is always derived from kill_wait_max_seconds (see the
-# module docstring); this is that formula's fixed offset.
+# module docstring); these are that formula's fixed offsets per backend.
 RESUME_TIMEOUT_MARGIN = 80
+S3_RESUME_TIMEOUT_MARGIN = 150
+
+# Default --max-binlog-size per storage backend (see the module docstring
+# for why S3 needs larger files).
+FILE_MAX_BINLOG_SIZE = "4096"
+S3_MAX_BINLOG_SIZE = "256K"
 
 
 def apply_test_config_overrides(p: argparse.ArgumentParser) -> None:
@@ -128,15 +142,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="max seconds to let pull run before killing it each iteration (default: %(default)s)",
     )
     p.add_argument("--resume-poll-interval", type=int, default=2, help="seconds between resume checks (default: %(default)s)")
-    # mysqld's documented minimum for max_binlog_size is 4096 bytes; using
-    # the lowest possible value (instead of build_common_parser()'s usual 4M
-    # default) forces rotation aggressively so multiple binlog files
-    # accumulate quickly and every iteration has a real, multi-file purge to
-    # exercise; still overridable via --max-binlog-size.
-    p.set_defaults(max_binlog_size="4096")
+    # Left unset here and resolved per storage backend in
+    # resolve_max_binlog_size() once --config is known: FILE_MAX_BINLOG_SIZE
+    # (mysqld's documented minimum) for local storage, S3_MAX_BINLOG_SIZE
+    # for S3 -- see the module docstring. Still overridable via
+    # --max-binlog-size.
+    p.set_defaults(max_binlog_size=None)
 
     apply_test_config_overrides(p)
     return p
+
+
+def resolve_max_binlog_size(args: argparse.Namespace) -> None:
+    """Fills in args.max_binlog_size from the storage backend in --config,
+    unless it was given explicitly on the command line. A config that
+    can't be loaded falls back to FILE_MAX_BINLOG_SIZE; ScenarioRunner
+    reports the actual config error itself right after."""
+    if args.max_binlog_size is not None:
+        return
+    try:
+        backend = setup.load_test_config(Path(args.config))["backend"]
+    except TestFailure:
+        backend = "file"
+    args.max_binlog_size = S3_MAX_BINLOG_SIZE if backend == "s3" else FILE_MAX_BINLOG_SIZE
+    LOG.info("[%s] storage backend %r: using --max-binlog-size=%s", NAME, backend, args.max_binlog_size)
 
 
 def select_purge_target(listing: dict) -> Optional[str]:
@@ -223,10 +252,11 @@ class PullPurgeResumeScenario(setup.ScenarioRunner):
 
         # Always derived from kill_wait_max_seconds (see the module
         # docstring), not an independently configurable flag.
-        resume_timeout = args.kill_wait_max_seconds + RESUME_TIMEOUT_MARGIN
+        margin = S3_RESUME_TIMEOUT_MARGIN if test_config["backend"] == "s3" else RESUME_TIMEOUT_MARGIN
+        resume_timeout = args.kill_wait_max_seconds + margin
         LOG.info(
             "[%s] resume_timeout = kill_wait_max_seconds(%s) + %s = %ss",
-            NAME, args.kill_wait_max_seconds, RESUME_TIMEOUT_MARGIN, resume_timeout,
+            NAME, args.kill_wait_max_seconds, margin, resume_timeout,
         )
 
         LOG.info("[%s] preparing sysbench data (initial load)", NAME)
@@ -409,6 +439,7 @@ class PullPurgeResumeScenario(setup.ScenarioRunner):
 
 def main() -> int:
     args = build_parser().parse_args()
+    resolve_max_binlog_size(args)
     ok = PullPurgeResumeScenario(args, name=NAME).run()
     return 0 if ok else 1
 

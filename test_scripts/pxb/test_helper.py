@@ -1574,26 +1574,7 @@ class BackupTestHelper:
             orig_data = self.collect_table_data(databases)
         else:
             print("Collecting existing table count")
-            old_cwd = os.getcwd()
-            os.chdir(self.logdir)
-            try:
-                with open("file1", "w") as f:
-                    result = subprocess.run(
-                        ["pt-table-checksum", f"S={self.socket_path},u=root",
-                         "-d", "test", "--recursion-method", "none", "--no-check-binlog-format"],
-                        stdout=f, check=False,
-                    )
-                    if result.returncode not in (0, 64):
-                        raise subprocess.CalledProcessError(result.returncode, result.args)
-                with open("file1", "r") as f:
-                    lines = f.readlines()
-                with open("file1", "w") as f:
-                    for line in lines:
-                        parts = line.split()
-                        if len(parts) >= 9:
-                            f.write(f"{parts[3]} {parts[8]}\n")
-            finally:
-                os.chdir(old_cwd)
+            self._pt_table_checksum_counts("file1")
 
         time.sleep(2)
 
@@ -1643,24 +1624,10 @@ class BackupTestHelper:
             self.verify_data_integrity(databases, orig_data, compare_data=binlog_applied)
         elif binlog_applied:
             print("Collecting table count after restore")
+            self._pt_table_checksum_counts("file2")
             old_cwd = os.getcwd()
             os.chdir(self.logdir)
             try:
-                with open("file2", "w") as f:
-                    result = subprocess.run(
-                        ["pt-table-checksum", f"S={self.socket_path},u=root",
-                         "-d", "test", "--recursion-method", "none", "--no-check-binlog-format"],
-                        stdout=f, check=False,
-                    )
-                    if result.returncode not in (0, 64):
-                        raise subprocess.CalledProcessError(result.returncode, result.args)
-                with open("file2", "r") as f:
-                    lines = f.readlines()
-                with open("file2", "w") as f:
-                    for line in lines:
-                        parts = line.split()
-                        if len(parts) >= 9:
-                            f.write(f"{parts[3]} {parts[8]}\n")
                 result = subprocess.run(["diff", "file1", "file2"], capture_output=True, text=True)
                 if result.returncode != 0:
                     print("ERR: Difference found in table count before and after restore.")
@@ -1672,6 +1639,38 @@ class BackupTestHelper:
                 os.chdir(old_cwd)
         else:
             print("Binlog applying skipped, ignore differences between actual data and restored data")
+
+    def _pt_table_checksum_counts(self, out_name: str) -> None:
+        """Write ``<ROWS> <TABLE>`` per table of the ``test`` database to ``logdir/out_name``.
+
+        Uses pt-table-checksum. Fails the test if pt-table-checksum produced no
+        table rows: it can abort (for example when RocksDB tables exist on the
+        server) and still exit 0, which would leave both files empty and make
+        the before/after diff pass without checking anything.
+        """
+        out_path = os.path.join(self.logdir, out_name)
+        result = subprocess.run(
+            ["pt-table-checksum", f"S={self.socket_path},u=root",
+             "-d", "test", "--recursion-method", "none", "--no-check-binlog-format"],
+            capture_output=True, text=True, check=False, cwd=self.logdir,
+        )
+        if result.returncode not in (0, 64):
+            raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+
+        rows = []
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            # Skip the "TS ERRORS DIFFS ROWS ... TABLE" header line.
+            if len(parts) >= 9 and parts[0] != "TS":
+                rows.append(f"{parts[3]} {parts[8]}")
+        if not rows:
+            pytest.fail(
+                "ERR: pt-table-checksum returned no table checksums, cannot compare data "
+                f"before and after restore.\npt-table-checksum output:\n{result.stdout}{result.stderr}"
+            )
+        with open(out_path, "w") as f:
+            f.write("ROWS TABLE\n")
+            f.writelines(f"{r}\n" for r in rows)
 
     def _apply_binlog_since_backup(self, full_target: str, data_orig: str) -> bool:
         """Replay binlog events written after the backup onto the restored server.

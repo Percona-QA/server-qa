@@ -75,19 +75,26 @@ def _run_load(test_helper, time_sec=20):
         test_helper.run_load("", time_sec=time_sec)
 
 
+def _verify_databases(test_helper):
+    """Databases take_backup() should verify: include test_rocksdb when RocksDB data is created.
+
+    Passing test_rocksdb also makes take_backup() use per-table COUNT/CHECKSUM
+    verification instead of pt-table-checksum, which aborts on RocksDB tables.
+    """
+    return ["test", "test_rocksdb"] if test_helper.rocksdb == "enabled" else ["test"]
+
+
 def _init_for_ddl(test_helper):
     """Common initialization for DDL tests."""
     test_helper.mysqld_options = _default_mysqld_options()
     test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
-    rocksdb_enabled = test_helper.rocksdb == "enabled"
-    test_helper.initialize_db(rocksdb=rocksdb_enabled)
+    test_helper.initialize_db(rocksdb=test_helper.rocksdb == "enabled")
 
     _run_load(test_helper)
 
-    databases = ["test", "test_rocksdb"] if rocksdb_enabled else ["test"]
-    return databases
+    return _verify_databases(test_helper)
 
 
 # ============================================================================
@@ -376,13 +383,13 @@ def test_streaming_backup(test_helper):
     test_helper.restore_params = ""
     test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
     _run_load(test_helper)
-    test_helper.take_backup(backup_type="stream", single_incremental=True)
+    test_helper.take_backup(backup_type="stream", single_incremental=True, databases=_verify_databases(test_helper))
 
     if test_helper.server_version_normalized < 80000:
         print("Test: Incremental Backup and Restore with streaming format as tar")
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         _run_load(test_helper)
-        test_helper.take_backup(backup_type="tar", single_incremental=True)
+        test_helper.take_backup(backup_type="tar", single_incremental=True, databases=_verify_databases(test_helper))
 
 
 def test_compress_stream_backup(test_helper):
@@ -398,7 +405,7 @@ def test_compress_stream_backup(test_helper):
         test_helper.backup_params = f"--compress={compress} --compress-threads=10 {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         _run_load(test_helper)
-        test_helper.take_backup(backup_type="stream", single_incremental=True)
+        test_helper.take_backup(backup_type="stream", single_incremental=True, databases=_verify_databases(test_helper))
 
 
 def test_encrypt_compress_stream_backup(test_helper):
@@ -418,7 +425,7 @@ def test_encrypt_compress_stream_backup(test_helper):
         )
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         _run_load(test_helper)
-        test_helper.take_backup(backup_type="stream", single_incremental=True)
+        test_helper.take_backup(backup_type="stream", single_incremental=True, databases=_verify_databases(test_helper))
 
 
 def test_compress_backup(test_helper):
@@ -443,7 +450,7 @@ def test_compress_backup(test_helper):
         test_helper.backup_params = f"{cfg} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         _run_load(test_helper)
-        test_helper.take_backup(single_incremental=True)
+        test_helper.take_backup(single_incremental=True, databases=_verify_databases(test_helper))
 
 
 # ============================================================================
@@ -833,14 +840,14 @@ def test_cloud_inc_backup(test_helper):
     _run_load(test_helper)
 
     print("Test: Cloud backup")
-    test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True)
+    test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True, databases=_verify_databases(test_helper))
 
     print("Test: Cloud backup with encryption")
     test_helper.backup_params = (
         f"--encrypt=AES256 --encrypt-key={test_helper.encrypt_key} --encrypt-threads=10 "
         f"--encrypt-chunk-size=128K {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     )
-    test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True)
+    test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True, databases=_verify_databases(test_helper))
 
     if test_helper.server_version_normalized >= 80000:
         for compress in ["lz4", "zstd"]:
@@ -850,7 +857,7 @@ def test_cloud_inc_backup(test_helper):
                 f"--encrypt-chunk-size=128K --compress={compress} --compress-threads=10 "
                 f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
             )
-            test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True)
+            test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True, databases=_verify_databases(test_helper))
 
 
 def test_cloud_backup_md5_delete(test_helper):

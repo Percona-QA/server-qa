@@ -30,6 +30,9 @@ HOME = os.path.expanduser("~")
 MYSQL_START_TIMEOUT = int(os.environ.get("MYSQL_START_TIMEOUT", "180"))
 # Graceful shutdown wait for mysqladmin shutdown (seconds); default 5 minutes.
 MYSQL_SHUTDOWN_TIMEOUT = int(os.environ.get("MYSQL_SHUTDOWN_TIMEOUT", "300"))
+# Max seconds take_backup() waits for the background load and DDL threads to
+# finish before recording the pre-restore baseline.
+WRITERS_QUIESCE_TIMEOUT = int(os.environ.get("WRITERS_QUIESCE_TIMEOUT", "600"))
 # Each xtrabackup invocation opens its own KMIP/TLS session and pays a fresh
 # Fortanix cold-start; occasional invocations exceed xtrabackup's internal ~60s
 # tolerance and fail with MY-013714 + 'Encryption can't find master key'.
@@ -1567,10 +1570,9 @@ class BackupTestHelper:
                 inc_num += 1
                 time.sleep(10)
 
-        # Stop any remaining DDL threads (best effort)
-        for t in threading.enumerate():
-            if t.name.startswith("ddl_"):
-                t.join(timeout=5)
+        # Let the background load and DDL threads finish before the baseline
+        # is recorded; see _wait_for_writers().
+        self._wait_for_writers()
 
         # --- Prepare backups ---
         print("=>Preparing full backup")
@@ -1680,6 +1682,33 @@ class BackupTestHelper:
                 os.chdir(old_cwd)
         else:
             print("Binlog applying skipped, ignore differences between actual data and restored data")
+
+    def _wait_for_writers(self, timeout: int = WRITERS_QUIESCE_TIMEOUT) -> None:
+        """Wait for the background load tool and ``ddl_*`` threads to finish.
+
+        The pre-restore baseline must include every write that the binlog
+        replay later applies to the restored server. A writer still running
+        after the baseline is recorded commits rows that the replay adds but
+        the baseline lacks, giving false row count/checksum mismatches. Both
+        writers are time- or iteration-bounded, so this wait is short.
+
+        Fails the test if they are still running after ``timeout`` seconds.
+        """
+        deadline = time.monotonic() + timeout
+        if self.is_load_running():
+            print(f"Waiting for {self.load_tool} load to finish before collecting data")
+            while self.is_load_running():
+                if time.monotonic() >= deadline:
+                    pytest.fail(f"ERR: {self.load_tool} load still running after {timeout}s")
+                time.sleep(1)
+
+        ddl_threads = [t for t in threading.enumerate() if t.name.startswith("ddl_") and t.is_alive()]
+        if ddl_threads:
+            print(f"Waiting for DDL threads to finish: {', '.join(t.name for t in ddl_threads)}")
+        for t in ddl_threads:
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+            if t.is_alive():
+                pytest.fail(f"ERR: DDL thread {t.name} still running after {timeout}s")
 
     def _pt_table_checksum_counts(self, out_name: str) -> None:
         """Write ``<ROWS> <TABLE>`` per table of the ``test`` database to ``logdir/out_name``.

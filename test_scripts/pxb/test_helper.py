@@ -1687,6 +1687,7 @@ class BackupTestHelper:
         Fails the test if binary logging is enabled but the replay
         prerequisites are missing (no ``xtrabackup_binlog_info``, no binlog
         file name in it, or the binlog file is not in the original datadir),
+        or if ``mysqlbinlog`` or ``mysql`` exits with an error during replay,
         since the restored data could otherwise go unverified.
         """
         if (
@@ -1731,8 +1732,13 @@ class BackupTestHelper:
         mysqlbinlog.stdout.close()
         mysql.communicate()
         mysqlbinlog.wait()
-        if mysql.returncode != 0:
-            print("ERR: The binlog could not be applied to the restored data")
+        # Check both ends of the pipe: if mysqlbinlog fails without producing
+        # SQL, mysql still exits 0 on the empty input.
+        if mysqlbinlog.returncode != 0 or mysql.returncode != 0:
+            pytest.fail(
+                "ERR: The binlog could not be applied to the restored data "
+                f"(mysqlbinlog exit code {mysqlbinlog.returncode}, mysql exit code {mysql.returncode})"
+            )
 
         time.sleep(5)
         return True
@@ -2754,8 +2760,14 @@ class BackupTestHelper:
                 )
                 mysqlbinlog.stdout.close()
                 mysql.communicate()
-                if mysql.returncode != 0:
-                    print("ERR: The binlog could not be applied to the restored data")
+                mysqlbinlog.wait()
+                # Check both ends of the pipe: if mysqlbinlog fails without
+                # producing SQL, mysql still exits 0 on the empty input.
+                if mysqlbinlog.returncode != 0 or mysql.returncode != 0:
+                    pytest.fail(
+                        "ERR: The binlog could not be applied to the restored data "
+                        f"(mysqlbinlog exit code {mysqlbinlog.returncode}, mysql exit code {mysql.returncode})"
+                    )
             time.sleep(5)
             print("Collecting table count after restore")
             res_data = self.count_rows()

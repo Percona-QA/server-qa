@@ -1313,17 +1313,21 @@ def test_decompress_largest_file_first(test_helper):
         "--backup", f"--target-dir={full_target}",
         f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}",
     ] + test_helper.backup_params.split()
+    print("=>Taking compressed full backup")
     result = test_helper.run_command(xb_cmd, check=False, log_file=backup_log)
     if result.returncode != 0:
         pytest.fail(f"ERR: Compressed backup failed. Log: {backup_log}")
+    print(f"..Compressed full backup was successfully created at: {full_target}.\n  Logs available at: {backup_log}")
 
     decompress_log = os.path.join(test_helper.logdir, f"adv_decompress_{log_date}_log")
     cmd = test_helper._xtrabackup_cmd_prefix() + [
         "--no-defaults", "--decompress", f"--target-dir={full_target}", f"--parallel={PARALLEL_DEGREE}",
     ]
+    print(f"=>Decompressing backup with --parallel={PARALLEL_DEGREE}")
     result = test_helper.run_command(cmd, check=False, log_file=decompress_log)
     if result.returncode != 0:
         pytest.fail(f"ERR: Decompress failed. Log: {decompress_log}")
+    print(f"..Decompress of backup was successful.\n  Logs available at: {decompress_log}")
 
     rank, total, largest, size = _dispatch_rank_of_largest(
         full_target, decompress_log, r"decompressing ", PARALLEL_ORDER_INNODB_SCOPE
@@ -1334,6 +1338,7 @@ def test_decompress_largest_file_first(test_helper):
         f"('{largest}', {size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
         f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {decompress_log}"
     )
+    print(f"Largest file '{largest}' ({size} bytes) was decompressed first, rank {rank}/{total}: Pass")
 
 
 def test_copy_back_largest_file_first(test_helper):
@@ -1377,9 +1382,11 @@ def test_copy_back_largest_file_first(test_helper):
         "--backup", f"--target-dir={full_target}",
         f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}",
     ] + test_helper.backup_params.split()
+    print("=>Taking full backup")
     result = test_helper.run_command(xb_cmd, check=False, log_file=backup_log)
     if result.returncode != 0:
         pytest.fail(f"ERR: Backup failed. Log: {backup_log}")
+    print(f"..Full backup was successfully created at: {full_target}.\n  Logs available at: {backup_log}")
 
     test_helper.prepare_full_backup(test_helper.prepare_params, log_date)
 
@@ -1393,9 +1400,11 @@ def test_copy_back_largest_file_first(test_helper):
         "--no-defaults", "--copy-back", f"--target-dir={full_target}",
         f"--datadir={restore_dir}", f"--parallel={PARALLEL_DEGREE}",
     ] + test_helper.restore_params.split()
+    print(f"=>Copy-back of full backup with --parallel={PARALLEL_DEGREE} to {restore_dir}")
     result = test_helper.run_command(cmd, check=False, log_file=copyback_log)
     if result.returncode != 0:
         pytest.fail(f"ERR: Copy-back failed. Log: {copyback_log}")
+    print(f"..Copy-back of full backup was successful.\n  Logs available at: {copyback_log}")
 
     rank, total, largest, size = _dispatch_rank_of_largest(full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_INNODB_SCOPE)
     assert rank is not None, f"largest in-scope file '{largest}' never appeared in the copy-back dispatch log: {copyback_log}"
@@ -1404,6 +1413,7 @@ def test_copy_back_largest_file_first(test_helper):
         f"('{largest}', {size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
         f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {copyback_log}"
     )
+    print(f"Largest InnoDB file '{largest}' ({size} bytes) was copied back first, rank {rank}/{total}: Pass")
 
     if rocksdb_enabled:
         rdb_rank, rdb_total, rdb_largest, rdb_size = _dispatch_rank_of_largest(
@@ -1415,6 +1425,8 @@ def test_copy_back_largest_file_first(test_helper):
             f"('{rdb_largest}', {rdb_size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
             f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {copyback_log}"
         )
+        print(f"Largest RocksDB file '{rdb_largest}' ({rdb_size} bytes) was copied back first, "
+              f"rank {rdb_rank}/{rdb_total}: Pass")
 
     # Functional guard: reordering the queue must not skip, duplicate, or
     # corrupt any file.
@@ -1434,6 +1446,9 @@ def test_copy_back_largest_file_first(test_helper):
         assert os.path.isdir(restored_rocksdb) and os.listdir(restored_rocksdb), (
             f".rocksdb missing or empty in restored datadir: {restored_rocksdb}"
         )
+    print(f"All {NUM_SMALL_TABLES + 1} InnoDB data files"
+          f"{' and the .rocksdb directory' if rocksdb_enabled else ''} "
+          "are present in the restored datadir with matching sizes: Pass")
 
 
 # ============================================================================

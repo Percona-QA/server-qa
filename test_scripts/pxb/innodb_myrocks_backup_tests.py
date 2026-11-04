@@ -18,6 +18,9 @@ import pytest
 from test_helper import CORE_FILE_OPT, KMIP_CONFIGS, TEST_BASE_DIR, BackupTestHelper
 
 
+TEST_SEPARATOR = "#" * 83
+
+
 @pytest.fixture(scope="function")
 def test_helper(request):
     """Create a test helper instance for each test."""
@@ -34,9 +37,17 @@ def test_helper(request):
     if helper.server_type == "MS" and helper.rocksdb == "enabled":
         print("RocksDB is unsupported in MS, disabling RocksDB for this test")
         helper.rocksdb = "disabled"
-    yield helper
-    if os.environ.get("DISABLE_CLEANUP") != "1":
-        helper.cleanup()
+    print(f"\n{TEST_SEPARATOR}")
+    print(f"# Test: {test_name}")
+    print(TEST_SEPARATOR)
+    try:
+        yield helper
+        if os.environ.get("DISABLE_CLEANUP") != "1":
+            helper.cleanup()
+    finally:
+        # Mark the end of each test, like the bash script did between tests.
+        print(f"\n# End of test: {test_name}")
+        print(TEST_SEPARATOR)
 
 
 @pytest.fixture(scope="function", autouse=True)

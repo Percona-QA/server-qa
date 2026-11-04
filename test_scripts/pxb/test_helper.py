@@ -1950,9 +1950,13 @@ class BackupTestHelper:
                 False when the binlog could not be replayed onto the restored
                 data, since differences are then expected.
 
-        Fails the test if the server went down or if any table does not pass
-        ``CHECK TABLE``. Row count/checksum differences from ``orig_data`` are
-        printed as ERR but do not fail the test (same as the bash script).
+        Fails the test if the server went down, if a database cannot be
+        listed, if any table does not pass ``CHECK TABLE``, or (when
+        ``compare_data``) if a table in ``orig_data`` is missing after restore.
+        The bash script ran ``CHECK TABLE`` on the expected table list and
+        exited on failure, so a missing table failed the test there too.
+        Row count/checksum differences from ``orig_data`` are printed as ERR
+        but do not fail the test (same as the bash script).
         """
         check_failures: List[str] = []
         mismatches: List[str] = []
@@ -1965,9 +1969,20 @@ class BackupTestHelper:
                 capture_output=True, text=True, check=False,
             )
             if result.returncode != 0:
-                print(f"Warning: Could not list tables in {db}")
+                status = result.stderr.strip() or result.stdout.strip()
+                print(f"ERR: Could not list tables in {db}: {status}")
+                check_failures.append(f"{db}: could not list tables: {status}")
                 continue
             tables = [t.strip() for t in result.stdout.strip().split("\n") if t.strip()]
+
+            # Every table recorded before restore must still exist. Without a
+            # binlog replay, tables created after the backup are expected to
+            # be missing, so only check this when comparing data.
+            if compare_data and orig_data:
+                for table in sorted(set(orig_data.get(db, {})) - set(tables)):
+                    print(f"ERR: Table {db}.{table} is missing after restore")
+                    check_failures.append(f"{db}.{table}: missing after restore")
+
             for table in tables:
                 check_result = subprocess.run(
                     [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
@@ -2013,7 +2028,7 @@ class BackupTestHelper:
 
         if check_failures:
             pytest.fail(
-                "ERR: After restore, some tables may be corrupt, check table status is not OK:\n  "
+                "ERR: After restore, some tables are missing or may be corrupt (check table status is not OK):\n  "
                 + "\n  ".join(check_failures)
             )
         print("All table status: OK")

@@ -1361,7 +1361,6 @@ class BackupTestHelper:
         os.makedirs(self.backup_dir)
 
         log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
-        use_detailed_verify = "test_rocksdb" in databases or not shutil.which("pt-table-checksum")
 
         # --- Full backup ---
         print("=>Taking full backup")
@@ -1612,6 +1611,14 @@ class BackupTestHelper:
                 print(f"..Prepare of incremental backup was successful.\n  Logs available at: {log_file}")
 
         # --- Collect data before restore ---
+        # pt-table-checksum aborts when the server has any RocksDB table
+        # (it needs binlog_format=STATEMENT), so use per-table verification
+        # then, as well as when the tool is not installed.
+        use_detailed_verify = (
+            "test_rocksdb" in databases
+            or not shutil.which("pt-table-checksum")
+            or self._server_has_rocksdb_tables()
+        )
         if use_detailed_verify:
             print("Collecting table data before restore (detailed verify)")
             orig_data = self.collect_table_data(databases)
@@ -1682,6 +1689,15 @@ class BackupTestHelper:
                 os.chdir(old_cwd)
         else:
             print("Binlog applying skipped, ignore differences between actual data and restored data")
+
+    def _server_has_rocksdb_tables(self) -> bool:
+        """Whether any table on the primary uses the ROCKSDB engine, in any database."""
+        out = self.primary.mysql(
+            "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE = 'ROCKSDB';",
+            capture=True, check=False,
+        )
+        last = out.split()[-1] if out else ""
+        return last.isdigit() and int(last) > 0
 
     def _wait_for_writers(self, timeout: int = WRITERS_QUIESCE_TIMEOUT) -> None:
         """Wait for the background load tool and ``ddl_*`` threads to finish.

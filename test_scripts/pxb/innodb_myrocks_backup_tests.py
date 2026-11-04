@@ -22,7 +22,10 @@ from test_helper import CORE_FILE_OPT, KMIP_CONFIGS, TEST_BASE_DIR, BackupTestHe
 def test_helper(request):
     """Create a test helper instance for each test."""
     test_name = request.node.name if hasattr(request, "node") else None
-    helper = BackupTestHelper(test_name=test_name)
+    # The DDL tests in this script run against the sysbench tables
+    # (test.sbtest1..N), which initialize_db() only creates with sysbench, so
+    # default to sysbench here instead of the suite-wide pstress default.
+    helper = BackupTestHelper(test_name=test_name, load_tool=os.environ.get("LOAD_TOOL", "sysbench"))
     helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
     helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
     # MyRocks is a Percona Server-only engine: on upstream MySQL (MS) skip
@@ -1464,7 +1467,7 @@ if __name__ == "__main__":
         print("   export XTRABACKUP_DIR=$HOME/percona-xtrabackup-8.0/bin")
         print("   export MYSQLDIR=$HOME/Percona-Server-8.0")
         print("   export QASCRIPTS=$HOME/server-qa")
-        print("   export LOAD_TOOL=sysbench")
+        print("   export LOAD_TOOL=sysbench  # default: sysbench")
         print("   export ROCKSDB=enabled  # or disabled")
         print("   # Cloud (S3) backup test variables (required for test_cloud_inc_backup):")
         print("   export S3_BUCKET=<your-bucket>")

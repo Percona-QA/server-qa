@@ -307,7 +307,7 @@ This is a Python rewrite of `innodb_myrocks_backup_tests.sh`.
 In addition to the [common prerequisites](#common-prerequisites), set:
 
 ```bash
-export LOAD_TOOL=sysbench
+export LOAD_TOOL=sysbench        # default for this script: sysbench (the DDL tests need the sysbench tables)
 export ROCKSDB=enabled          # or "disabled" (default: enabled; always disabled on MS)
 # Cloud (S3) backup test variables (required for test_cloud_inc_backup):
 export S3_BUCKET=<your-bucket>

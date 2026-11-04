@@ -90,6 +90,15 @@ BACKUP_USER = os.environ.get("BACKUP_USER", "root")
 ENCRYPT_KEY = os.environ.get("ENCRYPT_KEY", "mHU3Zs5sRcSB7zBAJP1BInPP5lgShKly")
 RANDOM_TYPE = os.environ.get("RANDOM_TYPE", "uniform")
 
+# xtrabackup options renamed in PXB 8.4.0-8 and 9.7.2-2 (PXB-3758, PXB-3840).
+# The old names still work but print a deprecation warning and will be
+# removed in a future release. Passing old and new name together is an error.
+PXB_RENAMED_OPTIONS = {
+    "apply-log-only": "apply-redo-only",
+    "incremental-basedir": "backup-incremental-base",
+    "incremental-dir": "prepare-incremental-from-dir",
+}
+
 class MySQLServer:
     """A single mysqld instance (primary or replica).
 
@@ -471,6 +480,8 @@ class BackupTestHelper:
         self.server_version_normalized: Optional[int] = None
         self.xtrabackup_version: Optional[str] = None
         self.xtrabackup_version_normalized: Optional[int] = None
+        # xtrabackup_dir -> whether that binary has the PXB-3758/PXB-3840 option names
+        self._xb_renamed_options_cache: Dict[str, bool] = {}
         self.pstress_binary: Optional[str] = None
         self.backup_params: str = ""
         self.prepare_params: str = ""
@@ -633,6 +644,36 @@ class BackupTestHelper:
         ):
             args.append("--check-tables")
         return args
+
+    def _xb_has_renamed_options(self) -> bool:
+        """Whether the xtrabackup in ``xtrabackup_dir`` has the PXB-3758/PXB-3840 option names.
+
+        The names exist from PXB 8.4.0-8 (8.4 series) and PXB 9.7.2-2. The
+        result is cached per ``xtrabackup_dir``, because the upgrade tests
+        temporarily switch ``xtrabackup_dir`` to an older PXB binary.
+        """
+        xb_dir = self.xtrabackup_dir
+        if xb_dir not in self._xb_renamed_options_cache:
+            _, version = self.get_xtrabackup_version()
+            self._xb_renamed_options_cache[xb_dir] = (
+                version >= self.normalize_xtrabackup_version("9.7.2-2")
+                or self.normalize_xtrabackup_version("8.4.0-8")
+                <= version
+                < self.normalize_xtrabackup_version("8.5.0")
+            )
+        return self._xb_renamed_options_cache[xb_dir]
+
+    def xb_opt(self, name: str) -> str:
+        """Return ``--<name>`` for the xtrabackup in ``xtrabackup_dir``.
+
+        ``name`` is the old option name (a key of ``PXB_RENAMED_OPTIONS``,
+        e.g. ``"apply-log-only"``). Returns the new name on PXB versions that
+        have it, so the tests don't use deprecated options, and the old name
+        on older PXB versions, which don't know the new one.
+        """
+        if self._xb_has_renamed_options():
+            return f"--{PXB_RENAMED_OPTIONS[name]}"
+        return f"--{name}"
 
     def get_mysql_type(self) -> str:
         """Get server type (PS or MS). Uses version output; does not require server to be running."""
@@ -1394,7 +1435,7 @@ class BackupTestHelper:
                 xb_cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults", f"--user={self.backup_user}", "--password=",
                     "--backup", f"--target-dir={inc_target}_tmp",
-                    f"--incremental-basedir={base_dir}",
+                    f"{self.xb_opt('incremental-basedir')}={base_dir}",
                     f"-S{self.socket_path}", f"--datadir={self.datadir}",
                     "--stream=xbstream",
                 ] + self.backup_params.split()
@@ -1427,7 +1468,7 @@ class BackupTestHelper:
                 cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults", f"--user={self.backup_user}", "--password=",
                     "--backup", f"--target-dir={inc_target}",
-                    f"--incremental-basedir={base_dir}",
+                    f"{self.xb_opt('incremental-basedir')}={base_dir}",
                     f"-S{self.socket_path}", f"--datadir={self.datadir}",
                 ] + self.backup_params.split() + ["--register-redo-log-consumer"]
 
@@ -1443,7 +1484,7 @@ class BackupTestHelper:
                         cmd = self._xtrabackup_cmd_prefix() + [
                             "--no-defaults", f"--user={self.backup_user}", "--password=",
                             "--backup", f"--target-dir={inc_target}",
-                            f"--incremental-basedir={base_dir}",
+                            f"{self.xb_opt('incremental-basedir')}={base_dir}",
                             f"-S{self.socket_path}", f"--datadir={self.datadir}",
                         ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
                         result = self.run_command(cmd, check=False, log_file=log_file)
@@ -1466,7 +1507,7 @@ class BackupTestHelper:
                     xb_cmd = self._xtrabackup_cmd_prefix() + [
                         "--no-defaults", f"--user={self.backup_user}", "--password=",
                         "--backup", f"--target-dir={inc_target}_tmp",
-                        f"--incremental-basedir={base_dir}",
+                        f"{self.xb_opt('incremental-basedir')}={base_dir}",
                         f"-S{self.socket_path}", f"--datadir={self.datadir}",
                         "--stream=xbstream",
                     ] + self.backup_params.split()
@@ -1494,7 +1535,7 @@ class BackupTestHelper:
                     cmd = self._xtrabackup_cmd_prefix() + [
                         "--no-defaults", f"--user={self.backup_user}", "--password=",
                         "--backup", f"--target-dir={inc_target}",
-                        f"--incremental-basedir={base_dir}",
+                        f"{self.xb_opt('incremental-basedir')}={base_dir}",
                         f"-S{self.socket_path}", f"--datadir={self.datadir}",
                     ] + self.backup_params.split() + ["--register-redo-log-consumer"]
 
@@ -1511,7 +1552,7 @@ class BackupTestHelper:
                             cmd = self._xtrabackup_cmd_prefix() + [
                                 "--no-defaults", f"--user={self.backup_user}", "--password=",
                                 "--backup", f"--target-dir={inc_target}",
-                                f"--incremental-basedir={base_dir}",
+                                f"{self.xb_opt('incremental-basedir')}={base_dir}",
                                 f"-S{self.socket_path}", f"--datadir={self.datadir}",
                             ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
                             result = self.run_command(cmd, check=False, log_file=log_file)
@@ -1534,7 +1575,7 @@ class BackupTestHelper:
         # --- Prepare backups ---
         print("=>Preparing full backup")
         cmd = self._xtrabackup_cmd_prefix() + [
-            "--no-defaults", "--prepare", "--apply-log-only",
+            "--no-defaults", "--prepare", self.xb_opt("apply-log-only"),
             f"--target_dir={full_target}",
         ] + self._prepare_args_for_pxb_version(self.prepare_params)
 
@@ -1552,13 +1593,13 @@ class BackupTestHelper:
                 cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults", "--prepare",
                     f"--target_dir={full_target}",
-                    f"--incremental-dir={self.backup_dir}/inc{i}",
+                    f"{self.xb_opt('incremental-dir')}={self.backup_dir}/inc{i}",
                 ] + self._prepare_args_for_pxb_version(self.prepare_params)
             else:
                 cmd = self._xtrabackup_cmd_prefix() + [
-                    "--no-defaults", "--prepare", "--apply-log-only",
+                    "--no-defaults", "--prepare", self.xb_opt("apply-log-only"),
                     f"--target_dir={full_target}",
-                    f"--incremental-dir={self.backup_dir}/inc{i}",
+                    f"{self.xb_opt('incremental-dir')}={self.backup_dir}/inc{i}",
                 ] + self._prepare_args_for_pxb_version(self.prepare_params)
 
             log_file = os.path.join(self.logdir, f"prepare_inc{i}_backup_{log_date}_log")
@@ -2632,7 +2673,7 @@ class BackupTestHelper:
             "--password=",
             "--backup",
             f"--target-dir={self.backup_dir}/inc{inc_num}",
-            f"--incremental-basedir={incremental_basedir}",
+            f"{self.xb_opt('incremental-basedir')}={incremental_basedir}",
             f"-S{self.socket_path}",
             f"--datadir={self.datadir}",
         ] + self.backup_params.split() + ["--register-redo-log-consumer"]
@@ -2784,12 +2825,12 @@ class BackupTestHelper:
         self.check_tables()
 
     def prepare_crash_backup_chain(self, num_incremental: int, log_date: str) -> None:
-        """Prepare full backup then incremental 1..num_incremental (last one without --apply-log-only)."""
+        """Prepare full backup then incremental 1..num_incremental (last one without --apply-redo-only/--apply-log-only)."""
         print("=>Preparing full backup")
         cmd = self._xtrabackup_cmd_prefix() + [
             "--no-defaults",
             "--prepare",
-            "--apply-log-only",
+            self.xb_opt("apply-log-only"),
             f"--target_dir={self.backup_dir}/full",
         ] + self._prepare_args_for_pxb_version(self.prepare_params)
         log_file = os.path.join(self.logdir, f"prepare_full_backup_{log_date}_log")
@@ -2804,15 +2845,15 @@ class BackupTestHelper:
                     "--no-defaults",
                     "--prepare",
                     f"--target_dir={self.backup_dir}/full",
-                    f"--incremental-dir={self.backup_dir}/inc{i}",
+                    f"{self.xb_opt('incremental-dir')}={self.backup_dir}/inc{i}",
                 ] + self._prepare_args_for_pxb_version(self.prepare_params)
             else:
                 cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults",
                     "--prepare",
-                    "--apply-log-only",
+                    self.xb_opt("apply-log-only"),
                     f"--target_dir={self.backup_dir}/full",
-                    f"--incremental-dir={self.backup_dir}/inc{i}",
+                    f"{self.xb_opt('incremental-dir')}={self.backup_dir}/inc{i}",
                 ] + self._prepare_args_for_pxb_version(self.prepare_params)
             log_file = os.path.join(self.logdir, f"prepare_inc{i}_backup_{log_date}_log")
             result = self.run_command(cmd, check=False, log_file=log_file)

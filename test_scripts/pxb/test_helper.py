@@ -1681,8 +1681,13 @@ class BackupTestHelper:
         (moved-aside) datadir into the restored server.
 
         Returns True if the binlog was replayed, so before/after data can be
-        compared; False if replay is not possible (binlog encrypted or
-        disabled, or the binlog info/file is missing).
+        compared; False only when replay is intentionally not possible
+        (binlog encrypted, or binary logging disabled on the server).
+
+        Fails the test if binary logging is enabled but the replay
+        prerequisites are missing (no ``xtrabackup_binlog_info``, no binlog
+        file name in it, or the binlog file is not in the original datadir),
+        since the restored data could otherwise go unverified.
         """
         if (
             "binlog-encryption" in self.mysqld_options
@@ -1691,11 +1696,17 @@ class BackupTestHelper:
         ):
             return False
 
+        # Binary logging can also be off without --skip-log-bin (e.g. the
+        # server default on 5.7); then there is nothing to replay.
+        log_bin = self.primary.mysql("SELECT @@log_bin;", capture=True, check=False)
+        if log_bin is not None and log_bin.split()[-1:] == ["0"]:
+            print("Binary logging is disabled on the server, binlog cannot be applied")
+            return False
+
         print("Check xtrabackup for binlog position")
         binlog_info_file = os.path.join(full_target, "xtrabackup_binlog_info")
         if not os.path.isfile(binlog_info_file):
-            print(f"ERR: {binlog_info_file} not found, cannot apply binlog to restored data")
-            return False
+            pytest.fail(f"ERR: {binlog_info_file} not found, cannot apply binlog to restored data")
         with open(binlog_info_file, "r") as f:
             parts = f.readline().strip().split()
         xb_binlog_file = parts[0] if parts else ""
@@ -1703,9 +1714,10 @@ class BackupTestHelper:
 
         print(f"Xtrabackup binlog position: {xb_binlog_file}, {xb_binlog_pos}")
         binlog_path = os.path.join(data_orig, xb_binlog_file)
-        if not xb_binlog_file or not os.path.exists(binlog_path):
-            print(f"ERR: Binlog file {binlog_path} not found, cannot apply binlog to restored data")
-            return False
+        if not xb_binlog_file:
+            pytest.fail(f"ERR: No binlog file name in {binlog_info_file}, cannot apply binlog to restored data")
+        if not os.path.exists(binlog_path):
+            pytest.fail(f"ERR: Binlog file {binlog_path} not found, cannot apply binlog to restored data")
 
         print(f"Applying binlog to restored data starting from {xb_binlog_file}, {xb_binlog_pos}")
         mysqlbinlog = subprocess.Popen(

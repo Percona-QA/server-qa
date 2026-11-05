@@ -1670,9 +1670,15 @@ class BackupTestHelper:
         binlog_applied = self._apply_binlog_since_backup(full_target, data_orig)
 
         # --- Verify ---
+        if not binlog_applied:
+            print("Binlog applying skipped, ignore differences between actual data and restored data")
         if use_detailed_verify:
             self.verify_data_integrity(databases, orig_data, compare_data=binlog_applied)
-        elif binlog_applied:
+        else:
+            # CHECK TABLE on every table (and server alive check), like the
+            # bash script, before the pt-table-checksum comparison.
+            self.verify_data_integrity(databases, compare_data=False)
+        if not use_detailed_verify and binlog_applied:
             print("Collecting table count after restore")
             self._pt_table_checksum_counts("file2")
             old_cwd = os.getcwd()
@@ -1687,8 +1693,6 @@ class BackupTestHelper:
                     os.remove("file2")
             finally:
                 os.chdir(old_cwd)
-        else:
-            print("Binlog applying skipped, ignore differences between actual data and restored data")
 
     def _server_has_rocksdb_tables(self) -> bool:
         """Whether any table on the primary uses the ROCKSDB engine, in any database."""
@@ -1948,7 +1952,8 @@ class BackupTestHelper:
             orig_data: ``collect_table_data()`` snapshot taken before restore.
             compare_data: compare row counts/checksums with ``orig_data``. Pass
                 False when the binlog could not be replayed onto the restored
-                data, since differences are then expected.
+                data, since differences are then expected, or to run only the
+                table checks (as take_backup() does before pt-table-checksum).
 
         Fails the test if the server went down, if a database cannot be
         listed, if any table does not pass ``CHECK TABLE``, or (when
@@ -1960,8 +1965,7 @@ class BackupTestHelper:
         """
         check_failures: List[str] = []
         mismatches: List[str] = []
-        if not compare_data:
-            print("Binlog applying skipped, ignore differences between actual data and restored data")
+        print(f"Check the table status in databases: {' '.join(databases)}")
         for db in databases:
             result = subprocess.run(
                 [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",

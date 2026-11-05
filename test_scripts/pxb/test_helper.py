@@ -2296,7 +2296,12 @@ class BackupTestHelper:
 
     def run_ddl_in_background(self, ddl_func, *args, **kwargs) -> threading.Thread:
         """Launch a DDL operation in a background thread. Returns the thread handle."""
-        thread = threading.Thread(target=ddl_func, args=args, kwargs=kwargs, daemon=True, name=f"ddl_{ddl_func.__name__}")
+        # The "ddl_" prefix is how _wait_for_writers() finds these threads.
+        # The DDL functions are already named ddl_*, so don't add it twice.
+        name = ddl_func.__name__
+        if not name.startswith("ddl_"):
+            name = f"ddl_{name}"
+        thread = threading.Thread(target=ddl_func, args=args, kwargs=kwargs, daemon=True, name=name)
         thread.start()
         return thread
 

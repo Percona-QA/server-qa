@@ -496,6 +496,9 @@ class BackupTestHelper:
         # Always verify restores with per-table COUNT(*)/CHECKSUM TABLE
         # (verify_data_integrity) instead of pt-table-checksum.
         self.detailed_verify: bool = False
+        # Set by _wait_for_writers() to make the ddl_* loops stop at their
+        # next iteration once the backups no longer need them.
+        self._ddl_stop = threading.Event()
         # xtrabackup_dir -> whether that binary has the PXB-3758/PXB-3840 option names
         self._xb_renamed_options_cache: Dict[str, bool] = {}
         self.pstress_binary: Optional[str] = None
@@ -1582,9 +1585,6 @@ class BackupTestHelper:
                 inc_num += 1
                 time.sleep(10)
 
-        # Let the background load and DDL threads finish before the baseline
-        # is recorded; see _wait_for_writers().
-        self._wait_for_writers()
 
         # --- Prepare backups ---
         print("=>Preparing full backup")
@@ -1624,6 +1624,11 @@ class BackupTestHelper:
                 print(f"..Prepare of incremental backup was successful.\n  Logs available at: {log_file}")
 
         # --- Collect data before restore ---
+        # Let the background load and DDL threads finish before the baseline
+        # is recorded; see _wait_for_writers(). Done after the prepares, so
+        # they have had that time to finish on their own.
+        self._wait_for_writers()
+
         # pt-table-checksum aborts when the server has any RocksDB table
         # (it needs binlog_format=STATEMENT), so use per-table verification
         # then, as well as when the tool is not installed.
@@ -1724,6 +1729,9 @@ class BackupTestHelper:
     def _wait_for_writers(self, timeout: int = WRITERS_QUIESCE_TIMEOUT) -> None:
         """Wait for the background load tool and ``ddl_*`` threads to finish.
 
+        The ``ddl_*`` loops are asked to stop at their next iteration, so only
+        the statement each one is running has to complete.
+
         The pre-restore baseline must include every write that the binlog
         replay later applies to the restored server. A writer still running
         after the baseline is recorded commits rows that the replay adds but
@@ -1740,9 +1748,13 @@ class BackupTestHelper:
                     pytest.fail(f"ERR: {self.load_tool} load still running after {timeout}s")
                 time.sleep(1)
 
+        # The backups are done, so the DDL loops have served their purpose:
+        # let them stop after the statement they are running now.
+        self._ddl_stop.set()
         ddl_threads = [t for t in threading.enumerate() if t.name.startswith("ddl_") and t.is_alive()]
         if ddl_threads:
-            print(f"Waiting for DDL threads to finish: {', '.join(t.name for t in ddl_threads)}")
+            print(f"Stopping DDL threads and waiting for their current statement: "
+                  f"{', '.join(t.name for t in ddl_threads)}")
         for t in ddl_threads:
             t.join(timeout=max(0.0, deadline - time.monotonic()))
             if t.is_alive():
@@ -2377,12 +2389,17 @@ class BackupTestHelper:
         """Launch a DDL operation in a background thread. Returns the thread handle."""
         # The "ddl_" prefix is how _wait_for_writers() finds these threads.
         # The DDL functions are already named ddl_*, so don't add it twice.
+        self._ddl_stop.clear()
         name = ddl_func.__name__
         if not name.startswith("ddl_"):
             name = f"ddl_{name}"
         thread = threading.Thread(target=ddl_func, args=args, kwargs=kwargs, daemon=True, name=name)
         thread.start()
         return thread
+
+    def _ddl_continue(self) -> bool:
+        """Whether a ddl_* loop should run another iteration: not asked to stop and server alive."""
+        return not self._ddl_stop.is_set() and self._is_server_alive()
 
     def _is_server_alive(self) -> bool:
         """Check if the primary MySQL server is alive via ``mysqladmin ping``."""
@@ -2402,13 +2419,13 @@ class BackupTestHelper:
         """Change storage engine of tables between MYISAM and INNODB (and ROCKSDB if enabled)."""
         print("DDL: Change storage engine of test.sbtest1")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 ENGINE=MYISAM;")
             self._run_sql("ALTER TABLE test.sbtest1 ENGINE=INNODB;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ENGINE=INNODB;")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ENGINE=ROCKSDB;")
@@ -2419,7 +2436,7 @@ class BackupTestHelper:
         """Add and drop indexes on tables."""
         print("DDL: Add and drop index on test.sbtest1")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE INDEX kc ON test.sbtest1 (k,c);")
             self._run_sql("ALTER TABLE test.sbtest1 ADD INDEX kc2 (k,c);")
@@ -2429,7 +2446,7 @@ class BackupTestHelper:
             self._run_sql("DROP INDEX kc ON test.sbtest1;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("CREATE INDEX kc ON test_rocksdb.sbtest1 (k,c);")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ADD INDEX kc2 (k,c);")
@@ -2442,13 +2459,13 @@ class BackupTestHelper:
         """Rename indexes on tables."""
         print("DDL: Rename index on test.sbtest1")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 RENAME INDEX k_1 TO k_2, ALGORITHM=INPLACE, LOCK=NONE;")
             self._run_sql("ALTER TABLE test.sbtest1 RENAME INDEX k_2 TO k_1, ALGORITHM=INPLACE, LOCK=NONE;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 RENAME INDEX k_1 TO k_2, ALGORITHM=INPLACE, LOCK=NONE;")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 RENAME INDEX k_2 TO k_1, ALGORITHM=INPLACE, LOCK=NONE;")
@@ -2457,13 +2474,13 @@ class BackupTestHelper:
         """Add and drop full text index."""
         print("DDL: Add and drop full text index on test.sbtest1")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE FULLTEXT INDEX full_index ON test.sbtest1 (pad);")
             self._run_sql("DROP INDEX full_index ON test.sbtest1;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("CREATE FULLTEXT INDEX full_index ON test_rocksdb.sbtest1 (pad);")
                 self._run_sql("DROP INDEX full_index ON test_rocksdb.sbtest1;")
@@ -2472,13 +2489,13 @@ class BackupTestHelper:
         """Change index type between BTREE and HASH."""
         print("DDL: Change index type on test.sbtest1")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING BTREE, ALGORITHM=INSTANT;")
             self._run_sql("ALTER TABLE test.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING HASH, ALGORITHM=INSTANT;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING BTREE, ALGORITHM=INSTANT;")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING HASH, ALGORITHM=INSTANT;")
@@ -2488,14 +2505,14 @@ class BackupTestHelper:
         print("DDL: Spatial data and index on test.geom")
         a, b = 1, 2
         for _ in range(100):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql(f"INSERT INTO test.geom VALUES(POINT({a},{b}));")
             a += 1
             b += 1
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("CREATE SPATIAL INDEX spa_index ON test.geom (g), ALGORITHM=INPLACE, LOCK=SHARED;")
                 self._run_sql("DROP INDEX spa_index ON test.geom;")
@@ -2504,7 +2521,7 @@ class BackupTestHelper:
         """Add table to tablespace and drop both."""
         print("DDL: Add and drop tablespace")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd' Engine=InnoDB;")
             self._run_sql("CREATE TABLE test.sbtest1copy SELECT * FROM test.sbtest1;")
@@ -2513,7 +2530,7 @@ class BackupTestHelper:
             self._run_sql("DROP TABLESPACE ts1;")
         if self.rocksdb == "enabled":
             for i in range(1, 11):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql(f"CREATE TABLE test_rocksdb.sbrcopy{i} Engine=ROCKSDB SELECT * FROM test.sbtest1;")
                 self._run_sql(f"DROP TABLE test_rocksdb.sbrcopy{i};")
@@ -2522,14 +2539,14 @@ class BackupTestHelper:
         """Change compression of tables."""
         print("DDL: Change compression")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 COMPRESSION='lz4';")
             self._run_sql("ALTER TABLE test.sbtest1 COMPRESSION='zlib';")
             self._run_sql("ALTER TABLE test.sbtest1 COMPRESSION='';")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 COMMENT = 'cfname=cf1';")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 COMMENT = 'cfname=cf2';")
@@ -2540,7 +2557,7 @@ class BackupTestHelper:
         """Change row format of tables."""
         print("DDL: Change row format")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest2 ROW_FORMAT=COMPRESSED;")
             self._run_sql("ALTER TABLE test.sbtest2 ROW_FORMAT=DYNAMIC;")
@@ -2548,7 +2565,7 @@ class BackupTestHelper:
             self._run_sql("ALTER TABLE test.sbtest2 ROW_FORMAT=REDUNDANT;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest2 ROW_FORMAT=COMPRESSED;")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest2 ROW_FORMAT=DYNAMIC;")
@@ -2561,7 +2578,7 @@ class BackupTestHelper:
         self._run_sql("CREATE TABLE IF NOT EXISTS test.myrocks_t(id int(11) PRIMARY KEY AUTO_INCREMENT, k int(11), c char(120), pad char(60), KEY k_1(k), KEY kc(k,c)) ENGINE=ROCKSDB;")
         a, b, c = 1, 11, 101
         for _ in range(200):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql(f"START TRANSACTION; INSERT INTO test.innodb_t(k, c, pad) VALUES({a}, {b}, {c}); INSERT INTO test.myrocks_t(k, c, pad) VALUES({a}, {b}, {c}); COMMIT;")
             a += 1
@@ -2572,14 +2589,14 @@ class BackupTestHelper:
         """Update and truncate tables."""
         print("DDL: Update and truncate tables")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("UPDATE test.sbtest1 SET c='test_update_data';")
             self._run_sql("OPTIMIZE TABLE test.sbtest1;")
             self._run_sql("TRUNCATE test.sbtest1;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("UPDATE test_rocksdb.sbtest2 SET c='test_update_data';")
                 self._run_sql("OPTIMIZE TABLE test_rocksdb.sbtest2;")
@@ -2589,7 +2606,7 @@ class BackupTestHelper:
         """Create a database, add data, and drop it."""
         print("DDL: Create and drop database")
         for _ in range(3):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE DATABASE IF NOT EXISTS test1_innodb;")
             subprocess.run(
@@ -2605,7 +2622,7 @@ class BackupTestHelper:
             self._run_sql("DROP DATABASE test1_innodb;")
         if self.rocksdb == "enabled":
             for _ in range(3):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("CREATE DATABASE IF NOT EXISTS test1_rocksdb;")
                 subprocess.run(
@@ -2623,7 +2640,7 @@ class BackupTestHelper:
         print("DDL: Create and delete encrypted tables")
         self._run_sql("CREATE DATABASE IF NOT EXISTS test_innodb;")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE TABLE test_innodb.sbtest1 (id int(11) NOT NULL AUTO_INCREMENT, k int(11) NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k)) ENGINE=InnoDB DEFAULT CHARSET=latin1 ENCRYPTION='Y' COMPRESSION='lz4';")
             subprocess.run(
@@ -2638,7 +2655,7 @@ class BackupTestHelper:
         """Toggle encryption on a table."""
         print("DDL: Change encryption")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 ENCRYPTION='N';")
             self._run_sql("ALTER TABLE test.sbtest1 ENCRYPTION='Y';")
@@ -2647,7 +2664,7 @@ class BackupTestHelper:
         """Compress and uncompress a column."""
         print("DDL: Compressed column")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 MODIFY c VARCHAR(250) COLUMN_FORMAT COMPRESSED NOT NULL DEFAULT '';")
             self._run_sql("ALTER TABLE test.sbtest1 MODIFY c CHAR(120) COLUMN_FORMAT DEFAULT NOT NULL DEFAULT '';")
@@ -2659,7 +2676,7 @@ class BackupTestHelper:
             print("Compression dictionary not supported, skipping")
             return
         for i in range(1, self.num_tables + 1):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql(f"ALTER TABLE test.sbtest{i} MODIFY c VARCHAR(250) COLUMN_FORMAT COMPRESSED WITH COMPRESSION_DICTIONARY numbers NOT NULL DEFAULT '';")
             self._run_sql(f"ALTER TABLE test.sbtest{i} MODIFY c CHAR(120) COLUMN_FORMAT DEFAULT NOT NULL DEFAULT '';")
@@ -2678,17 +2695,17 @@ class BackupTestHelper:
             capture_output=True, check=False,
         )
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 COALESCE PARTITION 5;")
             self._run_sql("ALTER TABLE test.sbtest1 PARTITION BY HASH(id) PARTITIONS 10;")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest2 DROP PARTITION p2;")
             self._run_sql("ALTER TABLE test.sbtest2 ADD PARTITION (PARTITION p2 VALUES LESS THAN MAXVALUE);")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest3 REBUILD PARTITION p0, p1;")
             self._run_sql("ALTER TABLE test.sbtest3 OPTIMIZE PARTITION p2;")
@@ -2709,7 +2726,7 @@ class BackupTestHelper:
         """Create user, grant privileges, then drop."""
         print("DDL: Grant tables")
         for _ in range(50):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE USER 'bkpuser'@'localhost' IDENTIFIED BY 's3cret';")
             self._run_sql("GRANT RELOAD, LOCK TABLES, PROCESS, REPLICATION CLIENT ON *.* TO 'bkpuser'@'localhost'; FLUSH PRIVILEGES;")
@@ -2719,7 +2736,7 @@ class BackupTestHelper:
         """Add and drop invisible column."""
         print("DDL: Invisible column")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 ADD COLUMN invisible int DEFAULT 1 invisible first;")
             self._run_sql("UPDATE test.sbtest1 SET invisible = id;")
@@ -2729,7 +2746,7 @@ class BackupTestHelper:
         """Add and drop blob column."""
         print("DDL: Blob column")
         for _ in range(30):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 ADD COLUMN blob_col blob;")
             self._run_sql("UPDATE test.sbtest1 SET blob_col = c;")
@@ -2743,7 +2760,7 @@ class BackupTestHelper:
         print("DDL: Add/drop column instant")
         for table in ["sbtest1", "sbtest2", "sbtest3", "sbtest4", "sbtest5"]:
             for _ in range(20):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql(f"ALTER TABLE test.{table} ADD COLUMN b CHAR(50) NOT NULL DEFAULT '' AFTER k, ALGORITHM=INSTANT;")
                 self._run_sql(f"UPDATE test.{table} SET b = k;")
@@ -2762,7 +2779,7 @@ class BackupTestHelper:
         ]
         for table, add_algo, drop_algo in algos:
             for _ in range(20):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 add_clause = f", {add_algo}" if add_algo else ""
                 drop_clause = f", {drop_algo}" if drop_algo else ""

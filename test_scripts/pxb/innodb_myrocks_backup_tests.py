@@ -18,16 +18,39 @@ import pytest
 from test_helper import CORE_FILE_OPT, KMIP_CONFIGS, TEST_BASE_DIR, BackupTestHelper
 
 
+TEST_SEPARATOR = "#" * 83
+
+
 @pytest.fixture(scope="function")
 def test_helper(request):
     """Create a test helper instance for each test."""
     test_name = request.node.name if hasattr(request, "node") else None
-    helper = BackupTestHelper(test_name=test_name)
+    # The DDL tests in this script run against the sysbench tables
+    # (test.sbtest1..N), which initialize_db() only creates with sysbench, so
+    # default to sysbench here instead of the suite-wide pstress default.
+    helper = BackupTestHelper(test_name=test_name, load_tool=os.environ.get("LOAD_TOOL", "sysbench"))
     helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
     helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
-    yield helper
-    if os.environ.get("DISABLE_CLEANUP") != "1":
-        helper.cleanup()
+    # Like the bash script, verify every restore with per-table CHECK TABLE,
+    # COUNT(*) and CHECKSUM TABLE rather than pt-table-checksum.
+    helper.detailed_verify = True
+    # MyRocks is a Percona Server-only engine: on upstream MySQL (MS) skip
+    # RocksDB data creation/load and all RocksDB-specific checks, regardless
+    # of the ROCKSDB env setting.
+    if helper.server_type == "MS" and helper.rocksdb == "enabled":
+        print("RocksDB is unsupported in MS, disabling RocksDB for this test")
+        helper.rocksdb = "disabled"
+    print(f"\n{TEST_SEPARATOR}")
+    print(f"# Test: {test_name}")
+    print(TEST_SEPARATOR)
+    try:
+        yield helper
+        if os.environ.get("DISABLE_CLEANUP") != "1":
+            helper.cleanup()
+    finally:
+        # Mark the end of each test, like the bash script did between tests.
+        print(f"\n# End of test: {test_name}")
+        print(TEST_SEPARATOR)
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -69,19 +92,26 @@ def _run_load(test_helper, time_sec=20):
         test_helper.run_load("", time_sec=time_sec)
 
 
+def _verify_databases(test_helper):
+    """Databases take_backup() should verify: include test_rocksdb when RocksDB data is created.
+
+    Passing test_rocksdb also makes take_backup() use per-table COUNT/CHECKSUM
+    verification instead of pt-table-checksum, which aborts on RocksDB tables.
+    """
+    return ["test", "test_rocksdb"] if test_helper.rocksdb == "enabled" else ["test"]
+
+
 def _init_for_ddl(test_helper):
     """Common initialization for DDL tests."""
     test_helper.mysqld_options = _default_mysqld_options()
     test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
-    rocksdb_enabled = test_helper.rocksdb == "enabled"
-    test_helper.initialize_db(rocksdb=rocksdb_enabled)
+    test_helper.initialize_db(rocksdb=test_helper.rocksdb == "enabled")
 
     _run_load(test_helper)
 
-    databases = ["test", "test_rocksdb"] if rocksdb_enabled else ["test"]
-    return databases
+    return _verify_databases(test_helper)
 
 
 # ============================================================================
@@ -169,6 +199,8 @@ def test_change_row_format(test_helper):
 
 def test_copy_data_across_engine(test_helper):
     """Backup and Restore after cross engine table copy."""
+    if test_helper.server_type == "MS":
+        pytest.skip("RocksDB is unsupported in MS")
     if test_helper.rocksdb != "enabled":
         pytest.skip("RocksDB disabled")
     databases = _init_for_ddl(test_helper)
@@ -210,6 +242,8 @@ def test_copy_data_across_engine(test_helper):
 
 def test_add_data_across_engine(test_helper):
     """Backup and Restore when data is added in both engines simultaneously."""
+    if test_helper.server_type == "MS":
+        pytest.skip("RocksDB is unsupported in MS")
     if test_helper.rocksdb != "enabled":
         pytest.skip("RocksDB disabled")
     databases = _init_for_ddl(test_helper)
@@ -366,13 +400,13 @@ def test_streaming_backup(test_helper):
     test_helper.restore_params = ""
     test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
     _run_load(test_helper)
-    test_helper.take_backup(backup_type="stream", single_incremental=True)
+    test_helper.take_backup(backup_type="stream", single_incremental=True, databases=_verify_databases(test_helper))
 
     if test_helper.server_version_normalized < 80000:
         print("Test: Incremental Backup and Restore with streaming format as tar")
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         _run_load(test_helper)
-        test_helper.take_backup(backup_type="tar", single_incremental=True)
+        test_helper.take_backup(backup_type="tar", single_incremental=True, databases=_verify_databases(test_helper))
 
 
 def test_compress_stream_backup(test_helper):
@@ -388,7 +422,7 @@ def test_compress_stream_backup(test_helper):
         test_helper.backup_params = f"--compress={compress} --compress-threads=10 {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         _run_load(test_helper)
-        test_helper.take_backup(backup_type="stream", single_incremental=True)
+        test_helper.take_backup(backup_type="stream", single_incremental=True, databases=_verify_databases(test_helper))
 
 
 def test_encrypt_compress_stream_backup(test_helper):
@@ -408,7 +442,7 @@ def test_encrypt_compress_stream_backup(test_helper):
         )
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         _run_load(test_helper)
-        test_helper.take_backup(backup_type="stream", single_incremental=True)
+        test_helper.take_backup(backup_type="stream", single_incremental=True, databases=_verify_databases(test_helper))
 
 
 def test_compress_backup(test_helper):
@@ -433,7 +467,7 @@ def test_compress_backup(test_helper):
         test_helper.backup_params = f"{cfg} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.initialize_db(rocksdb=(test_helper.rocksdb == "enabled"))
         _run_load(test_helper)
-        test_helper.take_backup(single_incremental=True)
+        test_helper.take_backup(single_incremental=True, databases=_verify_databases(test_helper))
 
 
 # ============================================================================
@@ -823,14 +857,14 @@ def test_cloud_inc_backup(test_helper):
     _run_load(test_helper)
 
     print("Test: Cloud backup")
-    test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True)
+    test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True, databases=_verify_databases(test_helper))
 
     print("Test: Cloud backup with encryption")
     test_helper.backup_params = (
         f"--encrypt=AES256 --encrypt-key={test_helper.encrypt_key} --encrypt-threads=10 "
         f"--encrypt-chunk-size=128K {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     )
-    test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True)
+    test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True, databases=_verify_databases(test_helper))
 
     if test_helper.server_version_normalized >= 80000:
         for compress in ["lz4", "zstd"]:
@@ -840,7 +874,7 @@ def test_cloud_inc_backup(test_helper):
                 f"--encrypt-chunk-size=128K --compress={compress} --compress-threads=10 "
                 f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
             )
-            test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True)
+            test_helper.take_backup(backup_type="cloud", cloud_params=cloud_params, single_incremental=True, databases=_verify_databases(test_helper))
 
 
 def test_cloud_backup_md5_delete(test_helper):
@@ -972,6 +1006,19 @@ def test_cloud_backup_md5_delete(test_helper):
 # InnoDB params and redo archive tests
 # ============================================================================
 
+def _innodb_log_file_size_opt(test_helper, size: int) -> str:
+    """Return the xtrabackup ``--innodb-log-file-size`` option for *size*.
+
+    ``innodb_log_file_size`` was removed in MySQL 9.3 (replaced by
+    ``innodb_redo_log_capacity``), and PXB built on 9.3+ rejects it with
+    "unknown variable". The redo log size is taken from the server/backup
+    anyway, so the option is simply omitted there.
+    """
+    if test_helper.server_version_normalized >= 90300:
+        return ""
+    return f"--innodb-log-file-size={size}"
+
+
 def test_inc_backup_innodb_params(test_helper):
     """Backup and Restore with different InnoDB parameter values."""
     if test_helper.server_version_normalized < 80000:
@@ -980,14 +1027,17 @@ def test_inc_backup_innodb_params(test_helper):
     test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     test_helper.restore_params = ""
 
+    lfs_200m = _innodb_log_file_size_opt(test_helper, 209715200)
+    lfs_2g = _innodb_log_file_size_opt(test_helper, 2147483648)
+    lfs_8m = _innodb_log_file_size_opt(test_helper, 8388608)
     configs = [
-        {"mysqld": "--innodb-redo-log-capacity=209715200", "backup_extra": "--innodb-log-file-size=209715200",
-         "prepare_extra": f"--innodb-log-file-size=209715200 {CORE_FILE_OPT}"},
-        {"mysqld": "--innodb-redo-log-capacity=2147483648", "backup_extra": "--innodb-log-file-size=2147483648",
-         "prepare_extra": f"--innodb-log-file-size=2147483648 {CORE_FILE_OPT}"},
+        {"mysqld": "--innodb-redo-log-capacity=209715200", "backup_extra": lfs_200m,
+         "prepare_extra": f"{lfs_200m} {CORE_FILE_OPT}".strip()},
+        {"mysqld": "--innodb-redo-log-capacity=2147483648", "backup_extra": lfs_2g,
+         "prepare_extra": f"{lfs_2g} {CORE_FILE_OPT}".strip()},
         {"mysqld": "--innodb-redo-log-capacity=8388608 --innodb-buffer-pool-size=2G",
-         "backup_extra": "--innodb-log-file-size=8388608 --innodb-buffer-pool-size=2G",
-         "prepare_extra": f"--innodb-log-file-size=8388608 --innodb-buffer-pool-size=2G {CORE_FILE_OPT}"},
+         "backup_extra": f"{lfs_8m} --innodb-buffer-pool-size=2G".strip(),
+         "prepare_extra": f"{lfs_8m} --innodb-buffer-pool-size=2G {CORE_FILE_OPT}".strip()},
         {"mysqld": "--skip-log-bin", "backup_extra": "", "prepare_extra": f"{CORE_FILE_OPT}"},
     ]
 
@@ -996,9 +1046,9 @@ def test_inc_backup_innodb_params(test_helper):
         test_helper.mysqld_options = cfg["mysqld"]
         test_helper.backup_params = f"{cfg['backup_extra']} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}" if cfg["backup_extra"] else f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.prepare_params = cfg["prepare_extra"]
-        test_helper.initialize_db()
+        test_helper.initialize_db(rocksdb=test_helper.rocksdb == "enabled")
         _run_load(test_helper)
-        test_helper.take_backup(single_incremental=True)
+        test_helper.take_backup(single_incremental=True, databases=_verify_databases(test_helper))
 
 
 def test_inc_backup_archive_log(test_helper):
@@ -1017,19 +1067,19 @@ def test_inc_backup_archive_log(test_helper):
         f"--innodb-extend-and-initialize=OFF --innodb-log-writer-threads=OFF "
         f"--innodb-redo-log-archive-dirs=archive:{archive_dir}"
     )
-    test_helper.initialize_db()
+    test_helper.initialize_db(rocksdb=test_helper.rocksdb == "enabled")
     _run_load(test_helper)
-    test_helper.take_backup(single_incremental=True)
+    test_helper.take_backup(single_incremental=True, databases=_verify_databases(test_helper))
 
     test_helper.mysqld_options = (
         f"--innodb-redo-log-capacity=536870912 --binlog-transaction-compression=ON "
         f"--binlog-transaction-compression-level-zstd=22 --innodb-extend-and-initialize=OFF "
         f"--innodb-log-writer-threads=OFF --innodb-redo-log-archive-dirs=archive:{archive_dir}"
     )
-    test_helper.prepare_params = f"--innodb-log-file-size=536870912 {CORE_FILE_OPT}"
-    test_helper.initialize_db()
+    test_helper.prepare_params = f"{_innodb_log_file_size_opt(test_helper, 536870912)} {CORE_FILE_OPT}".strip()
+    test_helper.initialize_db(rocksdb=test_helper.rocksdb == "enabled")
     _run_load(test_helper)
-    test_helper.take_backup(single_incremental=True)
+    test_helper.take_backup(single_incremental=True, databases=_verify_databases(test_helper))
 
 
 # ============================================================================
@@ -1266,17 +1316,21 @@ def test_decompress_largest_file_first(test_helper):
         "--backup", f"--target-dir={full_target}",
         f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}",
     ] + test_helper.backup_params.split()
+    print("=>Taking compressed full backup")
     result = test_helper.run_command(xb_cmd, check=False, log_file=backup_log)
     if result.returncode != 0:
         pytest.fail(f"ERR: Compressed backup failed. Log: {backup_log}")
+    print(f"..Compressed full backup was successfully created at: {full_target}.\n  Logs available at: {backup_log}")
 
     decompress_log = os.path.join(test_helper.logdir, f"adv_decompress_{log_date}_log")
     cmd = test_helper._xtrabackup_cmd_prefix() + [
         "--no-defaults", "--decompress", f"--target-dir={full_target}", f"--parallel={PARALLEL_DEGREE}",
     ]
+    print(f"=>Decompressing backup with --parallel={PARALLEL_DEGREE}")
     result = test_helper.run_command(cmd, check=False, log_file=decompress_log)
     if result.returncode != 0:
         pytest.fail(f"ERR: Decompress failed. Log: {decompress_log}")
+    print(f"..Decompress of backup was successful.\n  Logs available at: {decompress_log}")
 
     rank, total, largest, size = _dispatch_rank_of_largest(
         full_target, decompress_log, r"decompressing ", PARALLEL_ORDER_INNODB_SCOPE
@@ -1287,6 +1341,7 @@ def test_decompress_largest_file_first(test_helper):
         f"('{largest}', {size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
         f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {decompress_log}"
     )
+    print(f"Largest file '{largest}' ({size} bytes) was decompressed first, rank {rank}/{total}: Pass")
 
 
 def test_copy_back_largest_file_first(test_helper):
@@ -1330,9 +1385,11 @@ def test_copy_back_largest_file_first(test_helper):
         "--backup", f"--target-dir={full_target}",
         f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}",
     ] + test_helper.backup_params.split()
+    print("=>Taking full backup")
     result = test_helper.run_command(xb_cmd, check=False, log_file=backup_log)
     if result.returncode != 0:
         pytest.fail(f"ERR: Backup failed. Log: {backup_log}")
+    print(f"..Full backup was successfully created at: {full_target}.\n  Logs available at: {backup_log}")
 
     test_helper.prepare_full_backup(test_helper.prepare_params, log_date)
 
@@ -1346,9 +1403,11 @@ def test_copy_back_largest_file_first(test_helper):
         "--no-defaults", "--copy-back", f"--target-dir={full_target}",
         f"--datadir={restore_dir}", f"--parallel={PARALLEL_DEGREE}",
     ] + test_helper.restore_params.split()
+    print(f"=>Copy-back of full backup with --parallel={PARALLEL_DEGREE} to {restore_dir}")
     result = test_helper.run_command(cmd, check=False, log_file=copyback_log)
     if result.returncode != 0:
         pytest.fail(f"ERR: Copy-back failed. Log: {copyback_log}")
+    print(f"..Copy-back of full backup was successful.\n  Logs available at: {copyback_log}")
 
     rank, total, largest, size = _dispatch_rank_of_largest(full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_INNODB_SCOPE)
     assert rank is not None, f"largest in-scope file '{largest}' never appeared in the copy-back dispatch log: {copyback_log}"
@@ -1357,6 +1416,7 @@ def test_copy_back_largest_file_first(test_helper):
         f"('{largest}', {size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
         f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {copyback_log}"
     )
+    print(f"Largest InnoDB file '{largest}' ({size} bytes) was copied back first, rank {rank}/{total}: Pass")
 
     if rocksdb_enabled:
         rdb_rank, rdb_total, rdb_largest, rdb_size = _dispatch_rank_of_largest(
@@ -1368,6 +1428,8 @@ def test_copy_back_largest_file_first(test_helper):
             f"('{rdb_largest}', {rdb_size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
             f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {copyback_log}"
         )
+        print(f"Largest RocksDB file '{rdb_largest}' ({rdb_size} bytes) was copied back first, "
+              f"rank {rdb_rank}/{rdb_total}: Pass")
 
     # Functional guard: reordering the queue must not skip, duplicate, or
     # corrupt any file.
@@ -1387,6 +1449,9 @@ def test_copy_back_largest_file_first(test_helper):
         assert os.path.isdir(restored_rocksdb) and os.listdir(restored_rocksdb), (
             f".rocksdb missing or empty in restored datadir: {restored_rocksdb}"
         )
+    print(f"All {NUM_SMALL_TABLES + 1} InnoDB data files"
+          f"{' and the .rocksdb directory' if rocksdb_enabled else ''} "
+          "are present in the restored datadir with matching sizes: Pass")
 
 
 # ============================================================================
@@ -1431,7 +1496,7 @@ if __name__ == "__main__":
         print("   export XTRABACKUP_DIR=$HOME/percona-xtrabackup-8.0/bin")
         print("   export MYSQLDIR=$HOME/Percona-Server-8.0")
         print("   export QASCRIPTS=$HOME/server-qa")
-        print("   export LOAD_TOOL=sysbench")
+        print("   export LOAD_TOOL=sysbench  # default: sysbench")
         print("   export ROCKSDB=enabled  # or disabled")
         print("   # Cloud (S3) backup test variables (required for test_cloud_inc_backup):")
         print("   export S3_BUCKET=<your-bucket>")

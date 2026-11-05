@@ -152,10 +152,11 @@ def _prepare_restore_backup(
     """Port of bash ``prepare_restore_backup``.
 
     Steps (matches the bash script):
-      1. Prepare the full backup (with ``--apply-log-only`` when ``backup_type``
+      1. Prepare the full backup (with ``--apply-redo-only``/``--apply-log-only`` when ``backup_type``
          is ``incremental``, plain ``--prepare`` otherwise).
       2. If ``backup_type == 'incremental'``: also prepare with
-         ``--incremental-dir=<backup_dir>/inc1`` against the full backup.
+         ``--prepare-incremental-from-dir``/``--incremental-dir=<backup_dir>/inc1``
+         against the full backup.
       3. Capture row counts before stopping the server.
       4. Stop the primary, move ``datadir`` to a sibling ``data_orig_<ts>``.
       5. ``xtrabackup --copy-back`` the prepared full backup into ``datadir``.
@@ -168,7 +169,7 @@ def _prepare_restore_backup(
     """
     # --- Step 1 / 2: prepare ------------------------------------------------
     if backup_type == "incremental":
-        helper.prepare_full_backup(prepare_params + " --apply-log-only", log_date)
+        helper.prepare_full_backup(f"{prepare_params} {helper.xb_opt('apply-log-only')}", log_date)
 
         print("=>Preparing incremental backup")
         full_target = os.path.join(helper.backup_dir, "full")
@@ -180,7 +181,7 @@ def _prepare_restore_backup(
             "--password=",
             "--prepare",
             f"--target-dir={full_target}",
-            f"--incremental-dir={inc_target}",
+            f"{helper.xb_opt('incremental-dir')}={inc_target}",
         ] + helper._prepare_args_for_pxb_version(prepare_params)
         log_file = os.path.join(helper.logdir, f"prepare_inc_backup_{log_date}_log")
         result = helper.run_command(cmd, check=False, log_file=log_file)

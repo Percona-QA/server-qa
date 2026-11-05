@@ -307,8 +307,8 @@ This is a Python rewrite of `innodb_myrocks_backup_tests.sh`.
 In addition to the [common prerequisites](#common-prerequisites), set:
 
 ```bash
-export LOAD_TOOL=sysbench
-export ROCKSDB=enabled          # or "disabled" (default: disabled)
+export LOAD_TOOL=sysbench        # default for this script: sysbench (the DDL tests need the sysbench tables)
+export ROCKSDB=enabled          # or "disabled" (default: enabled; always disabled on MS)
 # Cloud (S3) backup test variables (required for test_cloud_inc_backup):
 export S3_BUCKET=<your-bucket>
 export S3_ACCESS_KEY=<your-access-key-id>
@@ -513,8 +513,8 @@ pytest innodb_myrocks_backup_tests.py --collect-only -q
 | `test_add_drop_tablespace` | Non-param | Backup during concurrent add/drop tablespace |
 | `test_change_compression` | Non-param | Backup during concurrent compression changes |
 | `test_change_row_format` | Non-param | Backup during concurrent row format changes |
-| `test_copy_data_across_engine` | Non-param | Cross-engine table copy (InnoDB to RocksDB); skipped if `ROCKSDB=disabled` |
-| `test_add_data_across_engine` | Non-param | Concurrent data insert into InnoDB and RocksDB tables; skipped if `ROCKSDB=disabled` |
+| `test_copy_data_across_engine` | Non-param | Cross-engine table copy (InnoDB to RocksDB); skipped if `ROCKSDB=disabled` or on MS |
+| `test_add_data_across_engine` | Non-param | Concurrent data insert into InnoDB and RocksDB tables; skipped if `ROCKSDB=disabled` or on MS |
 | `test_update_truncate_table` | Non-param | Backup during concurrent update/truncate |
 | `test_create_drop_database` | Non-param | Backup during concurrent create/drop database |
 | `test_partitioned_tables` | Non-param | Backup during concurrent partition operations |
@@ -721,7 +721,7 @@ export QASCRIPTS=$HOME/server-qa
 Optional:
 
 ```bash
-export ROCKSDB=enabled    # default: disabled. When enabled, also creates and loads the
+export ROCKSDB=enabled    # default: enabled. When enabled, also creates and loads the
                           # test_rocksdb database (only valid on PS 8.0+)
 ```
 

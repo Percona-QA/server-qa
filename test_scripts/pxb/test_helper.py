@@ -10,12 +10,22 @@ import time
 import shutil
 import re
 import signal
+import sys
 import glob
 import threading
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict
 import psutil
 import pytest
+
+# Print test progress as it happens. When stdout is not a terminal (piped to
+# tee, redirected to a file, or run from Jenkins) Python buffers it in blocks,
+# and with -s the output then only appears when pytest prints the test result.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
 
 # Import KMIP helper
 try:

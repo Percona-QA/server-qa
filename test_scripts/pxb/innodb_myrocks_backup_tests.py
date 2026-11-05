@@ -1046,9 +1046,9 @@ def test_inc_backup_innodb_params(test_helper):
         test_helper.mysqld_options = cfg["mysqld"]
         test_helper.backup_params = f"{cfg['backup_extra']} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}" if cfg["backup_extra"] else f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
         test_helper.prepare_params = cfg["prepare_extra"]
-        test_helper.initialize_db()
+        test_helper.initialize_db(rocksdb=test_helper.rocksdb == "enabled")
         _run_load(test_helper)
-        test_helper.take_backup(single_incremental=True)
+        test_helper.take_backup(single_incremental=True, databases=_verify_databases(test_helper))
 
 
 def test_inc_backup_archive_log(test_helper):
@@ -1067,9 +1067,9 @@ def test_inc_backup_archive_log(test_helper):
         f"--innodb-extend-and-initialize=OFF --innodb-log-writer-threads=OFF "
         f"--innodb-redo-log-archive-dirs=archive:{archive_dir}"
     )
-    test_helper.initialize_db()
+    test_helper.initialize_db(rocksdb=test_helper.rocksdb == "enabled")
     _run_load(test_helper)
-    test_helper.take_backup(single_incremental=True)
+    test_helper.take_backup(single_incremental=True, databases=_verify_databases(test_helper))
 
     test_helper.mysqld_options = (
         f"--innodb-redo-log-capacity=536870912 --binlog-transaction-compression=ON "
@@ -1077,9 +1077,9 @@ def test_inc_backup_archive_log(test_helper):
         f"--innodb-log-writer-threads=OFF --innodb-redo-log-archive-dirs=archive:{archive_dir}"
     )
     test_helper.prepare_params = f"{_innodb_log_file_size_opt(test_helper, 536870912)} {CORE_FILE_OPT}".strip()
-    test_helper.initialize_db()
+    test_helper.initialize_db(rocksdb=test_helper.rocksdb == "enabled")
     _run_load(test_helper)
-    test_helper.take_backup(single_incremental=True)
+    test_helper.take_backup(single_incremental=True, databases=_verify_databases(test_helper))
 
 
 # ============================================================================

@@ -31,6 +31,9 @@ def test_helper(request):
     helper = BackupTestHelper(test_name=test_name, load_tool=os.environ.get("LOAD_TOOL", "sysbench"))
     helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
     helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
+    # Like the bash script, verify every restore with per-table CHECK TABLE,
+    # COUNT(*) and CHECKSUM TABLE rather than pt-table-checksum.
+    helper.detailed_verify = True
     # MyRocks is a Percona Server-only engine: on upstream MySQL (MS) skip
     # RocksDB data creation/load and all RocksDB-specific checks, regardless
     # of the ROCKSDB env setting.

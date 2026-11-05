@@ -483,6 +483,9 @@ class BackupTestHelper:
         self.server_version_normalized: Optional[int] = None
         self.xtrabackup_version: Optional[str] = None
         self.xtrabackup_version_normalized: Optional[int] = None
+        # Always verify restores with per-table COUNT(*)/CHECKSUM TABLE
+        # (verify_data_integrity) instead of pt-table-checksum.
+        self.detailed_verify: bool = False
         # xtrabackup_dir -> whether that binary has the PXB-3758/PXB-3840 option names
         self._xb_renamed_options_cache: Dict[str, bool] = {}
         self.pstress_binary: Optional[str] = None
@@ -1615,7 +1618,8 @@ class BackupTestHelper:
         # (it needs binlog_format=STATEMENT), so use per-table verification
         # then, as well as when the tool is not installed.
         use_detailed_verify = (
-            "test_rocksdb" in databases
+            self.detailed_verify
+            or "test_rocksdb" in databases
             or not shutil.which("pt-table-checksum")
             or self._server_has_rocksdb_tables()
         )
@@ -1963,15 +1967,20 @@ class BackupTestHelper:
         Row count/checksum differences from ``orig_data`` are printed as ERR
         but do not fail the test (same as the bash script).
         """
-        check_failures: List[str] = []
-        mismatches: List[str] = []
-        print(f"Check the table status in databases: {' '.join(databases)}")
-        for db in databases:
-            result = subprocess.run(
-                [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
-                 f"SHOW TABLES FROM {db};"],
+        mysql_bin = os.path.join(self.mysqldir, "bin/mysql")
+        db_list = " ".join(databases)
+
+        def query(sql: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [mysql_bin, "-uroot", f"-S{self.socket_path}", "-BNe", sql],
                 capture_output=True, text=True, check=False,
             )
+
+        # --- Table status (CHECK TABLE) ---
+        check_failures: List[str] = []
+        print(f"Check the table status in databases: {db_list}")
+        for db in databases:
+            result = query(f"SHOW TABLES FROM {db};")
             if result.returncode != 0:
                 status = result.stderr.strip() or result.stdout.strip()
                 print(f"ERR: Could not list tables in {db}: {status}")
@@ -1988,40 +1997,11 @@ class BackupTestHelper:
                     check_failures.append(f"{db}.{table}: missing after restore")
 
             for table in tables:
-                check_result = subprocess.run(
-                    [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
-                     f"CHECK TABLE {db}.{table}"],
-                    capture_output=True, text=True, check=False,
-                )
+                check_result = query(f"CHECK TABLE {db}.{table}")
                 if check_result.returncode != 0 or "OK" not in check_result.stdout:
                     status = check_result.stdout.strip() or check_result.stderr.strip()
                     print(f"ERR: CHECK TABLE {db}.{table} failed: {status}")
                     check_failures.append(f"{db}.{table}: {status}")
-
-                if compare_data and orig_data and db in orig_data and table in orig_data[db]:
-                    orig_count, orig_cksum = orig_data[db][table]
-                    count_result = subprocess.run(
-                        [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
-                         f"SELECT COUNT(*) FROM {db}.{table}"],
-                        capture_output=True, text=True, check=False,
-                    )
-                    new_count = count_result.stdout.strip() if count_result.returncode == 0 else "ERR"
-                    if new_count != orig_count:
-                        msg = f"Row count mismatch for {db}.{table}: before={orig_count}, after={new_count}"
-                        print(f"ERR: {msg}")
-                        mismatches.append(msg)
-
-                    cksum_result = subprocess.run(
-                        [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
-                         f"CHECKSUM TABLE {db}.{table}"],
-                        capture_output=True, text=True, check=False,
-                    )
-                    cksum_parts = cksum_result.stdout.strip().split() if cksum_result.returncode == 0 else []
-                    new_cksum = cksum_parts[1] if len(cksum_parts) >= 2 else "ERR"
-                    if new_cksum != orig_cksum:
-                        msg = f"Checksum mismatch for {db}.{table}: before={orig_cksum}, after={new_cksum}"
-                        print(f"ERR: {msg}")
-                        mismatches.append(msg)
 
         ping_result = subprocess.run(
             [os.path.join(self.mysqldir, "bin/mysqladmin"), "ping", "--user=root", f"--socket={self.socket_path}"],
@@ -2037,14 +2017,42 @@ class BackupTestHelper:
             )
         print("All table status: OK")
 
-        # Like the bash script, a row count/checksum mismatch is reported as
-        # ERR but does not fail the test.
-        if compare_data and orig_data:
-            db_list = " ".join(databases)
-            if not any(m.startswith("Row count") for m in mismatches):
-                print(f"Match record count of tables in databases {db_list} with original data: Pass")
-            if not any(m.startswith("Checksum") for m in mismatches):
-                print(f"Match checksum of all tables in databases {db_list} with original data: Pass")
+        if not (compare_data and orig_data):
+            return
+
+        # Like the bash script, a record count/checksum mismatch is reported
+        # as ERR but does not fail the test. Every table in orig_data exists
+        # at this point (missing ones failed above).
+        compared = [(db, table) for db in databases for table in sorted(orig_data.get(db, {}))]
+
+        # --- Record count of each table ---
+        print(f"Check the record count of tables in databases: {db_list}")
+        rc_err = False
+        for db, table in compared:
+            orig_count = orig_data[db][table][0]
+            count_result = query(f"SELECT COUNT(*) FROM {db}.{table}")
+            new_count = count_result.stdout.strip() if count_result.returncode == 0 else "ERR"
+            if new_count != orig_count:
+                print(f"ERR: The record count of {db}.{table} changed after restore. "
+                      f"Record count in original data: {orig_count}. Record count in restored data: {new_count}.")
+                rc_err = True
+        if not rc_err:
+            print(f"Match record count of tables in databases {db_list} with original data: Pass")
+
+        # --- Checksum of each table ---
+        print(f"Check the checksum of each table in databases: {db_list}")
+        checksum_err = False
+        for db, table in compared:
+            orig_cksum = orig_data[db][table][1]
+            cksum_result = query(f"CHECKSUM TABLE {db}.{table}")
+            cksum_parts = cksum_result.stdout.strip().split() if cksum_result.returncode == 0 else []
+            new_cksum = cksum_parts[1] if len(cksum_parts) >= 2 else "ERR"
+            if new_cksum != orig_cksum:
+                print(f"ERR: The checksum of {db}.{table} changed after restore. "
+                      f"Checksum in original data: {orig_cksum}. Checksum in restored data: {new_cksum}.")
+                checksum_err = True
+        if not checksum_err:
+            print(f"Match checksum of all tables in databases {db_list} with original data: Pass")
 
     def stop_vault_server(self) -> None:
         """Kill any running HashiCorp Vault server process."""

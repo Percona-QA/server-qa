@@ -1677,7 +1677,11 @@ class BackupTestHelper:
         if not binlog_applied:
             print("Binlog applying skipped, ignore differences between actual data and restored data")
         if use_detailed_verify:
-            self.verify_data_integrity(databases, orig_data, compare_data=binlog_applied)
+            self.verify_data_integrity(
+                databases, orig_data, compare_data=binlog_applied,
+                # sysbench oltp_insert only inserts, so ids must have no gaps.
+                check_id_gaps=self.detailed_verify and self.load_tool == "sysbench",
+            )
         else:
             # CHECK TABLE on every table (and server alive check), like the
             # bash script, before the pt-table-checksum comparison.
@@ -1947,7 +1951,11 @@ class BackupTestHelper:
         return data
 
     def verify_data_integrity(
-        self, databases: List[str], orig_data: Optional[Dict] = None, compare_data: bool = True
+        self,
+        databases: List[str],
+        orig_data: Optional[Dict] = None,
+        compare_data: bool = True,
+        check_id_gaps: bool = False,
     ):
         """Per-table CHECK TABLE, plus record count and checksum comparison with ``orig_data``.
 
@@ -1958,6 +1966,10 @@ class BackupTestHelper:
                 False when the binlog could not be replayed onto the restored
                 data, since differences are then expected, or to run only the
                 table checks (as take_backup() does before pt-table-checksum).
+            check_id_gaps: also check that the ``id`` column of each sysbench
+                table (``sbtestN``) runs 1..N without gaps. Only valid for
+                insert-only sysbench data; a gap is printed as ERR but does
+                not fail the test (same as the bash script).
 
         Fails the test if the server went down, if a database cannot be
         listed, if any table does not pass ``CHECK TABLE``, or (when
@@ -1978,6 +1990,7 @@ class BackupTestHelper:
 
         # --- Table status (CHECK TABLE) ---
         check_failures: List[str] = []
+        sbtest_tables: List[Tuple[str, str]] = []
         print(f"Check the table status in databases: {db_list}")
         for db in databases:
             result = query(f"SHOW TABLES FROM {db};")
@@ -1987,6 +2000,7 @@ class BackupTestHelper:
                 check_failures.append(f"{db}: could not list tables: {status}")
                 continue
             tables = [t.strip() for t in result.stdout.strip().split("\n") if t.strip()]
+            sbtest_tables += [(db, t) for t in tables if re.fullmatch(r"sbtest\d+", t)]
 
             # Every table recorded before restore must still exist. Without a
             # binlog replay, tables created after the backup are expected to
@@ -2017,8 +2031,15 @@ class BackupTestHelper:
             )
         print("All table status: OK")
 
-        if not (compare_data and orig_data):
-            return
+        if compare_data and orig_data:
+            self._compare_with_orig_data(databases, orig_data, query)
+
+        if check_id_gaps:
+            self._check_id_gaps(sbtest_tables, query)
+
+    def _compare_with_orig_data(self, databases: List[str], orig_data: Dict, query) -> None:
+        """Compare record count and checksum of every table in ``orig_data`` (bash order and messages)."""
+        db_list = " ".join(databases)
 
         # Like the bash script, a record count/checksum mismatch is reported
         # as ERR but does not fail the test. Every table in orig_data exists
@@ -2053,6 +2074,42 @@ class BackupTestHelper:
                 checksum_err = True
         if not checksum_err:
             print(f"Match checksum of all tables in databases {db_list} with original data: Pass")
+
+    @staticmethod
+    def _check_id_gaps(tables: List[Tuple[str, str]], query) -> None:
+        """Check that ``id`` in each (db, sbtestN) table runs 1..COUNT(*) without gaps.
+
+        Port of the bash gap check. Reports the first gap per table as ERR
+        and does not fail the test.
+        """
+        print("Check for gaps in primary sequence id of tables")
+        gap_found = False
+        for db, table in tables:
+            r = query(f"SELECT COUNT(*), COALESCE(MIN(id), 0), COALESCE(MAX(id), 0) FROM {db}.{table}")
+            parts = r.stdout.split() if r.returncode == 0 else []
+            if len(parts) != 3 or not all(p.isdigit() for p in parts):
+                print(f"ERR: Could not read id range of {db}.{table}: {r.stderr.strip() or r.stdout.strip()}")
+                gap_found = True
+                continue
+            count, min_id, max_id = (int(p) for p in parts)
+            if count == 0 or (min_id == 1 and max_id == count):
+                continue
+            if min_id != 1:
+                expected, actual = 1, min_id
+            else:
+                # First id whose successor is missing; the gap starts right after it.
+                r = query(
+                    f"SELECT MIN(t1.id) + 1 FROM {db}.{table} t1 LEFT JOIN {db}.{table} t2 "
+                    f"ON t2.id = t1.id + 1 WHERE t2.id IS NULL AND t1.id < {max_id}"
+                )
+                expected = r.stdout.strip()
+                r = query(f"SELECT MIN(id) FROM {db}.{table} WHERE id > {expected or 0}")
+                actual = r.stdout.strip()
+            print(f"ERR: Gap found in {db}.{table}. Expected sequence number for ID is: {expected}. "
+                  f"Actual sequence number for ID is: {actual}.")
+            gap_found = True
+        if not gap_found:
+            print("No gaps found in primary sequence id of tables: Pass")
 
     def stop_vault_server(self) -> None:
         """Kill any running HashiCorp Vault server process."""

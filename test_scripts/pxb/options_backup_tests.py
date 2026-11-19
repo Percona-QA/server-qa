@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-xtrabackup option tests: renamed options, deprecated options and --history
-written to another server.
+xtrabackup option tests: renamed options, deprecated options, --history
+written to another server and --use-free-memory-pct buffer pool sizing.
 
 Ported from the PXB dev suite (storage/innobase/xtrabackup/test):
   - PXB-3758  t/apply_redo_only_alias.sh       -> test_apply_redo_only_alias
   - PXB-3840  t/incremental_option_aliases.sh  -> test_incremental_option_aliases
   - PXB-3788  t/deprecated_options.sh          -> test_deprecated_options_warn
   - PXB-2559  t/history_dsn.sh                 -> test_history_on_other_server
+  - PXB-3889  t/use_free_memory_pct_sizing.sh  -> test_use_free_memory_pct_sizing
 
 Assumption: PS/MS and PXB are already installed (tarball or build tree).
 """
@@ -382,3 +383,161 @@ def test_history_on_other_server(test_helper):
     )
     assert rc != 0, f"--history-ssl-mode=DISABLED was ignored by the history connection. Log: {log_file}"
     assert history_count() == "2", "a history record was written with TLS disabled for a REQUIRE SSL account"
+
+
+# ============================================================================
+# PXB-3889: --prepare --use-free-memory-pct must never size the buffer pool
+# from an unusable free memory read
+# ============================================================================
+
+# PXB-3889 reached 8.4 in 8.4.0-8 but 9.7 only in 9.7.2-3.
+FIXED_IN_PXB_3889 = {"8.4": "8.4.0-8", "9.7": "9.7.2-3"}
+
+# The estimate written into the backup: 2G for redo parsing plus 100 pages,
+# which --prepare rounds up to 17 chunks of 128M.
+ESTIMATE_REDO_MEMORY = 2147483648
+ESTIMATE_REDO_FRAMES = 100
+ESTIMATE_REQUIRED = 2281701376
+# --use-memory default, used when the free memory read is rejected.
+USE_MEMORY_DEFAULT = 104857600
+# Total memory the simulated cases report (16G), so they do not depend on the host.
+SIMULATED_TOTAL = 17179869184
+
+
+def _set_memory_estimate(backup_dir: str) -> None:
+    """Make --prepare ask for ESTIMATE_REQUIRED bytes, whatever the backup estimated."""
+    path = os.path.join(backup_dir, "xtrabackup_checkpoints")
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    for key, value in (("redo_memory", ESTIMATE_REDO_MEMORY), ("redo_frames", ESTIMATE_REDO_FRAMES)):
+        text, found = re.subn(rf"^{key} = .*$", f"{key} = {value}", text, flags=re.MULTILINE)
+        assert found == 1, f"{key} is not in {path}; cannot set the memory estimate"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def _buffer_pool_sizes(out: str) -> list:
+    """Every size from 'Setting buffer pool to: N' lines, negatives included."""
+    return [int(n) for n in re.findall(r"Setting buffer pool to: (-?\d+)", out)]
+
+
+def _buffer_pool_size(out: str) -> Optional[int]:
+    """The buffer pool size --prepare chose, or None if it logged no size or
+    different ones (some builds log the sizing step more than once)."""
+    sizes = set(_buffer_pool_sizes(out))
+    return sizes.pop() if len(sizes) == 1 else None
+
+
+def _is_debug_build(test_helper) -> bool:
+    """True for a debug xtrabackup (the dev suite checks --help for --debug[=name] the same way)."""
+    _, out, _ = _xtrabackup(test_helper, ["--help"], "help")
+    return "--debug[=name]" in out
+
+
+def test_use_free_memory_pct_sizing(test_helper, monkeypatch):
+    """PXB-3889: --prepare --use-free-memory-pct reads the real free and total
+    memory of the host (libproc2 builds read 0 before the fix, sized the buffer
+    pool at -128M and crashed) and never turns a read of 0, below one chunk or
+    not below the total memory into a negative or wrapped size: it falls back
+    to --use-memory with a warning, and that prepare still restores.
+
+    Every build checks the real read. Debug builds also simulate the bad reads
+    with --debug=d,xb_simulate_free_memory (ported from the dev test
+    t/use_free_memory_pct_sizing.sh).
+    """
+    test_helper.require_pxb_fix("PXB-3889", FIXED_IN_PXB_3889)
+    test_helper.initialize_db()
+    _create_table(test_helper, 1, 100)
+
+    raw = os.path.join(test_helper.backup_dir, "raw")
+    _backup(test_helper, raw, "backup", ["--estimate-memory=ON"])
+    _set_memory_estimate(raw)
+
+    copies = iter(range(1, 100))
+
+    def prepare_copy(pct: int, target: Optional[str] = None, extra: Optional[list] = None) -> str:
+        """Prepare a fresh copy of the backup with --use-free-memory-pct=pct; return the output."""
+        n = next(copies)
+        target = target or os.path.join(test_helper.backup_dir, f"prep_{n}")
+        if os.path.exists(target):
+            shutil.rmtree(target)
+        shutil.copytree(raw, target, symlinks=True)
+        out = _prepare(test_helper, target, f"prepare_{n}", [f"--use-free-memory-pct={pct}", *(extra or [])])
+        assert all(size > 0 for size in _buffer_pool_sizes(out)), (
+            f"prepare {n} set a buffer pool size that is not above 0: {_buffer_pool_sizes(out)}"
+        )
+        return out
+
+    def expect_fallback(out: str, reason: str) -> None:
+        assert reason in out, f"missing the reason for ignoring --use-free-memory-pct: '{reason}'"
+        assert f"Using --use-memory={USE_MEMORY_DEFAULT} bytes for the buffer pool." in out, (
+            "a rejected free memory read did not fall back to --use-memory"
+        )
+        assert _buffer_pool_size(out) == USE_MEMORY_DEFAULT, (
+            f"expected the --use-memory size {USE_MEMORY_DEFAULT}, got {_buffer_pool_sizes(out)}"
+        )
+        assert f"Using {USE_MEMORY_DEFAULT} bytes for buffer pool (set by --use-memory parameter)" in out
+
+    print("Test: the real free and total memory of the host are read as non-zero (the PXB-3889 bug)")
+    out = prepare_copy(10)
+    read = re.search(r"Free memory of this host: (\d+) bytes\. Total memory: (\d+) bytes\.", out)
+    assert read, "--prepare did not log the free and total memory it read"
+    free, total = int(read.group(1)), int(read.group(2))
+    print(f"..xtrabackup read free {free} bytes, total {total} bytes")
+    assert free > 0, "the free memory of the host was read as 0"
+    assert total > 0, "the total memory of the host was read as 0"
+    assert free < total, f"free memory {free} is not below total memory {total}"
+    size = _buffer_pool_size(out)
+    assert size is not None and 0 < size <= ESTIMATE_REQUIRED, (
+        f"buffer pool sizes {_buffer_pool_sizes(out)} are not one size within (0, {ESTIMATE_REQUIRED}]"
+    )
+    if "Ignoring --use-free-memory-pct" not in out:
+        # Accepted read: the size comes from the free memory and fits in 10% of it.
+        assert size <= free // 10, f"buffer pool {size} exceeds 10% of the free memory {free}"
+        assert f"Using {size} bytes for buffer pool (set by --use-free-memory-pct parameter)" in out
+
+    if not _is_debug_build(test_helper):
+        print("..release build: skipping the simulated reads (they need --debug=d,xb_simulate_free_memory)")
+        return
+
+    def prepare_with_free(free_bytes: int, pct: int, total_bytes: int = SIMULATED_TOTAL,
+                          target: Optional[str] = None) -> str:
+        monkeypatch.setenv("XB_DEBUG_FREE_MEMORY", str(free_bytes))
+        monkeypatch.setenv("XB_DEBUG_TOTAL_MEMORY", str(total_bytes))
+        out = prepare_copy(pct, target, ["--debug=d,xb_simulate_free_memory"])
+        assert f"Free memory of this host: {free_bytes} bytes" in out, "xb_simulate_free_memory did not set the free memory"
+        return out
+
+    print("Test: a free memory read of 0 falls back to --use-memory (the old code crashed)")
+    expect_fallback(prepare_with_free(0, 50), "the free memory was read as 0")
+
+    print("Test: a total memory read of 0 falls back to --use-memory")
+    expect_fallback(prepare_with_free(8589934592, 50, 0), "the total memory was read as 0")
+
+    print("Test: free memory below one buffer pool chunk falls back to --use-memory (the old code wrapped to -128M)")
+    expect_fallback(prepare_with_free(1048576, 50), "the free memory is below one buffer pool chunk")
+
+    print("Test: rounding keeps whole chunks that fit in the free memory (300M at 100% -> 256M)")
+    out = prepare_with_free(314572800, 100)
+    assert _buffer_pool_size(out) == 268435456, f"expected 268435456, got {_buffer_pool_sizes(out)}"
+    assert "Using 268435456 bytes for buffer pool (set by --use-free-memory-pct parameter)" in out
+
+    print("Test: enough free memory gives the estimated size")
+    out = prepare_with_free(8589934592, 50)
+    assert "Required memory will exceed" not in out
+    assert _buffer_pool_size(out) == ESTIMATE_REQUIRED, f"expected {ESTIMATE_REQUIRED}, got {_buffer_pool_sizes(out)}"
+    assert f"Using {ESTIMATE_REQUIRED} bytes for buffer pool (set by --use-free-memory-pct parameter)" in out
+
+    print("Test: free memory not below the total memory is not a valid read (the old code logged 0)")
+    for free_bytes in (9223372036854775808, SIMULATED_TOTAL):
+        expect_fallback(prepare_with_free(free_bytes, 50), "the free memory is not below the total memory")
+
+    print("Test: a backup prepared with the --use-memory fallback restores every row")
+    expected = _value(test_helper.primary, "CHECKSUM TABLE test.t1")
+    expect_fallback(prepare_with_free(0, 50, target=os.path.join(test_helper.backup_dir, "full")),
+                    "the free memory was read as 0")
+    restored = test_helper.create_replica(name="restored", server_id=2, port=RESTORE_PORT)
+    test_helper.restore_backup_to(restored.datadir, "", "free_memory_fallback")
+    restored.start()
+    assert _value(restored, "SELECT COUNT(*) FROM test.t1") == "100", "restored backup is missing rows"
+    assert _value(restored, "CHECKSUM TABLE test.t1") == expected, "restored backup checksum differs"

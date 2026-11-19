@@ -566,7 +566,7 @@ pytest innodb_myrocks_backup_tests.py --collect-only -q
 
 ## options_backup_tests.py — xtrabackup option tests
 
-Tests for renamed and deprecated xtrabackup options and for `--history` written to another server, ported from the PXB dev suite (`storage/innobase/xtrabackup/test`). Each test is skipped unless the PXB build has the fix: PXB >= 8.4.0-8 on the 8.4 line, >= 9.7.2-2 on the 9.7 line. The common prerequisites above apply; no load tool, cloud or keyring setup is needed.
+Tests for renamed and deprecated xtrabackup options, for `--history` written to another server and for `--prepare --use-free-memory-pct` buffer pool sizing, ported from the PXB dev suite (`storage/innobase/xtrabackup/test`). Each test is skipped unless the PXB build has the fix: PXB >= 8.4.0-8 on the 8.4 line; on the 9.7 line >= 9.7.2-2, except `test_use_free_memory_pct_sizing` (PXB-3889), which needs >= 9.7.2-3. The common prerequisites above apply; no load tool, cloud or keyring setup is needed.
 
 <a id="how-to-run-tests-options"></a>
 ### How to run tests
@@ -577,7 +577,7 @@ pytest options_backup_tests.py -v                                  # all tests
 pytest options_backup_tests.py -k test_history_on_other_server -v  # one test
 ```
 
-`test_incremental_option_aliases` and `test_history_on_other_server` start a second server on `MYSQL_PORT + 51` / `MYSQL_PORT + 50` (`MYSQL_PORT` defaults to 21000).
+`test_incremental_option_aliases`, `test_history_on_other_server` and `test_use_free_memory_pct_sizing` (debug builds) start a second server on `MYSQL_PORT + 51` / `MYSQL_PORT + 50` (`MYSQL_PORT` defaults to 21000).
 
 ### Test reference — options_backup_tests.py
 
@@ -587,6 +587,7 @@ pytest options_backup_tests.py -k test_history_on_other_server -v  # one test
 | `test_incremental_option_aliases` | PXB-3840 | A full + 2 incremental chain using `--backup-incremental-base` / `--prepare-incremental-from-dir` and the old `--incremental-basedir` / `--incremental-dir` restores every row; only old names warn, once each; an old name with its new one is rejected on `--backup` and `--prepare` |
 | `test_deprecated_options_warn` | PXB-3788 | `--log`, `--innodb`, `--create-ib-logfile`, `--rebuild_threads` (and `--no-version-check` where built) are accepted and warn once each, saying why; `--rsync` (when `rsync` is installed) warns it is going away, not that it has no effect; a run without them stays quiet |
 | `test_history_on_other_server` | PXB-2559 | `--history-host/port/user/password` writes the record to a second server, not the one backed up; an incremental reads its base LSN from there; bad history credentials stop the backup before it starts; `--check-privileges` reports a missing INSERT on the history server; `--history-ssl-mode` applies to the history connection |
+| `test_use_free_memory_pct_sizing` | PXB-3889 | `--prepare --use-free-memory-pct` on a backup taken with `--estimate-memory=ON` reads the real free and total memory of the host as non-zero and sizes the buffer pool above 0, within the estimate and 10% of free memory (before the fix, builds linked to libproc2 — distro packages, source builds — read 0, set -128M and crashed). Debug builds also simulate bad reads with `--debug=d,xb_simulate_free_memory`: free or total memory of 0, below one chunk, or not below total memory fall back to `--use-memory` with a warning; 300M at 100% rounds down to 256M; enough memory gives the estimate; the fallback prepare restores every row. Release builds run only the real read |
 
 ---
 

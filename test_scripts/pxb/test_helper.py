@@ -1323,9 +1323,15 @@ class BackupTestHelper:
                 pass
         return False
 
-    def _cloud_log(self, step: str, tag: str, log_date: str) -> str:
-        """Log path for one cloud step, named like the bash script (e.g. ``upload_full_backup_<ts>_log``)."""
-        return os.path.join(self.logdir, f"{step}_{tag}_backup_{log_date}_log")
+    @staticmethod
+    def _cloud_log(step: str, backup_log: str) -> str:
+        """Log path for one cloud step of the backup logged in ``backup_log``.
+
+        Prefixes the step to the backup log's file name, which gives the bash
+        script's names: ``full_backup_<ts>_log`` -> ``upload_full_backup_<ts>_log``,
+        ``download_full_backup_<ts>_log``, ``download_stream_...``, ``delete_...``.
+        """
+        return os.path.join(os.path.dirname(backup_log), f"{step}_{os.path.basename(backup_log)}")
 
     def _cloud_upload(
         self, xb_cmd: List[str], cloud_params: str, name: str, label: str, backup_log: str, upload_log: str
@@ -1345,10 +1351,10 @@ class BackupTestHelper:
             put.wait()
             xb.wait()
         if xb.returncode != 0:
-            pytest.fail(f"ERR: {label.capitalize()} failed. Please check the log at: {backup_log}")
+            pytest.fail(f"ERR: {label[:1].upper() + label[1:]} failed. Please check the log at: {backup_log}")
         if put.returncode != 0:
             pytest.fail(f"ERR: Upload of {label} failed. Please check the log at: {upload_log}")
-        print(f"..{label.capitalize()} was successfully created and uploaded to the cloud as {name}.\n"
+        print(f"..{label[:1].upper() + label[1:]} was successfully created and uploaded to the cloud as {name}.\n"
               f"  Logs available at: {backup_log} and {upload_log}")
 
     def _cloud_download(
@@ -1367,20 +1373,29 @@ class BackupTestHelper:
             get.wait()
         if get.returncode != 0 or xbs.returncode != 0:
             pytest.fail(f"ERR: Download of {label} failed. Please check the log at: {download_log} and {stream_log}")
-        print(f"..{label.capitalize()} was successfully downloaded at: {target_dir}\n"
+        print(f"..{label[:1].upper() + label[1:]} was successfully downloaded at: {target_dir}\n"
               f"  Logs available at: {download_log} and {stream_log}")
 
-    def _cloud_delete(self, cloud_params: str, name: str, label: str, delete_log: str) -> None:
-        """Delete ``name`` from the cloud. Like the bash script, a failure is reported as ERR only."""
+    def _cloud_delete(
+        self, cloud_params: str, name: str, label: str, delete_log: str, fail_on_error: bool = False
+    ) -> None:
+        """Delete ``name`` from the cloud.
+
+        Like the bash script, a failure is reported as ERR only, unless
+        ``fail_on_error`` (for tests where the delete is what is tested).
+        """
         print(f"=>Deleting {label}")
         xbcloud = os.path.join(self.xtrabackup_dir, "xbcloud")
         with open(delete_log, "w") as log:
             result = subprocess.run([xbcloud, "delete"] + cloud_params.split() + [name],
                                     stdout=log, stderr=log, check=False)
         if result.returncode != 0:
-            print(f"ERR: Delete of {label} failed. Please check the log at: {delete_log}")
+            msg = f"ERR: Delete of {label} failed. Please check the log at: {delete_log}"
+            if fail_on_error:
+                pytest.fail(msg)
+            print(msg)
         else:
-            print(f"..{label.capitalize()} was successfully deleted from the cloud.\n  Logs available at: {delete_log}")
+            print(f"..{label[:1].upper() + label[1:]} was successfully deleted from the cloud.\n  Logs available at: {delete_log}")
 
     def take_backup(
         self,
@@ -1439,15 +1454,15 @@ class BackupTestHelper:
             if backup_type == "cloud":
                 full_cloud_name = cloud_name or f"full_{log_date}"
                 self._cloud_upload(xb_cmd, cloud_params, full_cloud_name, "full backup", full_log,
-                                   self._cloud_log("upload", "full", log_date))
+                                   self._cloud_log("upload", full_log))
                 if upload_only:
                     return
                 self._cloud_download(cloud_params, full_cloud_name, full_target, "full backup",
-                                     self._cloud_log("download", "full", log_date),
-                                     self._cloud_log("download_stream", "full", log_date))
+                                     self._cloud_log("download", full_log),
+                                     self._cloud_log("download_stream", full_log))
                 self._decrypt_decompress(full_target, self.backup_params)
                 self._cloud_delete(cloud_params, full_cloud_name, "full backup",
-                                   self._cloud_log("delete", "full", log_date))
+                                   self._cloud_log("delete", full_log))
             else:
                 stream_file = os.path.join(full_target, "full_backup.xbstream")
                 with open(stream_file, "wb") as sf, open(full_log, "w") as lf:
@@ -1507,13 +1522,13 @@ class BackupTestHelper:
                     inc_cloud_name = f"inc1_{log_date}"
                     print("=>Taking incremental backup: 1 and uploading it")
                     self._cloud_upload(xb_cmd, cloud_params, inc_cloud_name, "incremental backup 1", log_file,
-                                       self._cloud_log("upload", "inc1", log_date))
+                                       self._cloud_log("upload", log_file))
                     self._cloud_download(cloud_params, inc_cloud_name, inc_target, "incremental backup 1",
-                                         self._cloud_log("download", "inc1", log_date),
-                                         self._cloud_log("download_stream", "inc1", log_date))
+                                         self._cloud_log("download", log_file),
+                                         self._cloud_log("download_stream", log_file))
                     self._decrypt_decompress(inc_target, self.backup_params)
                     self._cloud_delete(cloud_params, inc_cloud_name, "incremental backup 1",
-                                       self._cloud_log("delete", "inc1", log_date))
+                                       self._cloud_log("delete", log_file))
                 else:
                     stream_file = os.path.join(inc_target, "inc_backup.xbstream")
                     with open(stream_file, "wb") as sf, open(log_file, "w") as lf:
@@ -1579,13 +1594,13 @@ class BackupTestHelper:
                         inc_cloud_name = f"inc{inc_num}_{log_date}"
                         label = f"incremental backup {inc_num}"
                         self._cloud_upload(xb_cmd, cloud_params, inc_cloud_name, label, log_file,
-                                           self._cloud_log("upload", f"inc{inc_num}", log_date))
+                                           self._cloud_log("upload", log_file))
                         self._cloud_download(cloud_params, inc_cloud_name, inc_target, label,
-                                             self._cloud_log("download", f"inc{inc_num}", log_date),
-                                             self._cloud_log("download_stream", f"inc{inc_num}", log_date))
+                                             self._cloud_log("download", log_file),
+                                             self._cloud_log("download_stream", log_file))
                         self._decrypt_decompress(inc_target, self.backup_params)
                         self._cloud_delete(cloud_params, inc_cloud_name, label,
-                                           self._cloud_log("delete", f"inc{inc_num}", log_date))
+                                           self._cloud_log("delete", log_file))
                     else:
                         stream_file = os.path.join(inc_target, "inc_backup.xbstream")
                         with open(stream_file, "wb") as sf, open(log_file, "w") as lf:

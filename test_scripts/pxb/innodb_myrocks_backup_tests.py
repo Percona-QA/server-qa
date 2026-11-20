@@ -919,25 +919,27 @@ def test_cloud_backup_md5_delete(test_helper):
     # --- Part 1: 'xbcloud delete' must remove the .md5 sidecar too --------
     print("Test: 'xbcloud delete' must remove the .md5 object created by 'put --md5'")
     delete_backup_name = f"md5_delete_check_{log_date}"
-    delete_log = os.path.join(test_helper.logdir, f"cloud_md5_delete_{log_date}_log")
+    delete_backup_log = os.path.join(test_helper.logdir, f"full_backup_{delete_backup_name}_log")
     test_helper.take_backup(
         backup_type="cloud",
         cloud_params=md5_cloud_params,
         cloud_name=delete_backup_name,
         upload_only=True,
-        log_file=delete_log,
+        log_file=delete_backup_log,
     )
 
     objects_before = test_helper.s3_list_objects(prefix=delete_backup_name)
-    assert any(k.endswith(".md5") for k in objects_before), (
+    md5_before = [k for k in objects_before if k.endswith(".md5")]
+    assert md5_before, (
         f"Expected 'xbcloud put --md5' to create a .md5 object for '{delete_backup_name}'; "
         f"found none among: {objects_before}"
     )
+    print(f".md5 object found after upload: {', '.join(md5_before)}: Pass")
 
-    del_cmd = f"{os.path.join(test_helper.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {delete_backup_name} 2>>{delete_log}"
-    result = subprocess.run(del_cmd, shell=True, check=False)
-    if result.returncode != 0:
-        pytest.fail(f"ERR: xbcloud delete failed for '{delete_backup_name}'. Log: {delete_log}")
+    test_helper._cloud_delete(
+        cloud_params, delete_backup_name, f"backup {delete_backup_name}",
+        test_helper._cloud_log("delete", delete_backup_log), fail_on_error=True,
+    )
 
     leftover = test_helper.s3_list_objects(prefix=delete_backup_name)
     assert not leftover, (
@@ -945,17 +947,18 @@ def test_cloud_backup_md5_delete(test_helper):
         "xbcloud delete is not removing the .md5 sidecar object created by 'put --md5' "
         "(reproduces on PXB 8.4.0-6 and earlier; fixed in PXB 8.4.0-7)."
     )
+    print(f"No objects left for {delete_backup_name} after xbcloud delete: Pass")
 
     # --- Part 2: removing the .md5 object must not affect get/restore -----
     print("Test: removing the .md5 object does not affect xbcloud get/restore")
     restore_backup_name = f"md5_restore_check_{log_date}"
-    restore_log = os.path.join(test_helper.logdir, f"cloud_md5_restore_{log_date}_log")
+    restore_backup_log = os.path.join(test_helper.logdir, f"full_backup_{restore_backup_name}_log")
     test_helper.take_backup(
         backup_type="cloud",
         cloud_params=md5_cloud_params,
         cloud_name=restore_backup_name,
         upload_only=True,
-        log_file=restore_log,
+        log_file=restore_backup_log,
     )
 
     md5_objects = [k for k in test_helper.s3_list_objects(prefix=restore_backup_name) if k.endswith(".md5")]
@@ -964,22 +967,24 @@ def test_cloud_backup_md5_delete(test_helper):
         test_helper.s3_delete_object(key)
     remaining_md5 = [k for k in test_helper.s3_list_objects(prefix=restore_backup_name) if k.endswith(".md5")]
     assert not remaining_md5, f"Failed to remove .md5 object(s) before the download check: {remaining_md5}"
+    print(f"Removed .md5 object(s) from cloud storage: {', '.join(md5_objects)}")
 
     full_target = os.path.join(test_helper.backup_dir, "full")
     if os.path.exists(full_target):
         shutil.rmtree(full_target)
     os.makedirs(full_target, exist_ok=True)
-    get_cmd = (
-        f"{os.path.join(test_helper.xtrabackup_dir, 'xbcloud')} get {cloud_params} {restore_backup_name} 2>>{restore_log} | "
-        f"{os.path.join(test_helper.xtrabackup_dir, 'xbstream')} -xvC {full_target} 2>>{restore_log}"
+    test_helper._cloud_download(
+        cloud_params, restore_backup_name, full_target, f"backup {restore_backup_name}",
+        test_helper._cloud_log("download", restore_backup_log),
+        test_helper._cloud_log("download_stream", restore_backup_log),
     )
-    result = subprocess.run(get_cmd, shell=True, check=False)
-    if result.returncode != 0:
-        pytest.fail(f"ERR: xbcloud get failed after removing .md5 object(s). Log: {restore_log}")
+    print(f"Download of {restore_backup_name} without the .md5 object: Pass")
     test_helper._decrypt_decompress(full_target, test_helper.backup_params)
 
-    del_cmd = f"{os.path.join(test_helper.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {restore_backup_name} 2>>{restore_log}"
-    subprocess.run(del_cmd, shell=True, check=False)
+    test_helper._cloud_delete(
+        cloud_params, restore_backup_name, f"backup {restore_backup_name}",
+        test_helper._cloud_log("delete", restore_backup_log),
+    )
 
     test_helper.prepare_full_backup(test_helper.prepare_params, log_date)
 

@@ -5,6 +5,8 @@ Rewrite of innodb_myrocks_backup_tests.sh.
 Assumption: PS and PXB are already installed as tarballs.
 """
 
+from __future__ import annotations
+
 import os
 import re
 import shutil
@@ -12,7 +14,6 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Optional
 
 import pytest
 from test_helper import (
@@ -274,7 +275,7 @@ def test_add_data_across_engine(test_helper):
     if innodb_val != myrocks_val:
         print(f"ERR: Row count mismatch. innodb_t: {innodb_val}, myrocks_t: {myrocks_val}")
     else:
-        print(f"Row count of both tables innodb_t and myrocks_t is same after restore: Pass")
+        print("Row count of both tables innodb_t and myrocks_t is same after restore: Pass")
 
     innodb_cksum = test_helper.run_mysql_query(
         "CHECKSUM TABLE test.innodb_t;", capture=True
@@ -287,7 +288,7 @@ def test_add_data_across_engine(test_helper):
     if innodb_ckval != myrocks_ckval:
         print(f"ERR: Checksum mismatch. innodb_t: {innodb_ckval}, myrocks_t: {myrocks_ckval}")
     else:
-        print(f"Checksum of both tables innodb_t and myrocks_t is same after restore: Pass")
+        print("Checksum of both tables innodb_t and myrocks_t is same after restore: Pass")
 
 
 def test_update_truncate_table(test_helper):
@@ -1312,7 +1313,7 @@ COMPRESSED_SUFFIXES = (".zst", ".lz4", ".qp")
 
 
 def _sysbench_prepare(
-    test_helper, database: str, tables: int, table_size: int, log_name: str, storage_engine: Optional[str] = None
+    test_helper, database: str, tables: int, table_size: int, log_name: str, storage_engine: str | None = None
 ) -> None:
     """Create and populate sbtest1..sbtestN via sysbench 'prepare'."""
     log_path = os.path.join(test_helper.logdir, log_name)
@@ -1399,7 +1400,7 @@ def _assert_largest_first(order: list, minimum: int, what: str, log_path: str) -
 
 
 def _first_dispatched_vs_largest(
-    target_dir: str, log_path: str, dispatch_pattern: str, scope_pattern: "re.Pattern", count: int
+    target_dir: str, log_path: str, dispatch_pattern: str, scope_pattern: re.Pattern, count: int
 ) -> tuple:
     """Compare the first `count` in-scope files dispatched to a worker thread
     (per log lines matching both dispatch_pattern and scope_pattern) with the
@@ -1753,7 +1754,7 @@ if __name__ == "__main__":
         print("   Innodb_params_redo_archive_tests")
         print("   SSL_tests")
         print("   Parallel_processing_order_tests")
-        print("")
+        print()
         print("3. Logs are available at:", TEST_BASE_DIR, "(test-specific directories)")
         sys.exit(1)
 

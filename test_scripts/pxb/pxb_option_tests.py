@@ -13,10 +13,11 @@ Ported from the PXB dev suite (storage/innobase/xtrabackup/test):
 Assumption: PS/MS and PXB are already installed (tarball or build tree).
 """
 
+from __future__ import annotations
+
 import os
 import re
 import shutil
-from typing import Optional
 
 import pytest
 from test_helper import CORE_FILE_OPT, MYSQL_PORT, BackupTestHelper
@@ -62,7 +63,7 @@ def _backup_args(test_helper, target_dir: str) -> list:
     return test_helper.backup_cmd_args(target_dir)
 
 
-def _backup(test_helper, target_dir: str, log_name: str, extra: Optional[list] = None) -> str:
+def _backup(test_helper, target_dir: str, log_name: str, extra: list | None = None) -> str:
     """Take a backup that must succeed; return its output."""
     _rc, out, _log = test_helper.run_xtrabackup(
         test_helper.backup_cmd_args(target_dir) + (extra or []), log_name, check=True
@@ -70,7 +71,7 @@ def _backup(test_helper, target_dir: str, log_name: str, extra: Optional[list] =
     return out
 
 
-def _prepare(test_helper, target_dir: str, log_name: str, extra: Optional[list] = None) -> str:
+def _prepare(test_helper, target_dir: str, log_name: str, extra: list | None = None) -> str:
     """Prepare a backup that must succeed; return its output."""
     args = ["--prepare", f"--target-dir={target_dir}", *CORE_FILE_OPT.split()] + (extra or [])
     _rc, out, _log = test_helper.run_xtrabackup(args, log_name, check=True)
@@ -411,7 +412,7 @@ def _buffer_pool_sizes(out: str) -> list:
     return [int(n) for n in re.findall(r"Setting buffer pool to: (-?\d+)", out)]
 
 
-def _buffer_pool_size(out: str) -> Optional[int]:
+def _buffer_pool_size(out: str) -> int | None:
     """The buffer pool size --prepare chose, or None if it logged no size or
     different ones (some builds log the sizing step more than once)."""
     sizes = set(_buffer_pool_sizes(out))
@@ -445,7 +446,7 @@ def test_use_free_memory_pct_sizing(test_helper, monkeypatch):
 
     copies = iter(range(1, 100))
 
-    def prepare_copy(pct: int, target: Optional[str] = None, extra: Optional[list] = None) -> str:
+    def prepare_copy(pct: int, target: str | None = None, extra: list | None = None) -> str:
         """Prepare a fresh copy of the backup with --use-free-memory-pct=pct; return the output."""
         n = next(copies)
         target = target or os.path.join(test_helper.backup_dir, f"prep_{n}")
@@ -491,7 +492,7 @@ def test_use_free_memory_pct_sizing(test_helper, monkeypatch):
         return
 
     def prepare_with_free(free_bytes: int, pct: int, total_bytes: int = SIMULATED_TOTAL,
-                          target: Optional[str] = None) -> str:
+                          target: str | None = None) -> str:
         monkeypatch.setenv("XB_DEBUG_FREE_MEMORY", str(free_bytes))
         monkeypatch.setenv("XB_DEBUG_TOTAL_MEMORY", str(total_bytes))
         out = prepare_copy(pct, target, ["--debug=d,xb_simulate_free_memory"])

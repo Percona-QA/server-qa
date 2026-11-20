@@ -1,6 +1,6 @@
 # The CI fleet's oldest confirmed Python is Oracle/RHEL 9's system python3
-# (3.9). Without this, ruff assumes the newest Python and suggests syntax
-# (e.g. `X | None` unions, UP045) that raises TypeError at import time on
-# any host running an older interpreter -- this repo has no
-# `from __future__ import annotations` to defer evaluation.
+# (3.9). Keep target-version at py39 so ruff does not assume newer syntax.
+# Files that use modern typing should include
+# `from __future__ import annotations` so PEP 585/604 forms stay import-safe
+# on 3.9 (annotations are deferred and not evaluated at runtime).
 target-version = "py39"

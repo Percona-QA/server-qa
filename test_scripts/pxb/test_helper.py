@@ -1323,19 +1323,89 @@ class BackupTestHelper:
                 pass
         return False
 
-    def _upload_streamed_backup(
-        self, xb_cmd: list[str], cloud_params: str, name: str, log_file: str
-    ) -> int:
-        """Pipe an xtrabackup xbstream into ``xbcloud put`` for ``name``.
+    @staticmethod
+    def _cloud_log(step: str, backup_log: str) -> str:
+        """Log path for one cloud step of the backup logged in ``backup_log``.
 
-        Shared by ``take_backup``'s cloud branches and by ``upload_only``
-        callers. Returns the pipeline exit code; the caller reports failure.
+        Prefixes the step to the backup log's file name, which gives the bash
+        script's names: ``full_backup_<ts>_log`` -> ``upload_full_backup_<ts>_log``,
+        ``download_full_backup_<ts>_log``, ``download_stream_...``, ``delete_...``.
         """
-        pipe_cmd = (
-            f"{' '.join(xb_cmd)} 2>{log_file} | "
-            f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} put {cloud_params} {name} 2>>{log_file}"
-        )
-        return subprocess.run(pipe_cmd, shell=True, check=False).returncode
+        return os.path.join(os.path.dirname(backup_log), f"{step}_{os.path.basename(backup_log)}")
+
+    def _cloud_upload(
+        self, xb_cmd: List[str], cloud_params: str, name: str, label: str, backup_log: str, upload_log: str
+    ) -> None:
+        """Stream an xtrabackup backup into ``xbcloud put`` as ``name``.
+
+        xtrabackup writes to ``backup_log`` and ``xbcloud put`` to
+        ``upload_log``. Both exit codes are checked: in a pipe, a failed
+        xtrabackup can otherwise hide behind a successful ``xbcloud put``.
+        """
+        xbcloud = os.path.join(self.xtrabackup_dir, "xbcloud")
+        with open(backup_log, "w") as blog, open(upload_log, "w") as ulog:
+            xb = subprocess.Popen(xb_cmd, stdout=subprocess.PIPE, stderr=blog)
+            put = subprocess.Popen([xbcloud, "put"] + cloud_params.split() + [name],
+                                   stdin=xb.stdout, stdout=ulog, stderr=ulog)
+            xb.stdout.close()
+            put.wait()
+            xb.wait()
+        # Report both sides: when xbcloud put fails first, xtrabackup then
+        # fails on the closed pipe, and its log alone would hide the cause.
+        failed = []
+        if xb.returncode != 0:
+            failed.append(f"xtrabackup exit code {xb.returncode}, log: {backup_log}")
+        if put.returncode != 0:
+            failed.append(f"xbcloud put exit code {put.returncode}, log: {upload_log}")
+        if failed:
+            pytest.fail(f"ERR: Backup and upload of {label} failed:\n  " + "\n  ".join(failed))
+        print(f"..{label[:1].upper() + label[1:]} was successfully created and uploaded to the cloud as {name}.\n"
+              f"  Logs available at: {backup_log} and {upload_log}")
+
+    def _cloud_download(
+        self, cloud_params: str, name: str, target_dir: str, label: str, download_log: str, stream_log: str
+    ) -> None:
+        """Download ``name`` with ``xbcloud get`` and extract it into ``target_dir`` with ``xbstream -x``."""
+        print(f"=>Downloading {label}")
+        xbcloud = os.path.join(self.xtrabackup_dir, "xbcloud")
+        xbstream = os.path.join(self.xtrabackup_dir, "xbstream")
+        with open(download_log, "w") as dlog, open(stream_log, "w") as slog:
+            get = subprocess.Popen([xbcloud, "get"] + cloud_params.split() + [name],
+                                   stdout=subprocess.PIPE, stderr=dlog)
+            xbs = subprocess.Popen([xbstream, "-xv", "-C", target_dir], stdin=get.stdout, stdout=slog, stderr=slog)
+            get.stdout.close()
+            xbs.wait()
+            get.wait()
+        failed = []
+        if get.returncode != 0:
+            failed.append(f"xbcloud get exit code {get.returncode}, log: {download_log}")
+        if xbs.returncode != 0:
+            failed.append(f"xbstream exit code {xbs.returncode}, log: {stream_log}")
+        if failed:
+            pytest.fail(f"ERR: Download of {label} failed:\n  " + "\n  ".join(failed))
+        print(f"..{label[:1].upper() + label[1:]} was successfully downloaded at: {target_dir}\n"
+              f"  Logs available at: {download_log} and {stream_log}")
+
+    def _cloud_delete(
+        self, cloud_params: str, name: str, label: str, delete_log: str, fail_on_error: bool = False
+    ) -> None:
+        """Delete ``name`` from the cloud.
+
+        Like the bash script, a failure is reported as ERR only, unless
+        ``fail_on_error`` (for tests where the delete is what is tested).
+        """
+        print(f"=>Deleting {label}")
+        xbcloud = os.path.join(self.xtrabackup_dir, "xbcloud")
+        with open(delete_log, "w") as log:
+            result = subprocess.run([xbcloud, "delete"] + cloud_params.split() + [name],
+                                    stdout=log, stderr=log, check=False)
+        if result.returncode != 0:
+            msg = f"ERR: Delete of {label} failed. Please check the log at: {delete_log}"
+            if fail_on_error:
+                pytest.fail(msg)
+            print(msg)
+        else:
+            print(f"..{label[:1].upper() + label[1:]} was successfully deleted from the cloud.\n  Logs available at: {delete_log}")
 
     def take_backup(
         self,
@@ -1379,7 +1449,7 @@ class BackupTestHelper:
         log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # --- Full backup ---
-        print("=>Taking full backup")
+        print("=>Taking full backup and uploading it" if backup_type == "cloud" else "=>Taking full backup")
         full_target = os.path.join(self.backup_dir, "full")
         if backup_type in ("stream", "cloud"):
             os.makedirs(full_target, exist_ok=True)
@@ -1393,17 +1463,16 @@ class BackupTestHelper:
             full_log = log_file or os.path.join(self.logdir, f"full_backup_{log_date}_log")
             if backup_type == "cloud":
                 full_cloud_name = cloud_name or f"full_{log_date}"
-                if self._upload_streamed_backup(xb_cmd, cloud_params, full_cloud_name, full_log) != 0:
-                    pytest.fail(f"ERR: Full cloud backup failed. Please check the log at: {full_log}")
+                self._cloud_upload(xb_cmd, cloud_params, full_cloud_name, "full backup", full_log,
+                                   self._cloud_log("upload", full_log))
                 if upload_only:
                     return
-                get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {full_cloud_name} 2>>{full_log} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {full_target} 2>>{full_log}"
-                result = subprocess.run(get_cmd, shell=True, check=False)
-                if result.returncode != 0:
-                    pytest.fail(f"ERR: Full cloud backup download failed. Please check the log at: {full_log}")
+                self._cloud_download(cloud_params, full_cloud_name, full_target, "full backup",
+                                     self._cloud_log("download", full_log),
+                                     self._cloud_log("download_stream", full_log))
                 self._decrypt_decompress(full_target, self.backup_params)
-                del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {full_cloud_name} 2>>{full_log}"
-                subprocess.run(del_cmd, shell=True, check=False)
+                self._cloud_delete(cloud_params, full_cloud_name, "full backup",
+                                   self._cloud_log("delete", full_log))
             else:
                 stream_file = os.path.join(full_target, "full_backup.xbstream")
                 with open(stream_file, "wb") as sf, open(full_log, "w") as lf:
@@ -1461,15 +1530,15 @@ class BackupTestHelper:
                 log_file = os.path.join(self.logdir, f"inc1_backup_{log_date}_log")
                 if backup_type == "cloud":
                     inc_cloud_name = f"inc1_{log_date}"
-                    if self._upload_streamed_backup(xb_cmd, cloud_params, inc_cloud_name, log_file) != 0:
-                        pytest.fail(f"ERR: Incremental cloud backup failed. Please check the log at: {log_file}")
-                    get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {inc_cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {inc_target} 2>>{log_file}"
-                    result = subprocess.run(get_cmd, shell=True, check=False)
-                    if result.returncode != 0:
-                        pytest.fail(f"ERR: Inc cloud backup download failed. Please check the log at: {log_file}")
+                    print("=>Taking incremental backup: 1 and uploading it")
+                    self._cloud_upload(xb_cmd, cloud_params, inc_cloud_name, "incremental backup 1", log_file,
+                                       self._cloud_log("upload", log_file))
+                    self._cloud_download(cloud_params, inc_cloud_name, inc_target, "incremental backup 1",
+                                         self._cloud_log("download", log_file),
+                                         self._cloud_log("download_stream", log_file))
                     self._decrypt_decompress(inc_target, self.backup_params)
-                    del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {inc_cloud_name} 2>>{log_file}"
-                    subprocess.run(del_cmd, shell=True, check=False)
+                    self._cloud_delete(cloud_params, inc_cloud_name, "incremental backup 1",
+                                       self._cloud_log("delete", log_file))
                 else:
                     stream_file = os.path.join(inc_target, "inc_backup.xbstream")
                     with open(stream_file, "wb") as sf, open(log_file, "w") as lf:
@@ -1533,15 +1602,15 @@ class BackupTestHelper:
                     log_file = os.path.join(self.logdir, f"inc{inc_num}_backup_{log_date}_log")
                     if backup_type == "cloud":
                         inc_cloud_name = f"inc{inc_num}_{log_date}"
-                        if self._upload_streamed_backup(xb_cmd, cloud_params, inc_cloud_name, log_file) != 0:
-                            pytest.fail(f"ERR: Inc{inc_num} cloud backup failed. Log: {log_file}")
-                        get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {inc_cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {inc_target} 2>>{log_file}"
-                        result = subprocess.run(get_cmd, shell=True, check=False)
-                        if result.returncode != 0:
-                            pytest.fail(f"ERR: Inc{inc_num} cloud download failed. Log: {log_file}")
+                        label = f"incremental backup {inc_num}"
+                        self._cloud_upload(xb_cmd, cloud_params, inc_cloud_name, label, log_file,
+                                           self._cloud_log("upload", log_file))
+                        self._cloud_download(cloud_params, inc_cloud_name, inc_target, label,
+                                             self._cloud_log("download", log_file),
+                                             self._cloud_log("download_stream", log_file))
                         self._decrypt_decompress(inc_target, self.backup_params)
-                        del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {inc_cloud_name} 2>>{log_file}"
-                        subprocess.run(del_cmd, shell=True, check=False)
+                        self._cloud_delete(cloud_params, inc_cloud_name, label,
+                                           self._cloud_log("delete", log_file))
                     else:
                         stream_file = os.path.join(inc_target, "inc_backup.xbstream")
                         with open(stream_file, "wb") as sf, open(log_file, "w") as lf:

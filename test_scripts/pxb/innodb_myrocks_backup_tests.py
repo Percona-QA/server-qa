@@ -959,7 +959,7 @@ def test_cloud_backup_md5_delete(test_helper):
     test_helper.prepare_full_backup(test_helper.prepare_params, log_date)
 
     replica = test_helper.create_replica(
-        name="md5_restore_check", server_id=110, port=18630,
+        name="md5_restore_check", server_id=110, port=MYSQL_PORT + 30,
         mysqld_options=test_helper.mysqld_options,
     )
     test_helper.restore_backup_to(replica.datadir, test_helper.restore_params, log_date)
@@ -1065,13 +1065,13 @@ def test_inc_backup_innodb_params(test_helper):
     test_helper.restore_params = ""
 
     configs = [
-        {"mysqld": "--innodb-redo-log-capacity=209715200", "backup_extra": "--innodb-log-file-size=209715200",
-         "prepare_extra": f"--innodb-log-file-size=209715200 {CORE_FILE_OPT}"},
-        {"mysqld": "--innodb-redo-log-capacity=2147483648", "backup_extra": "--innodb-log-file-size=2147483648",
-         "prepare_extra": f"--innodb-log-file-size=2147483648 {CORE_FILE_OPT}"},
+        {"mysqld": "--innodb-redo-log-capacity=209715200", "backup_extra": test_helper.redo_size_opt(209715200),
+         "prepare_extra": f"{test_helper.redo_size_opt(209715200)} {CORE_FILE_OPT}"},
+        {"mysqld": "--innodb-redo-log-capacity=2147483648", "backup_extra": test_helper.redo_size_opt(2147483648),
+         "prepare_extra": f"{test_helper.redo_size_opt(2147483648)} {CORE_FILE_OPT}"},
         {"mysqld": "--innodb-redo-log-capacity=8388608 --innodb-buffer-pool-size=2G",
-         "backup_extra": "--innodb-log-file-size=8388608 --innodb-buffer-pool-size=2G",
-         "prepare_extra": f"--innodb-log-file-size=8388608 --innodb-buffer-pool-size=2G {CORE_FILE_OPT}"},
+         "backup_extra": f"{test_helper.redo_size_opt(8388608)} --innodb-buffer-pool-size=2G",
+         "prepare_extra": f"{test_helper.redo_size_opt(8388608)} --innodb-buffer-pool-size=2G {CORE_FILE_OPT}"},
         {"mysqld": "--skip-log-bin", "backup_extra": "", "prepare_extra": f"{CORE_FILE_OPT}"},
     ]
 
@@ -1110,7 +1110,7 @@ def test_inc_backup_archive_log(test_helper):
         f"--binlog-transaction-compression-level-zstd=22 --innodb-extend-and-initialize=OFF "
         f"--innodb-log-writer-threads=OFF --innodb-redo-log-archive-dirs=archive:{archive_dir}"
     )
-    test_helper.prepare_params = f"--innodb-log-file-size=536870912 {CORE_FILE_OPT}"
+    test_helper.prepare_params = f"{test_helper.redo_size_opt(536870912)} {CORE_FILE_OPT}"
     test_helper.initialize_db()
     _run_load(test_helper)
     test_helper.take_backup(single_incremental=True)
@@ -1303,44 +1303,6 @@ def _build_adversarial_dataset(
     )
 
 
-def _dispatch_rank_of_largest(target_dir: str, log_path: str, dispatch_pattern: str, scope_pattern: "re.Pattern") -> tuple:
-    """Find the single largest real file under target_dir whose relative
-    path matches scope_pattern, then return its 1-based dispatch rank among
-    log lines that match both dispatch_pattern and scope_pattern (i.e. how
-    many other in-scope files were dispatched to a worker thread before it).
-
-    Returns (rank, total_in_scope, largest_relpath, largest_size). rank is
-    None if the largest file's line never appears in the log.
-    """
-    largest_relpath = None
-    largest_size = -1
-    for root, _dirs, files in os.walk(target_dir):
-        for name in files:
-            relpath = os.path.relpath(os.path.join(root, name), target_dir)
-            if not scope_pattern.search(relpath):
-                continue
-            try:
-                size = os.path.getsize(os.path.join(root, name))
-            except OSError:
-                continue
-            if size > largest_size:
-                largest_size = size
-                largest_relpath = relpath
-
-    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-        lines = [
-            line for line in f
-            if re.search(dispatch_pattern, line) and scope_pattern.search(line)
-        ]
-
-    rank = None
-    for idx, line in enumerate(lines, start=1):
-        if largest_relpath and largest_relpath in line:
-            rank = idx
-            break
-    return rank, len(lines), largest_relpath, largest_size
-
-
 def _build_mixed_dataset(test_helper) -> None:
     """Build NUM_SMALL_TABLES small and PARALLEL_DEGREE large InnoDB tables, all in SMALL_DB.
 
@@ -1379,18 +1341,6 @@ def _assert_largest_first(order: list, minimum: int, what: str, log_path: str) -
             f"{what} not processed largest-first (PXB-3502): '{cur}' ({cur_size} bytes) came after "
             f"'{prev}' ({prev_size} bytes); log: {log_path}"
         )
-
-
-def _incremental_option_names(test_helper) -> tuple:
-    """(backup base, prepare dir, redo-only) option names this xtrabackup spells natively.
-
-    PXB-3758/PXB-3840 renamed them; using the native names keeps the
-    PXB-3502 tests independent of those renames and free of deprecation noise.
-    """
-    help_out = test_helper.run_command(test_helper._xtrabackup_cmd_prefix() + ["--help"], check=False).stdout or ""
-    if "--prepare-incremental-from-dir" in help_out:
-        return "--backup-incremental-base", "--prepare-incremental-from-dir", "--apply-redo-only"
-    return "--incremental-basedir", "--incremental-dir", "--apply-log-only"
 
 
 def _first_dispatched_vs_largest(
@@ -1439,7 +1389,7 @@ def test_decompress_largest_file_first(test_helper):
     """
     test_helper.require_pxb_fix("PXB-3502", FIXED_IN_8_4_0_7)
     test_helper.mysqld_options = ""
-    test_helper.backup_params = f"--compress --compress-threads={PARALLEL_DEGREE} {CORE_FILE_OPT}"
+    test_helper.backup_params = f"--compress --compress-threads={PARALLEL_DEGREE}"
     test_helper.initialize_db()
     _build_mixed_dataset(test_helper)
 
@@ -1449,23 +1399,17 @@ def test_decompress_largest_file_first(test_helper):
     full_target = os.path.join(test_helper.backup_dir, "full")
 
     log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    backup_log = os.path.join(test_helper.logdir, f"adv_backup_{log_date}_log")
-    xb_cmd = test_helper._xtrabackup_cmd_prefix() + [
-        "--no-defaults", f"--user={test_helper.backup_user}", "--password=",
-        "--backup", f"--target-dir={full_target}",
-        f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}",
-    ] + test_helper.backup_params.split()
-    result = test_helper.run_command(xb_cmd, check=False, log_file=backup_log)
-    if result.returncode != 0:
-        pytest.fail(f"ERR: Compressed backup failed. Log: {backup_log}")
-
-    decompress_log = os.path.join(test_helper.logdir, f"adv_decompress_{log_date}_log")
-    cmd = test_helper._xtrabackup_cmd_prefix() + [
-        "--no-defaults", "--decompress", f"--target-dir={full_target}", f"--parallel={PARALLEL_DEGREE}",
-    ]
-    result = test_helper.run_command(cmd, check=False, log_file=decompress_log)
-    if result.returncode != 0:
-        pytest.fail(f"ERR: Decompress failed. Log: {decompress_log}")
+    # backup_cmd_args already includes CORE_FILE_OPT; backup_params holds compress only.
+    test_helper.run_xtrabackup(
+        test_helper.backup_cmd_args(full_target) + test_helper.backup_params.split(),
+        f"adv_backup_{log_date}",
+        check=True,
+    )
+    _rc, _out, decompress_log = test_helper.run_xtrabackup(
+        ["--decompress", f"--target-dir={full_target}", f"--parallel={PARALLEL_DEGREE}"],
+        f"adv_decompress_{log_date}",
+        check=True,
+    )
 
     largest, dispatched, total = _first_dispatched_vs_largest(
         full_target, decompress_log, r"decompressing ", PARALLEL_ORDER_INNODB_SCOPE, PARALLEL_DEGREE
@@ -1497,7 +1441,7 @@ def test_copy_back_largest_file_first(test_helper):
     rocksdb_enabled = test_helper.rocksdb == "enabled"
 
     test_helper.mysqld_options = ""
-    test_helper.backup_params = f"{CORE_FILE_OPT}"
+    test_helper.backup_params = ""
     test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
     test_helper.initialize_db(rocksdb=rocksdb_enabled)
@@ -1511,15 +1455,11 @@ def test_copy_back_largest_file_first(test_helper):
     full_target = os.path.join(test_helper.backup_dir, "full")
 
     log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    backup_log = os.path.join(test_helper.logdir, f"adv_backup_{log_date}_log")
-    xb_cmd = test_helper._xtrabackup_cmd_prefix() + [
-        "--no-defaults", f"--user={test_helper.backup_user}", "--password=",
-        "--backup", f"--target-dir={full_target}",
-        f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}",
-    ] + test_helper.backup_params.split()
-    result = test_helper.run_command(xb_cmd, check=False, log_file=backup_log)
-    if result.returncode != 0:
-        pytest.fail(f"ERR: Backup failed. Log: {backup_log}")
+    test_helper.run_xtrabackup(
+        test_helper.backup_cmd_args(full_target),
+        f"adv_backup_{log_date}",
+        check=True,
+    )
 
     test_helper.prepare_full_backup(test_helper.prepare_params, log_date)
 
@@ -1528,32 +1468,40 @@ def test_copy_back_largest_file_first(test_helper):
         shutil.rmtree(restore_dir)
     os.makedirs(restore_dir)
 
-    copyback_log = os.path.join(test_helper.logdir, f"adv_copyback_{log_date}_log")
-    cmd = test_helper._xtrabackup_cmd_prefix() + [
-        "--no-defaults", "--copy-back", f"--target-dir={full_target}",
-        f"--datadir={restore_dir}", f"--parallel={PARALLEL_DEGREE}",
-    ] + test_helper.restore_params.split()
-    result = test_helper.run_command(cmd, check=False, log_file=copyback_log)
-    if result.returncode != 0:
-        pytest.fail(f"ERR: Copy-back failed. Log: {copyback_log}")
+    _rc, _out, copyback_log = test_helper.run_xtrabackup(
+        [
+            "--copy-back", f"--target-dir={full_target}",
+            f"--datadir={restore_dir}", f"--parallel={PARALLEL_DEGREE}",
+            *test_helper.restore_params.split(),
+        ],
+        f"adv_copyback_{log_date}",
+        check=True,
+    )
 
-    rank, total, largest, size = _dispatch_rank_of_largest(full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_INNODB_SCOPE)
-    assert rank is not None, f"largest in-scope file '{largest}' never appeared in the copy-back dispatch log: {copyback_log}"
-    assert rank == 1, (
-        f"{rank - 1}/{total} smaller InnoDB files were copied back before the largest one "
-        f"('{largest}', {size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
-        f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {copyback_log}"
+    # Same first-N set check as decompress: with --parallel=N the N largest
+    # files are dispatched concurrently, so requiring rank==1 alone flakes.
+    largest, dispatched, total = _first_dispatched_vs_largest(
+        full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_INNODB_SCOPE, PARALLEL_DEGREE
+    )
+    assert len(largest) == PARALLEL_DEGREE, (
+        f"expected {PARALLEL_DEGREE} large in-scope files under {full_target}, found {sorted(largest)}"
+    )
+    assert set(dispatched) == largest, (
+        f"first {PARALLEL_DEGREE} of {total} in-scope files copied back were {dispatched}; expected "
+        f"the {PARALLEL_DEGREE} largest {sorted(largest)} (--parallel={PARALLEL_DEGREE}) to be "
+        f"dispatched ahead of everything smaller (PXB-3502); log: {copyback_log}"
     )
 
     if rocksdb_enabled:
-        rdb_rank, rdb_total, rdb_largest, rdb_size = _dispatch_rank_of_largest(
-            full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_ROCKSDB_SCOPE
+        rdb_largest, rdb_dispatched, rdb_total = _first_dispatched_vs_largest(
+            full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_ROCKSDB_SCOPE, 1
         )
-        assert rdb_rank is not None, f"largest in-scope file '{rdb_largest}' never appeared in the copy-back dispatch log: {copyback_log}"
-        assert rdb_rank == 1, (
-            f"{rdb_rank - 1}/{rdb_total} smaller RocksDB files were copied back before the largest one "
-            f"('{rdb_largest}', {rdb_size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
-            f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {copyback_log}"
+        assert len(rdb_largest) == 1, (
+            f"expected a largest in-scope RocksDB file under {full_target}, found {sorted(rdb_largest)}"
+        )
+        assert set(rdb_dispatched) == rdb_largest, (
+            f"first of {rdb_total} in-scope RocksDB files copied back was {rdb_dispatched}; expected "
+            f"{sorted(rdb_largest)} first (PXB-3502); log: {copyback_log}"
         )
 
     # Functional guard: reordering the queue must not skip, duplicate, or
@@ -1574,21 +1522,6 @@ def test_copy_back_largest_file_first(test_helper):
         assert os.path.isdir(restored_rocksdb) and os.listdir(restored_rocksdb), (
             f".rocksdb missing or empty in restored datadir: {restored_rocksdb}"
         )
-
-
-def _xtrabackup_or_fail(test_helper, args: list, log_path: str, what: str) -> None:
-    result = test_helper.run_command(
-        test_helper._xtrabackup_cmd_prefix() + ["--no-defaults", *args], check=False, log_file=log_path
-    )
-    if result.returncode != 0:
-        pytest.fail(f"ERR: {what} failed. Log: {log_path}")
-
-
-def _backup_cmd_args(test_helper, target_dir: str) -> list:
-    return [
-        f"--user={test_helper.backup_user}", "--password=", "--backup", f"--target-dir={target_dir}",
-        f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}", *CORE_FILE_OPT.split(),
-    ]
 
 
 def test_backup_largest_file_first(test_helper):
@@ -1621,8 +1554,11 @@ def test_backup_largest_file_first(test_helper):
 
     full_target = os.path.join(test_helper.backup_dir, "full")
     os.makedirs(test_helper.backup_dir, exist_ok=True)
-    backup_log = os.path.join(test_helper.logdir, "largest_first_backup_log")
-    _xtrabackup_or_fail(test_helper, _backup_cmd_args(test_helper, full_target) + ["--parallel=1"], backup_log, "Backup")
+    _rc, _out, backup_log = test_helper.run_xtrabackup(
+        test_helper.backup_cmd_args(full_target) + ["--parallel=1"],
+        "largest_first_backup",
+        check=True,
+    )
 
     order = _processing_order(
         backup_log, rf"\] (?:space_id: \d+, )?Copying \./({re.escape(SMALL_DB)}/\S+\.ibd) to ", full_target
@@ -1646,7 +1582,7 @@ def test_incremental_prepare_largest_delta_first(test_helper):
     proportional to its size.
     """
     test_helper.require_pxb_fix("PXB-3502", FIXED_IN_8_4_0_7)
-    base_opt, inc_dir_opt, redo_only_opt = _incremental_option_names(test_helper)
+    base_opt, inc_dir_opt, redo_only_opt = test_helper.incremental_option_names()
     test_helper.mysqld_options = ""
     test_helper.initialize_db()
     _build_mixed_dataset(test_helper)
@@ -1654,22 +1590,31 @@ def test_incremental_prepare_largest_delta_first(test_helper):
     full_target = os.path.join(test_helper.backup_dir, "full")
     inc_target = os.path.join(test_helper.backup_dir, "inc")
     os.makedirs(test_helper.backup_dir, exist_ok=True)
-    _xtrabackup_or_fail(test_helper, _backup_cmd_args(test_helper, full_target),
-                        os.path.join(test_helper.logdir, "full_backup_log"), "Full backup")
+    test_helper.run_xtrabackup(
+        test_helper.backup_cmd_args(full_target), "full_backup", check=True
+    )
 
     tables = [f"sbtest{i}" for i in range(1, NUM_SMALL_TABLES + 1)] + [f"large{n}" for n in range(1, PARALLEL_DEGREE + 1)]
     for table in tables:
         test_helper.primary.mysql(f"UPDATE {SMALL_DB}.{table} SET c = REPEAT('u', 120)")
 
-    _xtrabackup_or_fail(test_helper, _backup_cmd_args(test_helper, inc_target) + [f"{base_opt}={full_target}"],
-                        os.path.join(test_helper.logdir, "inc_backup_log"), "Incremental backup")
-    _xtrabackup_or_fail(test_helper, ["--prepare", redo_only_opt, f"--target-dir={full_target}"],
-                        os.path.join(test_helper.logdir, "prepare_full_log"), "Prepare of the full backup")
-    apply_log = os.path.join(test_helper.logdir, "prepare_inc_log")
-    _xtrabackup_or_fail(
-        test_helper,
-        ["--prepare", redo_only_opt, f"--target-dir={full_target}", f"{inc_dir_opt}={inc_target}", "--parallel=1"],
-        apply_log, "Prepare of the incremental backup",
+    test_helper.run_xtrabackup(
+        test_helper.backup_cmd_args(inc_target) + [f"{base_opt}={full_target}"],
+        "inc_backup",
+        check=True,
+    )
+    test_helper.run_xtrabackup(
+        ["--prepare", redo_only_opt, f"--target-dir={full_target}"],
+        "prepare_full",
+        check=True,
+    )
+    _rc, _out, apply_log = test_helper.run_xtrabackup(
+        [
+            "--prepare", redo_only_opt, f"--target-dir={full_target}",
+            f"{inc_dir_opt}={inc_target}", "--parallel=1",
+        ],
+        "prepare_inc",
+        check=True,
     )
 
     order = _processing_order(

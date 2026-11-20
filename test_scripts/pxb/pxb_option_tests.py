@@ -53,37 +53,27 @@ def setup_logdir(test_helper):
 # ============================================================================
 
 def _xtrabackup(test_helper, args: list, log_name: str) -> tuple:
-    """Run xtrabackup with ``args``; return (returncode, combined output, log file)."""
-    log_file = os.path.join(test_helper.logdir, f"{log_name}_log")
-    cmd = test_helper._xtrabackup_cmd_prefix() + ["--no-defaults", *args]
-    result = test_helper.run_command(cmd, check=False, log_file=log_file)
-    return result.returncode, (result.stdout or "") + (result.stderr or ""), log_file
+    """Thin wrapper around :meth:`BackupTestHelper.run_xtrabackup`."""
+    return test_helper.run_xtrabackup(args, log_name)
 
 
 def _backup_args(test_helper, target_dir: str) -> list:
-    # xtrabackup creates the target directory itself, but not its parents.
-    os.makedirs(os.path.dirname(target_dir), exist_ok=True)
-    return [
-        f"--user={test_helper.backup_user}", "--password=", "--backup",
-        f"--target-dir={target_dir}", f"-S{test_helper.socket_path}",
-        f"--datadir={test_helper.datadir}", *CORE_FILE_OPT.split(),
-    ]
+    """Thin wrapper around :meth:`BackupTestHelper.backup_cmd_args`."""
+    return test_helper.backup_cmd_args(target_dir)
 
 
 def _backup(test_helper, target_dir: str, log_name: str, extra: Optional[list] = None) -> str:
     """Take a backup that must succeed; return its output."""
-    rc, out, log_file = _xtrabackup(test_helper, _backup_args(test_helper, target_dir) + (extra or []), log_name)
-    if rc != 0:
-        pytest.fail(f"ERR: backup '{log_name}' failed. Log: {log_file}")
+    _rc, out, _log = test_helper.run_xtrabackup(
+        test_helper.backup_cmd_args(target_dir) + (extra or []), log_name, check=True
+    )
     return out
 
 
 def _prepare(test_helper, target_dir: str, log_name: str, extra: Optional[list] = None) -> str:
     """Prepare a backup that must succeed; return its output."""
     args = ["--prepare", f"--target-dir={target_dir}", *CORE_FILE_OPT.split()] + (extra or [])
-    rc, out, log_file = _xtrabackup(test_helper, args, log_name)
-    if rc != 0:
-        pytest.fail(f"ERR: prepare '{log_name}' failed. Log: {log_file}")
+    _rc, out, _log = test_helper.run_xtrabackup(args, log_name, check=True)
     return out
 
 
@@ -541,3 +531,56 @@ def test_use_free_memory_pct_sizing(test_helper, monkeypatch):
     restored.start()
     assert _value(restored, "SELECT COUNT(*) FROM test.t1") == "100", "restored backup is missing rows"
     assert _value(restored, "CHECKSUM TABLE test.t1") == expected, "restored backup checksum differs"
+
+
+# ============================================================================
+# __main__ block with argparse and suite-to-test mapping
+# ============================================================================
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="PXB option / history / free-memory tests")
+    parser.add_argument(
+        "test_suites",
+        nargs="*",
+        choices=["Option_alias_tests", "History_tests", "Free_memory_pct_tests"],
+        help="Test suites to run",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    args = parser.parse_args()
+
+    if not args.test_suites:
+        print("This script tests xtrabackup option aliases, --history on another server,")
+        print("and --use-free-memory-pct buffer pool sizing (ported from the PXB dev suite).")
+        print("Assumption: PS/MS and PXB are already installed as tarballs.")
+        print("Usage:")
+        print("  pytest pxb_option_tests.py -v -s")
+        print("  python pxb_option_tests.py Option_alias_tests")
+        print("  python pxb_option_tests.py History_tests")
+        print("  python pxb_option_tests.py Free_memory_pct_tests")
+        print("Logs:", "TEST_BASE_DIR (test-specific directories)")
+        sys.exit(1)
+
+    test_mapping = {
+        "Option_alias_tests": [
+            "test_apply_redo_only_alias",
+            "test_incremental_option_aliases",
+            "test_deprecated_options_warn",
+        ],
+        "History_tests": ["test_history_on_other_server"],
+        "Free_memory_pct_tests": ["test_use_free_memory_pct_sizing"],
+    }
+
+    pytest_args = [__file__, "-v"]
+    if args.verbose:
+        pytest_args.append("-s")
+
+    selected = []
+    for suite in args.test_suites:
+        selected.extend(test_mapping.get(suite, []))
+    if selected:
+        pytest_args.extend(["-k", " or ".join(selected)])
+
+    pytest.main(pytest_args)

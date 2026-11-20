@@ -24,9 +24,9 @@
     - [Run all tests](#run-all-tests-1)
   - [Test suites — innodb\_myrocks\_backup\_tests.py](#test-suites--innodb_myrocks_backup_testspy)
   - [Test reference — innodb\_myrocks\_backup\_tests.py](#test-reference--innodb_myrocks_backup_testspy)
-- [options\_backup\_tests.py — xtrabackup option tests](#options_backup_testspy--xtrabackup-option-tests)
+- [pxb\_option\_tests.py — xtrabackup option tests](#pxb_option_testspy--xtrabackup-option-tests)
   - [How to run tests](#how-to-run-tests-options)
-  - [Test reference — options\_backup\_tests.py](#test-reference--options_backup_testspy)
+  - [Test reference — pxb\_option\_tests.py](#test-reference--pxb_option_testspy)
 - [replication\_backup\_tests.py — Replication + backup tests](#replication_backup_testspy--replication--backup-tests)
   - [Additional prerequisites](#additional-prerequisites)
   - [How to run tests](#how-to-run-tests-2)
@@ -516,7 +516,7 @@ pytest innodb_myrocks_backup_tests.py --collect-only -q
 | `Cloud_backup_tests` | Cloud incremental backup using xbcloud (requires `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`, `S3_ENDPOINT`). `test_cloud_backup_md5_delete` is skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
 | `Innodb_params_redo_archive_tests` | Backup with custom InnoDB parameters and redo log archiving |
 | `SSL_tests` | Backup with SSL certificates, `--ssl-mode`, `--ssl-cipher`, and FIPS mode |
-| `Parallel_processing_order_tests` | PXB-3502 regression: parallel `--decompress`/`--copy-back` must dispatch the largest file first, not last. Skipped on PXB < 8.4.0-7 |
+| `Parallel_processing_order_tests` | PXB-3502 regression: parallel `--decompress`/`--copy-back`/`--backup`/`--prepare` must dispatch largest files first. Skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
 
 ---
 
@@ -564,7 +564,7 @@ pytest innodb_myrocks_backup_tests.py --collect-only -q
 
 ---
 
-## options_backup_tests.py — xtrabackup option tests
+## pxb_option_tests.py — xtrabackup option tests
 
 Tests for renamed and deprecated xtrabackup options, for `--history` written to another server and for `--prepare --use-free-memory-pct` buffer pool sizing, ported from the PXB dev suite (`storage/innobase/xtrabackup/test`). Each test is skipped unless the PXB build has the fix: PXB >= 8.4.0-8 on the 8.4 line; on the 9.7 line >= 9.7.2-2, except `test_use_free_memory_pct_sizing` (PXB-3889), which needs >= 9.7.2-3. The common prerequisites above apply; no load tool, cloud or keyring setup is needed.
 
@@ -573,13 +573,16 @@ Tests for renamed and deprecated xtrabackup options, for `--history` written to 
 
 ```bash
 cd $QASCRIPTS/test_scripts/pxb
-pytest options_backup_tests.py -v                                  # all tests
-pytest options_backup_tests.py -k test_history_on_other_server -v  # one test
+pytest pxb_option_tests.py -v                                  # all tests
+pytest pxb_option_tests.py -k test_history_on_other_server -v  # one test
+python pxb_option_tests.py Option_alias_tests                  # suite via __main__
+python pxb_option_tests.py History_tests
+python pxb_option_tests.py Free_memory_pct_tests
 ```
 
 `test_incremental_option_aliases`, `test_history_on_other_server` and `test_use_free_memory_pct_sizing` (debug builds) start a second server on `MYSQL_PORT + 51` / `MYSQL_PORT + 50` (`MYSQL_PORT` defaults to 21000).
 
-### Test reference — options_backup_tests.py
+### Test reference — pxb_option_tests.py
 
 | Test | Ticket | Description |
 |------|--------|-------------|

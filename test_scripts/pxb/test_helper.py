@@ -1350,10 +1350,15 @@ class BackupTestHelper:
             xb.stdout.close()
             put.wait()
             xb.wait()
+        # Report both sides: when xbcloud put fails first, xtrabackup then
+        # fails on the closed pipe, and its log alone would hide the cause.
+        failed = []
         if xb.returncode != 0:
-            pytest.fail(f"ERR: {label[:1].upper() + label[1:]} failed. Please check the log at: {backup_log}")
+            failed.append(f"xtrabackup exit code {xb.returncode}, log: {backup_log}")
         if put.returncode != 0:
-            pytest.fail(f"ERR: Upload of {label} failed. Please check the log at: {upload_log}")
+            failed.append(f"xbcloud put exit code {put.returncode}, log: {upload_log}")
+        if failed:
+            pytest.fail(f"ERR: Backup and upload of {label} failed:\n  " + "\n  ".join(failed))
         print(f"..{label[:1].upper() + label[1:]} was successfully created and uploaded to the cloud as {name}.\n"
               f"  Logs available at: {backup_log} and {upload_log}")
 
@@ -1371,8 +1376,13 @@ class BackupTestHelper:
             get.stdout.close()
             xbs.wait()
             get.wait()
-        if get.returncode != 0 or xbs.returncode != 0:
-            pytest.fail(f"ERR: Download of {label} failed. Please check the log at: {download_log} and {stream_log}")
+        failed = []
+        if get.returncode != 0:
+            failed.append(f"xbcloud get exit code {get.returncode}, log: {download_log}")
+        if xbs.returncode != 0:
+            failed.append(f"xbstream exit code {xbs.returncode}, log: {stream_log}")
+        if failed:
+            pytest.fail(f"ERR: Download of {label} failed:\n  " + "\n  ".join(failed))
         print(f"..{label[:1].upper() + label[1:]} was successfully downloaded at: {target_dir}\n"
               f"  Logs available at: {download_log} and {stream_log}")
 

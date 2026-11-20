@@ -10,12 +10,22 @@ import time
 import shutil
 import re
 import signal
+import sys
 import glob
 import threading
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict
 import psutil
 import pytest
+
+# Print test progress as it happens. When stdout is not a terminal (piped to
+# tee, redirected to a file, or run from Jenkins) Python buffers it in blocks,
+# and with -s the output then only appears when pytest prints the test result.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
 
 # Import KMIP helper
 try:
@@ -32,6 +42,9 @@ MYSQL_START_TIMEOUT = int(os.environ.get("MYSQL_START_TIMEOUT", "180"))
 MYSQL_SHUTDOWN_TIMEOUT = int(os.environ.get("MYSQL_SHUTDOWN_TIMEOUT", "300"))
 # TCP port of the primary server; override via MYSQL_PORT to run suites side by side.
 MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "21000"))
+# Max seconds take_backup() waits for the background load and DDL threads to
+# finish before recording the pre-restore baseline.
+WRITERS_QUIESCE_TIMEOUT = int(os.environ.get("WRITERS_QUIESCE_TIMEOUT", "600"))
 # Each xtrabackup invocation opens its own KMIP/TLS session and pays a fresh
 # Fortanix cold-start; occasional invocations exceed xtrabackup's internal ~60s
 # tolerance and fail with MY-013714 + 'Encryption can't find master key'.
@@ -96,6 +109,15 @@ ROCKSDB = os.environ.get("ROCKSDB", "enabled")  # enabled or disabled
 BACKUP_USER = os.environ.get("BACKUP_USER", "root")
 ENCRYPT_KEY = os.environ.get("ENCRYPT_KEY", "mHU3Zs5sRcSB7zBAJP1BInPP5lgShKly")
 RANDOM_TYPE = os.environ.get("RANDOM_TYPE", "uniform")
+
+# xtrabackup options renamed in PXB 8.4.0-8 and 9.7.2-2 (PXB-3758, PXB-3840).
+# The old names still work but print a deprecation warning and will be
+# removed in a future release. Passing old and new name together is an error.
+PXB_RENAMED_OPTIONS = {
+    "apply-log-only": "apply-redo-only",
+    "incremental-basedir": "backup-incremental-base",
+    "incremental-dir": "prepare-incremental-from-dir",
+}
 
 class MySQLServer:
     """A single mysqld instance (primary or replica).
@@ -482,6 +504,14 @@ class BackupTestHelper:
         self.server_version_normalized: Optional[int] = None
         self.xtrabackup_version: Optional[str] = None
         self.xtrabackup_version_normalized: Optional[int] = None
+        # Always verify restores with per-table COUNT(*)/CHECKSUM TABLE
+        # (verify_data_integrity) instead of pt-table-checksum.
+        self.detailed_verify: bool = False
+        # Set by _wait_for_writers() to make the ddl_* loops stop at their
+        # next iteration once the backups no longer need them.
+        self._ddl_stop = threading.Event()
+        # xtrabackup_dir -> whether that binary has the PXB-3758/PXB-3840 option names
+        self._xb_renamed_options_cache: Dict[str, bool] = {}
         self.pstress_binary: Optional[str] = None
         self.backup_params: str = ""
         self.prepare_params: str = ""
@@ -666,26 +696,7 @@ class BackupTestHelper:
             args.append("--check-tables")
         return args
 
-    def incremental_option_names(self) -> Tuple[str, str, str]:
-        """Return native (backup-base, prepare-dir, redo-only) option names for this xtrabackup.
-
-        PXB-3758/PXB-3840 renamed ``--incremental-basedir`` /
-        ``--incremental-dir`` / ``--apply-log-only``. Prefer the names this
-        build spells natively so harness callers stay free of deprecation
-        warnings on fixed builds, and keep working on older ones.
-        """
-        help_out = (
-            self.run_command(self._xtrabackup_cmd_prefix() + ["--help"], check=False).stdout or ""
-        )
-        if "--prepare-incremental-from-dir" in help_out:
-            return (
-                "--backup-incremental-base",
-                "--prepare-incremental-from-dir",
-                "--apply-redo-only",
-            )
-        return "--incremental-basedir", "--incremental-dir", "--apply-log-only"
-
-    def redo_size_opt(self, size: int | str) -> str:
+    def redo_size_opt(self, size) -> str:
         """XtraBackup option that declares the redo log size for prepare/backup.
 
         ``--innodb-log-file-size`` was removed in PXB 9.x (unknown variable);
@@ -738,6 +749,35 @@ class BackupTestHelper:
         if check and result.returncode != 0:
             pytest.fail(f"ERR: xtrabackup '{log_name}' failed. Log: {log_file}")
         return result.returncode, out, log_file
+    def _xb_has_renamed_options(self) -> bool:
+        """Whether the xtrabackup in ``xtrabackup_dir`` has the PXB-3758/PXB-3840 option names.
+
+        The names exist from PXB 8.4.0-8 (8.4 series) and PXB 9.7.2-2. The
+        result is cached per ``xtrabackup_dir``, because the upgrade tests
+        temporarily switch ``xtrabackup_dir`` to an older PXB binary.
+        """
+        xb_dir = self.xtrabackup_dir
+        if xb_dir not in self._xb_renamed_options_cache:
+            _, version = self.get_xtrabackup_version()
+            self._xb_renamed_options_cache[xb_dir] = (
+                version >= self.normalize_xtrabackup_version("9.7.2-2")
+                or self.normalize_xtrabackup_version("8.4.0-8")
+                <= version
+                < self.normalize_xtrabackup_version("8.5.0")
+            )
+        return self._xb_renamed_options_cache[xb_dir]
+
+    def xb_opt(self, name: str) -> str:
+        """Return ``--<name>`` for the xtrabackup in ``xtrabackup_dir``.
+
+        ``name`` is the old option name (a key of ``PXB_RENAMED_OPTIONS``,
+        e.g. ``"apply-log-only"``). Returns the new name on PXB versions that
+        have it, so the tests don't use deprecated options, and the old name
+        on older PXB versions, which don't know the new one.
+        """
+        if self._xb_has_renamed_options():
+            return f"--{PXB_RENAMED_OPTIONS[name]}"
+        return f"--{name}"
 
     def get_mysql_type(self) -> str:
         """Get server type (PS or MS). Uses version output; does not require server to be running."""
@@ -1368,19 +1408,89 @@ class BackupTestHelper:
                 pass
         return False
 
-    def _upload_streamed_backup(
-        self, xb_cmd: list[str], cloud_params: str, name: str, log_file: str
-    ) -> int:
-        """Pipe an xtrabackup xbstream into ``xbcloud put`` for ``name``.
+    @staticmethod
+    def _cloud_log(step: str, backup_log: str) -> str:
+        """Log path for one cloud step of the backup logged in ``backup_log``.
 
-        Shared by ``take_backup``'s cloud branches and by ``upload_only``
-        callers. Returns the pipeline exit code; the caller reports failure.
+        Prefixes the step to the backup log's file name, which gives the bash
+        script's names: ``full_backup_<ts>_log`` -> ``upload_full_backup_<ts>_log``,
+        ``download_full_backup_<ts>_log``, ``download_stream_...``, ``delete_...``.
         """
-        pipe_cmd = (
-            f"{' '.join(xb_cmd)} 2>{log_file} | "
-            f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} put {cloud_params} {name} 2>>{log_file}"
-        )
-        return subprocess.run(pipe_cmd, shell=True, check=False).returncode
+        return os.path.join(os.path.dirname(backup_log), f"{step}_{os.path.basename(backup_log)}")
+
+    def _cloud_upload(
+        self, xb_cmd: List[str], cloud_params: str, name: str, label: str, backup_log: str, upload_log: str
+    ) -> None:
+        """Stream an xtrabackup backup into ``xbcloud put`` as ``name``.
+
+        xtrabackup writes to ``backup_log`` and ``xbcloud put`` to
+        ``upload_log``. Both exit codes are checked: in a pipe, a failed
+        xtrabackup can otherwise hide behind a successful ``xbcloud put``.
+        """
+        xbcloud = os.path.join(self.xtrabackup_dir, "xbcloud")
+        with open(backup_log, "w") as blog, open(upload_log, "w") as ulog:
+            xb = subprocess.Popen(xb_cmd, stdout=subprocess.PIPE, stderr=blog)
+            put = subprocess.Popen([xbcloud, "put"] + cloud_params.split() + [name],
+                                   stdin=xb.stdout, stdout=ulog, stderr=ulog)
+            xb.stdout.close()
+            put.wait()
+            xb.wait()
+        # Report both sides: when xbcloud put fails first, xtrabackup then
+        # fails on the closed pipe, and its log alone would hide the cause.
+        failed = []
+        if xb.returncode != 0:
+            failed.append(f"xtrabackup exit code {xb.returncode}, log: {backup_log}")
+        if put.returncode != 0:
+            failed.append(f"xbcloud put exit code {put.returncode}, log: {upload_log}")
+        if failed:
+            pytest.fail(f"ERR: Backup and upload of {label} failed:\n  " + "\n  ".join(failed))
+        print(f"..{label[:1].upper() + label[1:]} was successfully created and uploaded to the cloud as {name}.\n"
+              f"  Logs available at: {backup_log} and {upload_log}")
+
+    def _cloud_download(
+        self, cloud_params: str, name: str, target_dir: str, label: str, download_log: str, stream_log: str
+    ) -> None:
+        """Download ``name`` with ``xbcloud get`` and extract it into ``target_dir`` with ``xbstream -x``."""
+        print(f"=>Downloading {label}")
+        xbcloud = os.path.join(self.xtrabackup_dir, "xbcloud")
+        xbstream = os.path.join(self.xtrabackup_dir, "xbstream")
+        with open(download_log, "w") as dlog, open(stream_log, "w") as slog:
+            get = subprocess.Popen([xbcloud, "get"] + cloud_params.split() + [name],
+                                   stdout=subprocess.PIPE, stderr=dlog)
+            xbs = subprocess.Popen([xbstream, "-xv", "-C", target_dir], stdin=get.stdout, stdout=slog, stderr=slog)
+            get.stdout.close()
+            xbs.wait()
+            get.wait()
+        failed = []
+        if get.returncode != 0:
+            failed.append(f"xbcloud get exit code {get.returncode}, log: {download_log}")
+        if xbs.returncode != 0:
+            failed.append(f"xbstream exit code {xbs.returncode}, log: {stream_log}")
+        if failed:
+            pytest.fail(f"ERR: Download of {label} failed:\n  " + "\n  ".join(failed))
+        print(f"..{label[:1].upper() + label[1:]} was successfully downloaded at: {target_dir}\n"
+              f"  Logs available at: {download_log} and {stream_log}")
+
+    def _cloud_delete(
+        self, cloud_params: str, name: str, label: str, delete_log: str, fail_on_error: bool = False
+    ) -> None:
+        """Delete ``name`` from the cloud.
+
+        Like the bash script, a failure is reported as ERR only, unless
+        ``fail_on_error`` (for tests where the delete is what is tested).
+        """
+        print(f"=>Deleting {label}")
+        xbcloud = os.path.join(self.xtrabackup_dir, "xbcloud")
+        with open(delete_log, "w") as log:
+            result = subprocess.run([xbcloud, "delete"] + cloud_params.split() + [name],
+                                    stdout=log, stderr=log, check=False)
+        if result.returncode != 0:
+            msg = f"ERR: Delete of {label} failed. Please check the log at: {delete_log}"
+            if fail_on_error:
+                pytest.fail(msg)
+            print(msg)
+        else:
+            print(f"..{label[:1].upper() + label[1:]} was successfully deleted from the cloud.\n  Logs available at: {delete_log}")
 
     def take_backup(
         self,
@@ -1422,11 +1532,9 @@ class BackupTestHelper:
         os.makedirs(self.backup_dir)
 
         log_date = datetime.now().strftime("%Y%m%d_%H%M%S")
-        use_detailed_verify = "test_rocksdb" in databases or not shutil.which("pt-table-checksum")
-        base_opt, inc_dir_opt, redo_only_opt = self.incremental_option_names()
 
         # --- Full backup ---
-        print("=>Taking full backup")
+        print("=>Taking full backup and uploading it" if backup_type == "cloud" else "=>Taking full backup")
         full_target = os.path.join(self.backup_dir, "full")
         if backup_type in ("stream", "cloud"):
             os.makedirs(full_target, exist_ok=True)
@@ -1440,17 +1548,16 @@ class BackupTestHelper:
             full_log = log_file or os.path.join(self.logdir, f"full_backup_{log_date}_log")
             if backup_type == "cloud":
                 full_cloud_name = cloud_name or f"full_{log_date}"
-                if self._upload_streamed_backup(xb_cmd, cloud_params, full_cloud_name, full_log) != 0:
-                    pytest.fail(f"ERR: Full cloud backup failed. Please check the log at: {full_log}")
+                self._cloud_upload(xb_cmd, cloud_params, full_cloud_name, "full backup", full_log,
+                                   self._cloud_log("upload", full_log))
                 if upload_only:
                     return
-                get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {full_cloud_name} 2>>{full_log} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {full_target} 2>>{full_log}"
-                result = subprocess.run(get_cmd, shell=True, check=False)
-                if result.returncode != 0:
-                    pytest.fail(f"ERR: Full cloud backup download failed. Please check the log at: {full_log}")
+                self._cloud_download(cloud_params, full_cloud_name, full_target, "full backup",
+                                     self._cloud_log("download", full_log),
+                                     self._cloud_log("download_stream", full_log))
                 self._decrypt_decompress(full_target, self.backup_params)
-                del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {full_cloud_name} 2>>{full_log}"
-                subprocess.run(del_cmd, shell=True, check=False)
+                self._cloud_delete(cloud_params, full_cloud_name, "full backup",
+                                   self._cloud_log("delete", full_log))
             else:
                 stream_file = os.path.join(full_target, "full_backup.xbstream")
                 with open(stream_file, "wb") as sf, open(full_log, "w") as lf:
@@ -1500,7 +1607,7 @@ class BackupTestHelper:
                 xb_cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults", f"--user={self.backup_user}", "--password=",
                     "--backup", f"--target-dir={inc_target}_tmp",
-                    f"{base_opt}={base_dir}",
+                    f"{self.xb_opt('incremental-basedir')}={base_dir}",
                     f"-S{self.socket_path}", f"--datadir={self.datadir}",
                     "--stream=xbstream",
                 ] + self.backup_params.split()
@@ -1508,15 +1615,15 @@ class BackupTestHelper:
                 log_file = os.path.join(self.logdir, f"inc1_backup_{log_date}_log")
                 if backup_type == "cloud":
                     inc_cloud_name = f"inc1_{log_date}"
-                    if self._upload_streamed_backup(xb_cmd, cloud_params, inc_cloud_name, log_file) != 0:
-                        pytest.fail(f"ERR: Incremental cloud backup failed. Please check the log at: {log_file}")
-                    get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {inc_cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {inc_target} 2>>{log_file}"
-                    result = subprocess.run(get_cmd, shell=True, check=False)
-                    if result.returncode != 0:
-                        pytest.fail(f"ERR: Inc cloud backup download failed. Please check the log at: {log_file}")
+                    print("=>Taking incremental backup: 1 and uploading it")
+                    self._cloud_upload(xb_cmd, cloud_params, inc_cloud_name, "incremental backup 1", log_file,
+                                       self._cloud_log("upload", log_file))
+                    self._cloud_download(cloud_params, inc_cloud_name, inc_target, "incremental backup 1",
+                                         self._cloud_log("download", log_file),
+                                         self._cloud_log("download_stream", log_file))
                     self._decrypt_decompress(inc_target, self.backup_params)
-                    del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {inc_cloud_name} 2>>{log_file}"
-                    subprocess.run(del_cmd, shell=True, check=False)
+                    self._cloud_delete(cloud_params, inc_cloud_name, "incremental backup 1",
+                                       self._cloud_log("delete", log_file))
                 else:
                     stream_file = os.path.join(inc_target, "inc_backup.xbstream")
                     with open(stream_file, "wb") as sf, open(log_file, "w") as lf:
@@ -1533,7 +1640,7 @@ class BackupTestHelper:
                 cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults", f"--user={self.backup_user}", "--password=",
                     "--backup", f"--target-dir={inc_target}",
-                    f"{base_opt}={base_dir}",
+                    f"{self.xb_opt('incremental-basedir')}={base_dir}",
                     f"-S{self.socket_path}", f"--datadir={self.datadir}",
                 ] + self.backup_params.split() + ["--register-redo-log-consumer"]
 
@@ -1549,7 +1656,7 @@ class BackupTestHelper:
                         cmd = self._xtrabackup_cmd_prefix() + [
                             "--no-defaults", f"--user={self.backup_user}", "--password=",
                             "--backup", f"--target-dir={inc_target}",
-                            f"{base_opt}={base_dir}",
+                            f"{self.xb_opt('incremental-basedir')}={base_dir}",
                             f"-S{self.socket_path}", f"--datadir={self.datadir}",
                         ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
                         result = self.run_command(cmd, check=False, log_file=log_file)
@@ -1572,7 +1679,7 @@ class BackupTestHelper:
                     xb_cmd = self._xtrabackup_cmd_prefix() + [
                         "--no-defaults", f"--user={self.backup_user}", "--password=",
                         "--backup", f"--target-dir={inc_target}_tmp",
-                        f"{base_opt}={base_dir}",
+                        f"{self.xb_opt('incremental-basedir')}={base_dir}",
                         f"-S{self.socket_path}", f"--datadir={self.datadir}",
                         "--stream=xbstream",
                     ] + self.backup_params.split()
@@ -1580,15 +1687,15 @@ class BackupTestHelper:
                     log_file = os.path.join(self.logdir, f"inc{inc_num}_backup_{log_date}_log")
                     if backup_type == "cloud":
                         inc_cloud_name = f"inc{inc_num}_{log_date}"
-                        if self._upload_streamed_backup(xb_cmd, cloud_params, inc_cloud_name, log_file) != 0:
-                            pytest.fail(f"ERR: Inc{inc_num} cloud backup failed. Log: {log_file}")
-                        get_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} get {cloud_params} {inc_cloud_name} 2>>{log_file} | {os.path.join(self.xtrabackup_dir, 'xbstream')} -xvC {inc_target} 2>>{log_file}"
-                        result = subprocess.run(get_cmd, shell=True, check=False)
-                        if result.returncode != 0:
-                            pytest.fail(f"ERR: Inc{inc_num} cloud download failed. Log: {log_file}")
+                        label = f"incremental backup {inc_num}"
+                        self._cloud_upload(xb_cmd, cloud_params, inc_cloud_name, label, log_file,
+                                           self._cloud_log("upload", log_file))
+                        self._cloud_download(cloud_params, inc_cloud_name, inc_target, label,
+                                             self._cloud_log("download", log_file),
+                                             self._cloud_log("download_stream", log_file))
                         self._decrypt_decompress(inc_target, self.backup_params)
-                        del_cmd = f"{os.path.join(self.xtrabackup_dir, 'xbcloud')} delete {cloud_params} {inc_cloud_name} 2>>{log_file}"
-                        subprocess.run(del_cmd, shell=True, check=False)
+                        self._cloud_delete(cloud_params, inc_cloud_name, label,
+                                           self._cloud_log("delete", log_file))
                     else:
                         stream_file = os.path.join(inc_target, "inc_backup.xbstream")
                         with open(stream_file, "wb") as sf, open(log_file, "w") as lf:
@@ -1600,7 +1707,7 @@ class BackupTestHelper:
                     cmd = self._xtrabackup_cmd_prefix() + [
                         "--no-defaults", f"--user={self.backup_user}", "--password=",
                         "--backup", f"--target-dir={inc_target}",
-                        f"{base_opt}={base_dir}",
+                        f"{self.xb_opt('incremental-basedir')}={base_dir}",
                         f"-S{self.socket_path}", f"--datadir={self.datadir}",
                     ] + self.backup_params.split() + ["--register-redo-log-consumer"]
 
@@ -1617,7 +1724,7 @@ class BackupTestHelper:
                             cmd = self._xtrabackup_cmd_prefix() + [
                                 "--no-defaults", f"--user={self.backup_user}", "--password=",
                                 "--backup", f"--target-dir={inc_target}",
-                                f"{base_opt}={base_dir}",
+                                f"{self.xb_opt('incremental-basedir')}={base_dir}",
                                 f"-S{self.socket_path}", f"--datadir={self.datadir}",
                             ] + self.backup_params.split() + [f"--lock-ddl={self.lock_ddl}", "--register-redo-log-consumer"]
                             result = self.run_command(cmd, check=False, log_file=log_file)
@@ -1632,15 +1739,11 @@ class BackupTestHelper:
                 inc_num += 1
                 time.sleep(10)
 
-        # Stop any remaining DDL threads (best effort)
-        for t in threading.enumerate():
-            if t.name.startswith("ddl_"):
-                t.join(timeout=5)
 
         # --- Prepare backups ---
         print("=>Preparing full backup")
         cmd = self._xtrabackup_cmd_prefix() + [
-            "--no-defaults", "--prepare", redo_only_opt,
+            "--no-defaults", "--prepare", self.xb_opt("apply-log-only"),
             f"--target_dir={full_target}",
         ] + self._prepare_args_for_pxb_version(self.prepare_params)
 
@@ -1658,13 +1761,13 @@ class BackupTestHelper:
                 cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults", "--prepare",
                     f"--target_dir={full_target}",
-                    f"{inc_dir_opt}={self.backup_dir}/inc{i}",
+                    f"{self.xb_opt('incremental-dir')}={self.backup_dir}/inc{i}",
                 ] + self._prepare_args_for_pxb_version(self.prepare_params)
             else:
                 cmd = self._xtrabackup_cmd_prefix() + [
-                    "--no-defaults", "--prepare", redo_only_opt,
+                    "--no-defaults", "--prepare", self.xb_opt("apply-log-only"),
                     f"--target_dir={full_target}",
-                    f"{inc_dir_opt}={self.backup_dir}/inc{i}",
+                    f"{self.xb_opt('incremental-dir')}={self.backup_dir}/inc{i}",
                 ] + self._prepare_args_for_pxb_version(self.prepare_params)
 
             log_file = os.path.join(self.logdir, f"prepare_inc{i}_backup_{log_date}_log")
@@ -1675,31 +1778,26 @@ class BackupTestHelper:
                 print(f"..Prepare of incremental backup was successful.\n  Logs available at: {log_file}")
 
         # --- Collect data before restore ---
+        # Let the background load and DDL threads finish before the baseline
+        # is recorded; see _wait_for_writers(). Done after the prepares, so
+        # they have had that time to finish on their own.
+        self._wait_for_writers()
+
+        # pt-table-checksum aborts when the server has any RocksDB table
+        # (it needs binlog_format=STATEMENT), so use per-table verification
+        # then, as well as when the tool is not installed.
+        use_detailed_verify = (
+            self.detailed_verify
+            or "test_rocksdb" in databases
+            or not shutil.which("pt-table-checksum")
+            or self._server_has_rocksdb_tables()
+        )
         if use_detailed_verify:
             print("Collecting table data before restore (detailed verify)")
             orig_data = self.collect_table_data(databases)
         else:
             print("Collecting existing table count")
-            old_cwd = os.getcwd()
-            os.chdir(self.logdir)
-            try:
-                with open("file1", "w") as f:
-                    result = subprocess.run(
-                        ["pt-table-checksum", f"S={self.socket_path},u=root",
-                         "-d", "test", "--recursion-method", "none", "--no-check-binlog-format"],
-                        stdout=f, check=False,
-                    )
-                    if result.returncode not in (0, 64):
-                        raise subprocess.CalledProcessError(result.returncode, result.args)
-                with open("file1", "r") as f:
-                    lines = f.readlines()
-                with open("file1", "w") as f:
-                    for line in lines:
-                        parts = line.split()
-                        if len(parts) >= 9:
-                            f.write(f"{parts[3]} {parts[8]}\n")
-            finally:
-                os.chdir(old_cwd)
+            self._pt_table_checksum_counts("file1")
 
         time.sleep(2)
 
@@ -1738,72 +1836,185 @@ class BackupTestHelper:
 
         self.start_server()
 
+        # --- Replay binlog written after the backup ---
+        # The "before" snapshot was taken from the live server after the
+        # backup, so the restored data only matches it once the binlog
+        # events from the backup position onward have been replayed.
+        binlog_applied = self._apply_binlog_since_backup(full_target, data_orig)
+
         # --- Verify ---
+        if not binlog_applied:
+            print("Binlog applying skipped, ignore differences between actual data and restored data")
         if use_detailed_verify:
-            self.verify_data_integrity(databases, orig_data)
+            self.verify_data_integrity(
+                databases, orig_data, compare_data=binlog_applied,
+                # sysbench oltp_insert only inserts, so ids must have no gaps.
+                check_id_gaps=self.detailed_verify and self.load_tool == "sysbench",
+            )
         else:
-            if (
-                "binlog-encryption" not in self.mysqld_options
-                and "encrypt-binlog" not in self.mysqld_options
-                and "skip-log-bin" not in self.mysqld_options
-            ):
-                print("Check xtrabackup for binlog position")
-                binlog_info_file = os.path.join(full_target, "xtrabackup_binlog_info")
-                with open(binlog_info_file, "r") as f:
-                    line = f.readline().strip()
-                    parts = line.split()
-                    xb_binlog_file = parts[0] if parts else ""
-                    xb_binlog_pos = parts[1] if len(parts) > 1 else ""
+            # CHECK TABLE on every table (and server alive check), like the
+            # bash script, before the pt-table-checksum comparison.
+            self.verify_data_integrity(databases, compare_data=False)
+        if not use_detailed_verify and binlog_applied:
+            print("Collecting table count after restore")
+            self._pt_table_checksum_counts("file2")
+            old_cwd = os.getcwd()
+            os.chdir(self.logdir)
+            try:
+                result = subprocess.run(["diff", "file1", "file2"], capture_output=True, text=True)
+                if result.returncode != 0:
+                    print("ERR: Difference found in table count before and after restore.")
+                else:
+                    print("Data is the same before and after restore: Pass")
+                    os.remove("file1")
+                    os.remove("file2")
+            finally:
+                os.chdir(old_cwd)
 
-                print(f"Xtrabackup binlog position: {xb_binlog_file}, {xb_binlog_pos}")
-                print(f"Applying binlog to restored data starting from {xb_binlog_file}, {xb_binlog_pos}")
-                binlog_path = os.path.join(data_orig, xb_binlog_file)
-                if os.path.exists(binlog_path):
-                    mysqlbinlog = subprocess.Popen(
-                        [os.path.join(self.mysqldir, "bin/mysqlbinlog"), binlog_path, f"--start-position={xb_binlog_pos}"],
-                        stdout=subprocess.PIPE,
-                    )
-                    mysql = subprocess.Popen(
-                        [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}"],
-                        stdin=mysqlbinlog.stdout,
-                    )
-                    mysqlbinlog.stdout.close()
-                    mysql.communicate()
-                    if mysql.returncode != 0:
-                        print("ERR: The binlog could not be applied to the restored data")
+    def _server_has_rocksdb_tables(self) -> bool:
+        """Whether any table on the primary uses the ROCKSDB engine, in any database."""
+        out = self.primary.mysql(
+            "SELECT COUNT(*) FROM information_schema.TABLES WHERE ENGINE = 'ROCKSDB';",
+            capture=True, check=False,
+        )
+        last = out.split()[-1] if out else ""
+        return last.isdigit() and int(last) > 0
 
-                time.sleep(5)
+    def _wait_for_writers(self, timeout: int = WRITERS_QUIESCE_TIMEOUT) -> None:
+        """Wait for the background load tool and ``ddl_*`` threads to finish.
 
-                print("Collecting table count after restore")
-                old_cwd = os.getcwd()
-                os.chdir(self.logdir)
-                try:
-                    with open("file2", "w") as f:
-                        result = subprocess.run(
-                            ["pt-table-checksum", f"S={self.socket_path},u=root",
-                             "-d", "test", "--recursion-method", "none", "--no-check-binlog-format"],
-                            stdout=f, check=False,
-                        )
-                        if result.returncode not in (0, 64):
-                            raise subprocess.CalledProcessError(result.returncode, result.args)
-                    with open("file2", "r") as f:
-                        lines = f.readlines()
-                    with open("file2", "w") as f:
-                        for line in lines:
-                            parts = line.split()
-                            if len(parts) >= 9:
-                                f.write(f"{parts[3]} {parts[8]}\n")
-                    result = subprocess.run(["diff", "file1", "file2"], capture_output=True, text=True)
-                    if result.returncode != 0:
-                        print("ERR: Difference found in table count before and after restore.")
-                    else:
-                        print("Data is the same before and after restore: Pass")
-                        os.remove("file1")
-                        os.remove("file2")
-                finally:
-                    os.chdir(old_cwd)
-            else:
-                print("Binlog applying skipped, ignore differences between actual data and restored data")
+        The ``ddl_*`` loops are asked to stop at their next iteration, so only
+        the statement each one is running has to complete.
+
+        The pre-restore baseline must include every write that the binlog
+        replay later applies to the restored server. A writer still running
+        after the baseline is recorded commits rows that the replay adds but
+        the baseline lacks, giving false row count/checksum mismatches. Both
+        writers are time- or iteration-bounded, so this wait is short.
+
+        Fails the test if they are still running after ``timeout`` seconds.
+        """
+        deadline = time.monotonic() + timeout
+        if self.is_load_running():
+            print(f"Waiting for {self.load_tool} load to finish before collecting data")
+            while self.is_load_running():
+                if time.monotonic() >= deadline:
+                    pytest.fail(f"ERR: {self.load_tool} load still running after {timeout}s")
+                time.sleep(1)
+
+        # The backups are done, so the DDL loops have served their purpose:
+        # let them stop after the statement they are running now.
+        self._ddl_stop.set()
+        ddl_threads = [t for t in threading.enumerate() if t.name.startswith("ddl_") and t.is_alive()]
+        if ddl_threads:
+            print(f"Stopping DDL threads and waiting for their current statement: "
+                  f"{', '.join(t.name for t in ddl_threads)}")
+        for t in ddl_threads:
+            t.join(timeout=max(0.0, deadline - time.monotonic()))
+            if t.is_alive():
+                pytest.fail(f"ERR: DDL thread {t.name} still running after {timeout}s")
+
+    def _pt_table_checksum_counts(self, out_name: str) -> None:
+        """Write ``<ROWS> <TABLE>`` per table of the ``test`` database to ``logdir/out_name``.
+
+        Uses pt-table-checksum. Fails the test if pt-table-checksum produced no
+        table rows: it can abort (for example when RocksDB tables exist on the
+        server) and still exit 0, which would leave both files empty and make
+        the before/after diff pass without checking anything.
+        """
+        out_path = os.path.join(self.logdir, out_name)
+        result = subprocess.run(
+            ["pt-table-checksum", f"S={self.socket_path},u=root",
+             "-d", "test", "--recursion-method", "none", "--no-check-binlog-format"],
+            capture_output=True, text=True, check=False, cwd=self.logdir,
+        )
+        if result.returncode not in (0, 64):
+            raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+
+        rows = []
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            # Skip the "TS ERRORS DIFFS ROWS ... TABLE" header line.
+            if len(parts) >= 9 and parts[0] != "TS":
+                rows.append(f"{parts[3]} {parts[8]}")
+        if not rows:
+            pytest.fail(
+                "ERR: pt-table-checksum returned no table checksums, cannot compare data "
+                f"before and after restore.\npt-table-checksum output:\n{result.stdout}{result.stderr}"
+            )
+        with open(out_path, "w") as f:
+            f.write("ROWS TABLE\n")
+            f.writelines(f"{r}\n" for r in rows)
+
+    def _apply_binlog_since_backup(self, full_target: str, data_orig: str) -> bool:
+        """Replay binlog events written after the backup onto the restored server.
+
+        Reads the binlog file/position from ``xtrabackup_binlog_info`` in the
+        backup and pipes ``mysqlbinlog --start-position`` from the original
+        (moved-aside) datadir into the restored server.
+
+        Returns True if the binlog was replayed, so before/after data can be
+        compared; False only when replay is intentionally not possible
+        (binlog encrypted, or binary logging disabled on the server).
+
+        Fails the test if binary logging is enabled but the replay
+        prerequisites are missing (no ``xtrabackup_binlog_info``, no binlog
+        file name in it, or the binlog file is not in the original datadir),
+        or if ``mysqlbinlog`` or ``mysql`` exits with an error during replay,
+        since the restored data could otherwise go unverified.
+        """
+        if (
+            "binlog-encryption" in self.mysqld_options
+            or "encrypt-binlog" in self.mysqld_options
+            or "skip-log-bin" in self.mysqld_options
+        ):
+            return False
+
+        # Binary logging can also be off without --skip-log-bin (e.g. the
+        # server default on 5.7); then there is nothing to replay.
+        log_bin = self.primary.mysql("SELECT @@log_bin;", capture=True, check=False)
+        if log_bin is not None and log_bin.split()[-1:] == ["0"]:
+            print("Binary logging is disabled on the server, binlog cannot be applied")
+            return False
+
+        print("Check xtrabackup for binlog position")
+        binlog_info_file = os.path.join(full_target, "xtrabackup_binlog_info")
+        if not os.path.isfile(binlog_info_file):
+            pytest.fail(f"ERR: {binlog_info_file} not found, cannot apply binlog to restored data")
+        with open(binlog_info_file, "r") as f:
+            parts = f.readline().strip().split()
+        xb_binlog_file = parts[0] if parts else ""
+        xb_binlog_pos = parts[1] if len(parts) > 1 else ""
+
+        print(f"Xtrabackup binlog position: {xb_binlog_file}, {xb_binlog_pos}")
+        binlog_path = os.path.join(data_orig, xb_binlog_file)
+        if not xb_binlog_file:
+            pytest.fail(f"ERR: No binlog file name in {binlog_info_file}, cannot apply binlog to restored data")
+        if not os.path.exists(binlog_path):
+            pytest.fail(f"ERR: Binlog file {binlog_path} not found, cannot apply binlog to restored data")
+
+        print(f"Applying binlog to restored data starting from {xb_binlog_file}, {xb_binlog_pos}")
+        mysqlbinlog = subprocess.Popen(
+            [os.path.join(self.mysqldir, "bin/mysqlbinlog"), binlog_path, f"--start-position={xb_binlog_pos}"],
+            stdout=subprocess.PIPE,
+        )
+        mysql = subprocess.Popen(
+            [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}"],
+            stdin=mysqlbinlog.stdout,
+        )
+        mysqlbinlog.stdout.close()
+        mysql.communicate()
+        mysqlbinlog.wait()
+        # Check both ends of the pipe: if mysqlbinlog fails without producing
+        # SQL, mysql still exits 0 on the empty input.
+        if mysqlbinlog.returncode != 0 or mysql.returncode != 0:
+            pytest.fail(
+                "ERR: The binlog could not be applied to the restored data "
+                f"(mysqlbinlog exit code {mysqlbinlog.returncode}, mysql exit code {mysql.returncode})"
+            )
+
+        time.sleep(5)
+        return True
 
     def _decrypt_decompress(self, target_dir: str, backup_params: str):
         """Run decrypt / decompress passes if backup_params requested them and
@@ -1915,49 +2126,72 @@ class BackupTestHelper:
                 data[db][table] = (count, cksum)
         return data
 
-    def verify_data_integrity(self, databases: List[str], orig_data: Optional[Dict] = None):
-        """Per-table CHECK TABLE, record count comparison, checksum comparison, and ID gap detection."""
-        check_err = 0
-        for db in databases:
-            result = subprocess.run(
-                [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
-                 f"SHOW TABLES FROM {db};"],
+    def verify_data_integrity(
+        self,
+        databases: List[str],
+        orig_data: Optional[Dict] = None,
+        compare_data: bool = True,
+        check_id_gaps: bool = False,
+    ):
+        """Per-table CHECK TABLE, plus record count and checksum comparison with ``orig_data``.
+
+        Args:
+            databases: databases to check.
+            orig_data: ``collect_table_data()`` snapshot taken before restore.
+            compare_data: compare row counts/checksums with ``orig_data``. Pass
+                False when the binlog could not be replayed onto the restored
+                data, since differences are then expected, or to run only the
+                table checks (as take_backup() does before pt-table-checksum).
+            check_id_gaps: also check that the ``id`` column of each sysbench
+                table (``sbtestN``) runs 1..N without gaps. Only valid for
+                insert-only sysbench data; a gap is printed as ERR but does
+                not fail the test (same as the bash script).
+
+        Fails the test if the server went down, if a database cannot be
+        listed, if any table does not pass ``CHECK TABLE``, or (when
+        ``compare_data``) if a table in ``orig_data`` is missing after restore.
+        The bash script ran ``CHECK TABLE`` on the expected table list and
+        exited on failure, so a missing table failed the test there too.
+        Row count/checksum differences from ``orig_data`` are printed as ERR
+        but do not fail the test (same as the bash script).
+        """
+        mysql_bin = os.path.join(self.mysqldir, "bin/mysql")
+        db_list = " ".join(databases)
+
+        def query(sql: str) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                [mysql_bin, "-uroot", f"-S{self.socket_path}", "-BNe", sql],
                 capture_output=True, text=True, check=False,
             )
+
+        # --- Table status (CHECK TABLE) ---
+        check_failures: List[str] = []
+        sbtest_tables: List[Tuple[str, str]] = []
+        print(f"Check the table status in databases: {db_list}")
+        for db in databases:
+            result = query(f"SHOW TABLES FROM {db};")
             if result.returncode != 0:
-                print(f"Warning: Could not list tables in {db}")
+                status = result.stderr.strip() or result.stdout.strip()
+                print(f"ERR: Could not list tables in {db}: {status}")
+                check_failures.append(f"{db}: could not list tables: {status}")
                 continue
             tables = [t.strip() for t in result.stdout.strip().split("\n") if t.strip()]
+            sbtest_tables += [(db, t) for t in tables if re.fullmatch(r"sbtest\d+", t)]
+
+            # Every table recorded before restore must still exist. Without a
+            # binlog replay, tables created after the backup are expected to
+            # be missing, so only check this when comparing data.
+            if compare_data and orig_data:
+                for table in sorted(set(orig_data.get(db, {})) - set(tables)):
+                    print(f"ERR: Table {db}.{table} is missing after restore")
+                    check_failures.append(f"{db}.{table}: missing after restore")
+
             for table in tables:
-                check_result = subprocess.run(
-                    [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
-                     f"CHECK TABLE {db}.{table}"],
-                    capture_output=True, text=True, check=False,
-                )
+                check_result = query(f"CHECK TABLE {db}.{table}")
                 if check_result.returncode != 0 or "OK" not in check_result.stdout:
-                    print(f"ERR: CHECK TABLE {db}.{table} failed: {check_result.stdout}")
-                    check_err = 1
-
-                if orig_data and db in orig_data and table in orig_data[db]:
-                    orig_count, orig_cksum = orig_data[db][table]
-                    count_result = subprocess.run(
-                        [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
-                         f"SELECT COUNT(*) FROM {db}.{table}"],
-                        capture_output=True, text=True, check=False,
-                    )
-                    new_count = count_result.stdout.strip() if count_result.returncode == 0 else "ERR"
-                    if new_count != orig_count:
-                        print(f"Warning: Row count mismatch for {db}.{table}: before={orig_count}, after={new_count}")
-
-                    cksum_result = subprocess.run(
-                        [os.path.join(self.mysqldir, "bin/mysql"), "-uroot", f"-S{self.socket_path}", "-BNe",
-                         f"CHECKSUM TABLE {db}.{table}"],
-                        capture_output=True, text=True, check=False,
-                    )
-                    cksum_parts = cksum_result.stdout.strip().split() if cksum_result.returncode == 0 else []
-                    new_cksum = cksum_parts[1] if len(cksum_parts) >= 2 else "ERR"
-                    if new_cksum != orig_cksum:
-                        print(f"Warning: Checksum mismatch for {db}.{table}: before={orig_cksum}, after={new_cksum}")
+                    status = check_result.stdout.strip() or check_result.stderr.strip()
+                    print(f"ERR: CHECK TABLE {db}.{table} failed: {status}")
+                    check_failures.append(f"{db}.{table}: {status}")
 
         ping_result = subprocess.run(
             [os.path.join(self.mysqldir, "bin/mysqladmin"), "ping", "--user=root", f"--socket={self.socket_path}"],
@@ -1966,10 +2200,92 @@ class BackupTestHelper:
         if ping_result.returncode != 0:
             pytest.fail("ERR: The database has gone down due to corruption, the restore was unsuccessful")
 
-        if check_err == 0:
-            print("All table status: OK")
-        else:
-            print("After restore, some tables may be corrupt, check table status is not OK")
+        if check_failures:
+            pytest.fail(
+                "ERR: After restore, some tables are missing or may be corrupt (check table status is not OK):\n  "
+                + "\n  ".join(check_failures)
+            )
+        print("All table status: OK")
+
+        if compare_data and orig_data:
+            self._compare_with_orig_data(databases, orig_data, query)
+
+        if check_id_gaps:
+            self._check_id_gaps(sbtest_tables, query)
+
+    def _compare_with_orig_data(self, databases: List[str], orig_data: Dict, query) -> None:
+        """Compare record count and checksum of every table in ``orig_data`` (bash order and messages)."""
+        db_list = " ".join(databases)
+
+        # Like the bash script, a record count/checksum mismatch is reported
+        # as ERR but does not fail the test. Every table in orig_data exists
+        # at this point (missing ones failed above).
+        compared = [(db, table) for db in databases for table in sorted(orig_data.get(db, {}))]
+
+        # --- Record count of each table ---
+        print(f"Check the record count of tables in databases: {db_list}")
+        rc_err = False
+        for db, table in compared:
+            orig_count = orig_data[db][table][0]
+            count_result = query(f"SELECT COUNT(*) FROM {db}.{table}")
+            new_count = count_result.stdout.strip() if count_result.returncode == 0 else "ERR"
+            if new_count != orig_count:
+                print(f"ERR: The record count of {db}.{table} changed after restore. "
+                      f"Record count in original data: {orig_count}. Record count in restored data: {new_count}.")
+                rc_err = True
+        if not rc_err:
+            print(f"Match record count of tables in databases {db_list} with original data: Pass")
+
+        # --- Checksum of each table ---
+        print(f"Check the checksum of each table in databases: {db_list}")
+        checksum_err = False
+        for db, table in compared:
+            orig_cksum = orig_data[db][table][1]
+            cksum_result = query(f"CHECKSUM TABLE {db}.{table}")
+            cksum_parts = cksum_result.stdout.strip().split() if cksum_result.returncode == 0 else []
+            new_cksum = cksum_parts[1] if len(cksum_parts) >= 2 else "ERR"
+            if new_cksum != orig_cksum:
+                print(f"ERR: The checksum of {db}.{table} changed after restore. "
+                      f"Checksum in original data: {orig_cksum}. Checksum in restored data: {new_cksum}.")
+                checksum_err = True
+        if not checksum_err:
+            print(f"Match checksum of all tables in databases {db_list} with original data: Pass")
+
+    @staticmethod
+    def _check_id_gaps(tables: List[Tuple[str, str]], query) -> None:
+        """Check that ``id`` in each (db, sbtestN) table runs 1..COUNT(*) without gaps.
+
+        Port of the bash gap check. Reports the first gap per table as ERR
+        and does not fail the test.
+        """
+        print("Check for gaps in primary sequence id of tables")
+        gap_found = False
+        for db, table in tables:
+            r = query(f"SELECT COUNT(*), COALESCE(MIN(id), 0), COALESCE(MAX(id), 0) FROM {db}.{table}")
+            parts = r.stdout.split() if r.returncode == 0 else []
+            if len(parts) != 3 or not all(p.isdigit() for p in parts):
+                print(f"ERR: Could not read id range of {db}.{table}: {r.stderr.strip() or r.stdout.strip()}")
+                gap_found = True
+                continue
+            count, min_id, max_id = (int(p) for p in parts)
+            if count == 0 or (min_id == 1 and max_id == count):
+                continue
+            if min_id != 1:
+                expected, actual = 1, min_id
+            else:
+                # First id whose successor is missing; the gap starts right after it.
+                r = query(
+                    f"SELECT MIN(t1.id) + 1 FROM {db}.{table} t1 LEFT JOIN {db}.{table} t2 "
+                    f"ON t2.id = t1.id + 1 WHERE t2.id IS NULL AND t1.id < {max_id}"
+                )
+                expected = r.stdout.strip()
+                r = query(f"SELECT MIN(id) FROM {db}.{table} WHERE id > {expected or 0}")
+                actual = r.stdout.strip()
+            print(f"ERR: Gap found in {db}.{table}. Expected sequence number for ID is: {expected}. "
+                  f"Actual sequence number for ID is: {actual}.")
+            gap_found = True
+        if not gap_found:
+            print("No gaps found in primary sequence id of tables: Pass")
 
     def stop_vault_server(self) -> None:
         """Kill any running HashiCorp Vault server process."""
@@ -2230,9 +2546,19 @@ class BackupTestHelper:
 
     def run_ddl_in_background(self, ddl_func, *args, **kwargs) -> threading.Thread:
         """Launch a DDL operation in a background thread. Returns the thread handle."""
-        thread = threading.Thread(target=ddl_func, args=args, kwargs=kwargs, daemon=True, name=f"ddl_{ddl_func.__name__}")
+        # The "ddl_" prefix is how _wait_for_writers() finds these threads.
+        # The DDL functions are already named ddl_*, so don't add it twice.
+        self._ddl_stop.clear()
+        name = ddl_func.__name__
+        if not name.startswith("ddl_"):
+            name = f"ddl_{name}"
+        thread = threading.Thread(target=ddl_func, args=args, kwargs=kwargs, daemon=True, name=name)
         thread.start()
         return thread
+
+    def _ddl_continue(self) -> bool:
+        """Whether a ddl_* loop should run another iteration: not asked to stop and server alive."""
+        return not self._ddl_stop.is_set() and self._is_server_alive()
 
     def _is_server_alive(self) -> bool:
         """Check if the primary MySQL server is alive via ``mysqladmin ping``."""
@@ -2252,13 +2578,13 @@ class BackupTestHelper:
         """Change storage engine of tables between MYISAM and INNODB (and ROCKSDB if enabled)."""
         print("DDL: Change storage engine of test.sbtest1")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 ENGINE=MYISAM;")
             self._run_sql("ALTER TABLE test.sbtest1 ENGINE=INNODB;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ENGINE=INNODB;")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ENGINE=ROCKSDB;")
@@ -2269,7 +2595,7 @@ class BackupTestHelper:
         """Add and drop indexes on tables."""
         print("DDL: Add and drop index on test.sbtest1")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE INDEX kc ON test.sbtest1 (k,c);")
             self._run_sql("ALTER TABLE test.sbtest1 ADD INDEX kc2 (k,c);")
@@ -2279,7 +2605,7 @@ class BackupTestHelper:
             self._run_sql("DROP INDEX kc ON test.sbtest1;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("CREATE INDEX kc ON test_rocksdb.sbtest1 (k,c);")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 ADD INDEX kc2 (k,c);")
@@ -2292,13 +2618,13 @@ class BackupTestHelper:
         """Rename indexes on tables."""
         print("DDL: Rename index on test.sbtest1")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 RENAME INDEX k_1 TO k_2, ALGORITHM=INPLACE, LOCK=NONE;")
             self._run_sql("ALTER TABLE test.sbtest1 RENAME INDEX k_2 TO k_1, ALGORITHM=INPLACE, LOCK=NONE;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 RENAME INDEX k_1 TO k_2, ALGORITHM=INPLACE, LOCK=NONE;")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 RENAME INDEX k_2 TO k_1, ALGORITHM=INPLACE, LOCK=NONE;")
@@ -2307,13 +2633,13 @@ class BackupTestHelper:
         """Add and drop full text index."""
         print("DDL: Add and drop full text index on test.sbtest1")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE FULLTEXT INDEX full_index ON test.sbtest1 (pad);")
             self._run_sql("DROP INDEX full_index ON test.sbtest1;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("CREATE FULLTEXT INDEX full_index ON test_rocksdb.sbtest1 (pad);")
                 self._run_sql("DROP INDEX full_index ON test_rocksdb.sbtest1;")
@@ -2322,13 +2648,13 @@ class BackupTestHelper:
         """Change index type between BTREE and HASH."""
         print("DDL: Change index type on test.sbtest1")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING BTREE, ALGORITHM=INSTANT;")
             self._run_sql("ALTER TABLE test.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING HASH, ALGORITHM=INSTANT;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING BTREE, ALGORITHM=INSTANT;")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 DROP INDEX k_1, ADD INDEX k_1(k) USING HASH, ALGORITHM=INSTANT;")
@@ -2338,14 +2664,14 @@ class BackupTestHelper:
         print("DDL: Spatial data and index on test.geom")
         a, b = 1, 2
         for _ in range(100):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql(f"INSERT INTO test.geom VALUES(POINT({a},{b}));")
             a += 1
             b += 1
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("CREATE SPATIAL INDEX spa_index ON test.geom (g), ALGORITHM=INPLACE, LOCK=SHARED;")
                 self._run_sql("DROP INDEX spa_index ON test.geom;")
@@ -2354,7 +2680,7 @@ class BackupTestHelper:
         """Add table to tablespace and drop both."""
         print("DDL: Add and drop tablespace")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE TABLESPACE ts1 ADD DATAFILE 'ts1.ibd' Engine=InnoDB;")
             self._run_sql("CREATE TABLE test.sbtest1copy SELECT * FROM test.sbtest1;")
@@ -2363,7 +2689,7 @@ class BackupTestHelper:
             self._run_sql("DROP TABLESPACE ts1;")
         if self.rocksdb == "enabled":
             for i in range(1, 11):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql(f"CREATE TABLE test_rocksdb.sbrcopy{i} Engine=ROCKSDB SELECT * FROM test.sbtest1;")
                 self._run_sql(f"DROP TABLE test_rocksdb.sbrcopy{i};")
@@ -2372,14 +2698,14 @@ class BackupTestHelper:
         """Change compression of tables."""
         print("DDL: Change compression")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 COMPRESSION='lz4';")
             self._run_sql("ALTER TABLE test.sbtest1 COMPRESSION='zlib';")
             self._run_sql("ALTER TABLE test.sbtest1 COMPRESSION='';")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 COMMENT = 'cfname=cf1';")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest1 COMMENT = 'cfname=cf2';")
@@ -2390,7 +2716,7 @@ class BackupTestHelper:
         """Change row format of tables."""
         print("DDL: Change row format")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest2 ROW_FORMAT=COMPRESSED;")
             self._run_sql("ALTER TABLE test.sbtest2 ROW_FORMAT=DYNAMIC;")
@@ -2398,7 +2724,7 @@ class BackupTestHelper:
             self._run_sql("ALTER TABLE test.sbtest2 ROW_FORMAT=REDUNDANT;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest2 ROW_FORMAT=COMPRESSED;")
                 self._run_sql("ALTER TABLE test_rocksdb.sbtest2 ROW_FORMAT=DYNAMIC;")
@@ -2411,7 +2737,7 @@ class BackupTestHelper:
         self._run_sql("CREATE TABLE IF NOT EXISTS test.myrocks_t(id int(11) PRIMARY KEY AUTO_INCREMENT, k int(11), c char(120), pad char(60), KEY k_1(k), KEY kc(k,c)) ENGINE=ROCKSDB;")
         a, b, c = 1, 11, 101
         for _ in range(200):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql(f"START TRANSACTION; INSERT INTO test.innodb_t(k, c, pad) VALUES({a}, {b}, {c}); INSERT INTO test.myrocks_t(k, c, pad) VALUES({a}, {b}, {c}); COMMIT;")
             a += 1
@@ -2422,14 +2748,14 @@ class BackupTestHelper:
         """Update and truncate tables."""
         print("DDL: Update and truncate tables")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("UPDATE test.sbtest1 SET c='test_update_data';")
             self._run_sql("OPTIMIZE TABLE test.sbtest1;")
             self._run_sql("TRUNCATE test.sbtest1;")
         if self.rocksdb == "enabled":
             for _ in range(10):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("UPDATE test_rocksdb.sbtest2 SET c='test_update_data';")
                 self._run_sql("OPTIMIZE TABLE test_rocksdb.sbtest2;")
@@ -2439,7 +2765,7 @@ class BackupTestHelper:
         """Create a database, add data, and drop it."""
         print("DDL: Create and drop database")
         for _ in range(3):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE DATABASE IF NOT EXISTS test1_innodb;")
             subprocess.run(
@@ -2455,7 +2781,7 @@ class BackupTestHelper:
             self._run_sql("DROP DATABASE test1_innodb;")
         if self.rocksdb == "enabled":
             for _ in range(3):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql("CREATE DATABASE IF NOT EXISTS test1_rocksdb;")
                 subprocess.run(
@@ -2473,7 +2799,7 @@ class BackupTestHelper:
         print("DDL: Create and delete encrypted tables")
         self._run_sql("CREATE DATABASE IF NOT EXISTS test_innodb;")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE TABLE test_innodb.sbtest1 (id int(11) NOT NULL AUTO_INCREMENT, k int(11) NOT NULL DEFAULT '0', c char(120) NOT NULL DEFAULT '', pad char(60) NOT NULL DEFAULT '', PRIMARY KEY (id), KEY k_1 (k)) ENGINE=InnoDB DEFAULT CHARSET=latin1 ENCRYPTION='Y' COMPRESSION='lz4';")
             subprocess.run(
@@ -2488,7 +2814,7 @@ class BackupTestHelper:
         """Toggle encryption on a table."""
         print("DDL: Change encryption")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 ENCRYPTION='N';")
             self._run_sql("ALTER TABLE test.sbtest1 ENCRYPTION='Y';")
@@ -2497,7 +2823,7 @@ class BackupTestHelper:
         """Compress and uncompress a column."""
         print("DDL: Compressed column")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 MODIFY c VARCHAR(250) COLUMN_FORMAT COMPRESSED NOT NULL DEFAULT '';")
             self._run_sql("ALTER TABLE test.sbtest1 MODIFY c CHAR(120) COLUMN_FORMAT DEFAULT NOT NULL DEFAULT '';")
@@ -2509,7 +2835,7 @@ class BackupTestHelper:
             print("Compression dictionary not supported, skipping")
             return
         for i in range(1, self.num_tables + 1):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql(f"ALTER TABLE test.sbtest{i} MODIFY c VARCHAR(250) COLUMN_FORMAT COMPRESSED WITH COMPRESSION_DICTIONARY numbers NOT NULL DEFAULT '';")
             self._run_sql(f"ALTER TABLE test.sbtest{i} MODIFY c CHAR(120) COLUMN_FORMAT DEFAULT NOT NULL DEFAULT '';")
@@ -2528,17 +2854,17 @@ class BackupTestHelper:
             capture_output=True, check=False,
         )
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 COALESCE PARTITION 5;")
             self._run_sql("ALTER TABLE test.sbtest1 PARTITION BY HASH(id) PARTITIONS 10;")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest2 DROP PARTITION p2;")
             self._run_sql("ALTER TABLE test.sbtest2 ADD PARTITION (PARTITION p2 VALUES LESS THAN MAXVALUE);")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest3 REBUILD PARTITION p0, p1;")
             self._run_sql("ALTER TABLE test.sbtest3 OPTIMIZE PARTITION p2;")
@@ -2559,7 +2885,7 @@ class BackupTestHelper:
         """Create user, grant privileges, then drop."""
         print("DDL: Grant tables")
         for _ in range(50):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("CREATE USER 'bkpuser'@'localhost' IDENTIFIED BY 's3cret';")
             self._run_sql("GRANT RELOAD, LOCK TABLES, PROCESS, REPLICATION CLIENT ON *.* TO 'bkpuser'@'localhost'; FLUSH PRIVILEGES;")
@@ -2569,7 +2895,7 @@ class BackupTestHelper:
         """Add and drop invisible column."""
         print("DDL: Invisible column")
         for _ in range(10):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 ADD COLUMN invisible int DEFAULT 1 invisible first;")
             self._run_sql("UPDATE test.sbtest1 SET invisible = id;")
@@ -2579,7 +2905,7 @@ class BackupTestHelper:
         """Add and drop blob column."""
         print("DDL: Blob column")
         for _ in range(30):
-            if not self._is_server_alive():
+            if not self._ddl_continue():
                 break
             self._run_sql("ALTER TABLE test.sbtest1 ADD COLUMN blob_col blob;")
             self._run_sql("UPDATE test.sbtest1 SET blob_col = c;")
@@ -2593,7 +2919,7 @@ class BackupTestHelper:
         print("DDL: Add/drop column instant")
         for table in ["sbtest1", "sbtest2", "sbtest3", "sbtest4", "sbtest5"]:
             for _ in range(20):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 self._run_sql(f"ALTER TABLE test.{table} ADD COLUMN b CHAR(50) NOT NULL DEFAULT '' AFTER k, ALGORITHM=INSTANT;")
                 self._run_sql(f"UPDATE test.{table} SET b = k;")
@@ -2612,7 +2938,7 @@ class BackupTestHelper:
         ]
         for table, add_algo, drop_algo in algos:
             for _ in range(20):
-                if not self._is_server_alive():
+                if not self._ddl_continue():
                     break
                 add_clause = f", {add_algo}" if add_algo else ""
                 drop_clause = f", {drop_algo}" if drop_algo else ""
@@ -2660,7 +2986,6 @@ class BackupTestHelper:
         self, inc_num: int, incremental_basedir: str, log_date: str
     ) -> None:
         """Take one incremental backup."""
-        base_opt, _inc_dir_opt, _redo_only_opt = self.incremental_option_names()
         print(f"=>Taking incremental backup: {inc_num}")
         cmd = self._xtrabackup_cmd_prefix() + [
             "--no-defaults",
@@ -2668,7 +2993,7 @@ class BackupTestHelper:
             "--password=",
             "--backup",
             f"--target-dir={self.backup_dir}/inc{inc_num}",
-            f"{base_opt}={incremental_basedir}",
+            f"{self.xb_opt('incremental-basedir')}={incremental_basedir}",
             f"-S{self.socket_path}",
             f"--datadir={self.datadir}",
         ] + self.backup_params.split() + ["--register-redo-log-consumer"]
@@ -2795,8 +3120,14 @@ class BackupTestHelper:
                 )
                 mysqlbinlog.stdout.close()
                 mysql.communicate()
-                if mysql.returncode != 0:
-                    print("ERR: The binlog could not be applied to the restored data")
+                mysqlbinlog.wait()
+                # Check both ends of the pipe: if mysqlbinlog fails without
+                # producing SQL, mysql still exits 0 on the empty input.
+                if mysqlbinlog.returncode != 0 or mysql.returncode != 0:
+                    pytest.fail(
+                        "ERR: The binlog could not be applied to the restored data "
+                        f"(mysqlbinlog exit code {mysqlbinlog.returncode}, mysql exit code {mysql.returncode})"
+                    )
             time.sleep(5)
             print("Collecting table count after restore")
             res_data = self.count_rows()
@@ -2814,13 +3145,12 @@ class BackupTestHelper:
         self.check_tables()
 
     def prepare_crash_backup_chain(self, num_incremental: int, log_date: str) -> None:
-        """Prepare full backup then incremental 1..num_incremental (last without redo-only)."""
-        _base_opt, inc_dir_opt, redo_only_opt = self.incremental_option_names()
+        """Prepare full backup then incremental 1..num_incremental (last one without --apply-redo-only/--apply-log-only)."""
         print("=>Preparing full backup")
         cmd = self._xtrabackup_cmd_prefix() + [
             "--no-defaults",
             "--prepare",
-            redo_only_opt,
+            self.xb_opt("apply-log-only"),
             f"--target_dir={self.backup_dir}/full",
         ] + self._prepare_args_for_pxb_version(self.prepare_params)
         log_file = os.path.join(self.logdir, f"prepare_full_backup_{log_date}_log")
@@ -2835,15 +3165,15 @@ class BackupTestHelper:
                     "--no-defaults",
                     "--prepare",
                     f"--target_dir={self.backup_dir}/full",
-                    f"{inc_dir_opt}={self.backup_dir}/inc{i}",
+                    f"{self.xb_opt('incremental-dir')}={self.backup_dir}/inc{i}",
                 ] + self._prepare_args_for_pxb_version(self.prepare_params)
             else:
                 cmd = self._xtrabackup_cmd_prefix() + [
                     "--no-defaults",
                     "--prepare",
-                    redo_only_opt,
+                    self.xb_opt("apply-log-only"),
                     f"--target_dir={self.backup_dir}/full",
-                    f"{inc_dir_opt}={self.backup_dir}/inc{i}",
+                    f"{self.xb_opt('incremental-dir')}={self.backup_dir}/inc{i}",
                 ] + self._prepare_args_for_pxb_version(self.prepare_params)
             log_file = os.path.join(self.logdir, f"prepare_inc{i}_backup_{log_date}_log")
             result = self.run_command(cmd, check=False, log_file=log_file)

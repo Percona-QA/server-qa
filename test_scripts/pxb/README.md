@@ -563,6 +563,8 @@ In addition to the [common prerequisites](#common-prerequisites):
 
 If either dependency is missing, the entire module is skipped at collection time.
 
+These tests always load data with sysbench, whatever `LOAD_TOOL` is set to, so pstress is not needed for them.
+
 Recommended `TEST_BASE_DIR` override (keeps replication artefacts separate from other suites):
 
 ```bash

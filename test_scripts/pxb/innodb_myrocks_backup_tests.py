@@ -1506,7 +1506,9 @@ def test_copy_back_largest_file_first(test_helper):
     test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
     test_helper.initialize_db(rocksdb=rocksdb_enabled)
-    _build_adversarial_dataset(test_helper)
+    # PARALLEL_DEGREE large tables among the decoys: the first-N check below needs
+    # exactly N files that are larger than the rest (the small ones tie on size).
+    _build_mixed_dataset(test_helper)
     if rocksdb_enabled:
         _build_adversarial_dataset(test_helper, rocksdb=True, small_db=SMALL_DB_ROCKSDB, large_db=LARGE_DB_ROCKSDB)
 
@@ -1574,18 +1576,19 @@ def test_copy_back_largest_file_first(test_helper):
         backed_up = os.path.join(full_target, SMALL_DB, f"sbtest{i}.ibd")
         assert os.path.isfile(restored), f"sbtest{i}.ibd missing from restored datadir: {restored}"
         assert os.path.getsize(restored) == os.path.getsize(backed_up), f"sbtest{i}.ibd size mismatch after copy-back"
-    restored_large = os.path.join(restore_dir, LARGE_DB, "sbtest1.ibd")
-    backed_up_large = os.path.join(full_target, LARGE_DB, "sbtest1.ibd")
-    assert os.path.isfile(restored_large), f"{LARGE_DB}/sbtest1.ibd missing from restored datadir: {restored_large}"
-    assert os.path.getsize(restored_large) == os.path.getsize(backed_up_large), (
-        f"{LARGE_DB}/sbtest1.ibd size mismatch after copy-back"
-    )
+    for n in range(1, PARALLEL_DEGREE + 1):
+        restored_large = os.path.join(restore_dir, SMALL_DB, f"large{n}.ibd")
+        backed_up_large = os.path.join(full_target, SMALL_DB, f"large{n}.ibd")
+        assert os.path.isfile(restored_large), f"large{n}.ibd missing from restored datadir: {restored_large}"
+        assert os.path.getsize(restored_large) == os.path.getsize(backed_up_large), (
+            f"large{n}.ibd size mismatch after copy-back"
+        )
     if rocksdb_enabled:
         restored_rocksdb = os.path.join(restore_dir, ".rocksdb")
         assert os.path.isdir(restored_rocksdb) and os.listdir(restored_rocksdb), (
             f".rocksdb missing or empty in restored datadir: {restored_rocksdb}"
         )
-    print(f"All {NUM_SMALL_TABLES + 1} InnoDB data files"
+    print(f"All {NUM_SMALL_TABLES + PARALLEL_DEGREE} InnoDB data files"
           f"{' and the .rocksdb directory' if rocksdb_enabled else ''} "
           "are present in the restored datadir with matching sizes: Pass")
 

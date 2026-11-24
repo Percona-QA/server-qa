@@ -7,11 +7,15 @@ Assumption: PS and PXB are already installed as tarballs.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import random
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -1685,6 +1689,361 @@ def test_incremental_prepare_largest_delta_first(test_helper):
 
 
 # ============================================================================
+# Vector column / HNSW vector index tests (PXB-3915, PXB-3932)
+# ============================================================================
+#
+# Self-contained: no load tool and no debug server. Each test builds a
+# ``vec`` schema with VECTOR columns and HNSW vector indexes from
+# Python-generated data, takes backups, prepares, restores into a second
+# server and checks that the restored server answers exactly like the
+# source: every row and vector value, the vector functions (VECTOR_DIM,
+# DISTANCE euclidean / cosine / dot), ANN queries through the vector index
+# (EXPLAIN type vector_ann, same ids, a full top-k, high recall against the
+# exact answer - an empty or stale HNSW aux table fails this),
+# AUTO_INCREMENT, SHOW CREATE TABLE, the HNSW aux tablespaces and CHECK TABLE.
+#
+# PXB-3932 is fixed on the server side by PS-12024 (PS >= 9.7.4-4): on older
+# servers the tests that build vector indexes between or during backups run
+# as xfail (non-strict), so the known gap stays visible in the report.
+
+# PXB-3915 (vector tables in backup/prepare) shipped in 9.7.2-3.
+VEC_FIXED_IN_PXB_3915 = {"9.7": "9.7.2-3"}
+# PS-12024 (MLOG_INDEX_LOAD for the HNSW aux table; the fix for PXB-3932).
+VEC_PS_12024_FIXED_IN = (9, 7, 4)
+
+VEC_RESTORE_PORT = MYSQL_PORT + 61
+VEC_SCHEMA = "vec"
+VEC_SEED = 3932
+VEC_ROWS = 1500
+VEC_TOP_K = 10
+VEC_EF_SEARCH = 200
+VEC_MIN_RECALL = 0.9
+
+# name -> (dimension, HNSW options or None for no index, distance metric used by ANN queries)
+VEC_TABLES = {
+    "t_euc": (8, "M = 8, metric = euclidean", "euclidean"),
+    "t_cos": (16, "M = 12, metric = cosine", "cosine"),
+    "t_plain": (4, None, "euclidean"),  # gets a vector index only after the full backup
+}
+
+
+# ============================================================================
+# SQL helpers
+# ============================================================================
+
+def _vec_mysql(test_helper, socket: str, sql: str, force: bool = False) -> subprocess.CompletedProcess:
+    """Run ``sql`` through the mysql client on ``socket`` (batch mode, no column names)."""
+    cmd = [os.path.join(test_helper.mysqldir, "bin/mysql"), "-uroot", f"-S{socket}", "-N", "-B"]
+    if force:
+        cmd.append("--force")
+    return subprocess.run(cmd, input=sql, capture_output=True, text=True, check=False)
+
+
+def _vec_rows(test_helper, socket: str, sql: str) -> list[list[str]]:
+    """Run a query; fail the test on error; return the rows as lists of strings."""
+    result = _vec_mysql(test_helper, socket, sql)
+    if result.returncode != 0:
+        pytest.fail(f"query failed: {sql[:200]}\n{result.stderr.strip()}")
+    return [line.split("\t") for line in result.stdout.splitlines() if line]
+
+
+def _vec_literal(rng: random.Random, dim: int) -> str:
+    """A random non-zero vector literal (non-zero so cosine distance is always defined)."""
+    values = [round(rng.uniform(-1, 1), 3) or 0.001 for _ in range(dim)]
+    return "[" + ",".join(str(x) for x in values) + "]"
+
+
+def _vec_insert_sql(table: str, dim: int, rng: random.Random, count: int) -> str:
+    values = ",".join(f"(STRING_TO_VECTOR('{_vec_literal(rng, dim)}'))" for _ in range(count))
+    return f"INSERT INTO {VEC_SCHEMA}.{table} (v) VALUES {values};\n"
+
+
+def _vec_add_index_sql(table: str) -> str:
+    return f"ALTER TABLE {VEC_SCHEMA}.{table} ADD VECTOR KEY vk (v) TYPE hnsw ({VEC_TABLES['t_euc'][1]});\n"
+
+
+def _vec_create_schema(test_helper) -> None:
+    """Create the vec schema and load VEC_ROWS rows per table (deterministic data)."""
+    rng = random.Random(VEC_SEED)
+    sql = f"CREATE DATABASE IF NOT EXISTS {VEC_SCHEMA};\n"
+    for table, (dim, hnsw, _metric) in VEC_TABLES.items():
+        key = f", VECTOR KEY vk (v) TYPE hnsw ({hnsw})" if hnsw else ""
+        sql += (
+            f"CREATE TABLE {VEC_SCHEMA}.{table} (id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,"
+            f" v VECTOR({dim}) NOT NULL{key}) ENGINE=InnoDB;\n"
+        )
+        for _ in range(VEC_ROWS // 100):
+            sql += _vec_insert_sql(table, dim, rng, 100)
+    _vec_rows(test_helper, test_helper.socket_path, sql)
+
+
+def _vec_require_index(test_helper) -> None:
+    """Skip unless the running server supports HNSW vector indexes."""
+    probe = (
+        "CREATE DATABASE IF NOT EXISTS vec_probe;"
+        "CREATE TABLE vec_probe.t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(2) NOT NULL);"
+        "ALTER TABLE vec_probe.t ADD VECTOR KEY vk (v) TYPE hnsw (M = 4);"
+    )
+    result = _vec_mysql(test_helper, test_helper.socket_path, probe)
+    _vec_mysql(test_helper, test_helper.socket_path, "DROP DATABASE IF EXISTS vec_probe;")
+    if result.returncode != 0:
+        pytest.skip(f"server has no HNSW vector index support: {result.stderr.strip()[:200]}")
+
+
+def _vec_server_has_ps12024(test_helper) -> bool:
+    """Whether the server line has PS-12024 (MLOG_INDEX_LOAD for the HNSW aux table)."""
+    if test_helper.server_type != "PS":
+        return False
+    parts = tuple(int(p) for p in re.findall(r"\d+", test_helper.server_version)[:3])
+    if parts[:2] == VEC_PS_12024_FIXED_IN[:2]:
+        return parts >= VEC_PS_12024_FIXED_IN
+    return parts[:2] > VEC_PS_12024_FIXED_IN[:2]
+
+
+def _vec_xfail_without_ps12024(request, test_helper) -> None:
+    """Mark the test xfail (non-strict) when the server cannot pass it, but still run it."""
+    if not _vec_server_has_ps12024(test_helper):
+        request.applymarker(pytest.mark.xfail(
+            strict=False,
+            reason=f"PXB-3932 needs PS-12024 (PS >= 9.7.4-4); server is {test_helper.server_version}",
+        ))
+
+
+# ============================================================================
+# Snapshot: what a restored server must answer exactly like the source
+# ============================================================================
+
+def _vec_query_vectors(dim: int) -> list[str]:
+    rng = random.Random(VEC_SEED + dim)
+    return [_vec_literal(rng, dim) for _ in range(3)]
+
+
+def _vec_snapshot(test_helper, socket: str) -> dict:
+    snap: dict = {}
+    tables = [r[0] for r in _vec_rows(test_helper, socket,
+              f"SELECT table_name FROM information_schema.tables WHERE table_schema='{VEC_SCHEMA}' ORDER BY 1")]
+    snap["tables"] = tables
+    snap["aux_tablespaces"] = int(_vec_rows(test_helper, socket,
+        f"SELECT COUNT(*) FROM information_schema.innodb_tablespaces WHERE name LIKE '{VEC_SCHEMA}/percona_vec_hnsw%'")[0][0])
+    for table in tables:
+        dim = VEC_TABLES.get(table, (4, None, "euclidean"))[0]
+        metric = VEC_TABLES.get(table, (4, None, "euclidean"))[2]
+        t = f"{VEC_SCHEMA}.{table}"
+        create = _vec_rows(test_helper, socket, f"SHOW CREATE TABLE {t}")[0][1]
+        snap[f"{table}.create"] = re.sub(r" AUTO_INCREMENT=\d+", "", create)
+        snap[f"{table}.autoinc"] = _vec_rows(test_helper, socket,
+            "SET SESSION information_schema_stats_expiry = 0;"
+            f"SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema='{VEC_SCHEMA}' AND table_name='{table}'")[0][0]
+        rows = _vec_rows(test_helper, socket, f"SELECT id, VECTOR_TO_STRING(v) FROM {t} FORCE INDEX (PRIMARY) ORDER BY id")
+        snap[f"{table}.count"] = len(rows)
+        snap[f"{table}.rows_md5"] = hashlib.md5("\n".join("\t".join(r) for r in rows).encode()).hexdigest()
+        check = _vec_rows(test_helper, socket, f"CHECK TABLE {t}")
+        snap[f"{table}.check"] = check[-1][-1]
+        has_index = "VECTOR KEY" in create
+        # Fresh statistics on both servers: with stale ones the optimizer table-scans
+        # instead of using the vector index for ORDER BY DISTANCE ... LIMIT.
+        _vec_rows(test_helper, socket, f"ANALYZE TABLE {t}")
+        for i, q in enumerate(_vec_query_vectors(dim)):
+            qv = f"STRING_TO_VECTOR('{q}')"
+            funcs = _vec_rows(test_helper, socket,
+                f"SELECT id, VECTOR_DIM(v), ROUND(DISTANCE(v, {qv}, 'euclidean'), 4),"
+                f" ROUND(DISTANCE(v, {qv}, 'cosine'), 4), ROUND(DISTANCE(v, {qv}, 'dot'), 4)"
+                f" FROM {t} FORCE INDEX (PRIMARY) ORDER BY id")
+            snap[f"{table}.functions_q{i}_md5"] = hashlib.md5(
+                "\n".join("\t".join(r) for r in funcs).encode()).hexdigest()
+            exact = [r[0] for r in _vec_rows(test_helper, socket,
+                f"SELECT id FROM {t} FORCE INDEX (PRIMARY) ORDER BY DISTANCE(v, {qv}, '{metric}'), id LIMIT {VEC_TOP_K}")]
+            snap[f"{table}.exact_q{i}"] = exact
+            if has_index:
+                ann_sql = f"SELECT id FROM {t} ORDER BY DISTANCE(v, {qv}, '{metric}') LIMIT {VEC_TOP_K}"
+                explain = _vec_rows(test_helper, socket, f"EXPLAIN FORMAT=TRADITIONAL {ann_sql}")
+                snap[f"{table}.ann_access_q{i}"] = explain[0][4]  # EXPLAIN 'type' column
+                ann = [r[0] for r in _vec_rows(test_helper, socket,
+                    f"SET SESSION innodb_hnsw_ef_search = {VEC_EF_SEARCH}; {ann_sql}")]
+                snap[f"{table}.ann_q{i}"] = ann
+                snap[f"{table}.ann_recall_q{i}"] = round(len(set(ann) & set(exact)) / max(len(exact), 1), 2)
+    return snap
+
+
+def _vec_assert_same(source: dict, restored: dict, logdir: str) -> None:
+    """Every snapshot entry must match, and every ANN query must really use the vector index."""
+    with open(os.path.join(logdir, "vector_snapshots.json"), "w", encoding="utf-8") as f:
+        json.dump({"source": source, "restored": restored}, f, indent=1)
+    diffs = [f"{k}: source={source.get(k)!r} restored={restored.get(k)!r}"
+             for k in sorted(set(source) | set(restored)) if source.get(k) != restored.get(k)]
+    assert not diffs, "restored server differs from the source:\n  " + "\n  ".join(diffs[:20])
+    for key, value in restored.items():
+        if ".ann_access_" in key:
+            assert value == "vector_ann", f"{key}: ANN query does not use the vector index (EXPLAIN type={value})"
+        if ".ann_q" in key:
+            assert len(value) == VEC_TOP_K, f"{key}: ANN query returned {len(value)} of {VEC_TOP_K} rows (empty/stale index?)"
+        if ".ann_recall_" in key:
+            assert value >= VEC_MIN_RECALL, f"{key}: ANN recall {value} below {VEC_MIN_RECALL}"
+        if key.endswith(".check"):
+            assert value == "OK", f"{key}: CHECK TABLE reported {value}"
+
+
+# ============================================================================
+# Backup / prepare / restore
+# ============================================================================
+
+def _vec_backup(test_helper, target: str, name: str, extra: list | None = None) -> None:
+    test_helper.run_xtrabackup(test_helper.backup_cmd_args(target) + (extra or []), name, check=True)
+
+
+def _vec_prepare_chain(test_helper, full: str, incs: list[str]) -> None:
+    """Prepare full + incrementals in order; the last step without --apply-log-only."""
+    redo_only = test_helper.xb_opt("apply-log-only")
+    inc_dir = test_helper.xb_opt("incremental-dir")
+    steps = [None, *incs]
+    for n, inc in enumerate(steps):
+        args = ["--prepare", f"--target-dir={full}", *CORE_FILE_OPT.split()]
+        if n < len(steps) - 1:
+            args.append(redo_only)
+        if inc:
+            args.append(f"{inc_dir}={inc}")
+        test_helper.run_xtrabackup(args, f"prepare_{n}", check=True)
+
+
+def _vec_restore_and_compare(test_helper, source: dict) -> None:
+    replica = test_helper.create_replica(name="vr", server_id=3, port=VEC_RESTORE_PORT)  # short: socket paths max 107 chars
+    test_helper.restore_backup_to(replica.datadir, "", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    replica.start()
+    _vec_assert_same(source, _vec_snapshot(test_helper, replica.socket_path), test_helper.logdir)
+
+
+def _vec_change_set_sql(rng: random.Random) -> str:
+    """Deterministic changes covering the vector index build paths of PS-12024."""
+    sql = ""
+    for table, (dim, _h, _m) in VEC_TABLES.items():
+        sql += _vec_insert_sql(table, dim, rng, 100)
+        sql += f"UPDATE {VEC_SCHEMA}.{table} SET v = STRING_TO_VECTOR('{_vec_literal(rng, dim)}') WHERE id % 37 = 1;\n"
+        sql += f"DELETE FROM {VEC_SCHEMA}.{table} WHERE id % 53 = 2;\n"
+    sql += _vec_add_index_sql("t_plain")                                    # first ADD VECTOR KEY
+    sql += (f"ALTER TABLE {VEC_SCHEMA}.t_euc DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw ({VEC_TABLES['t_euc'][1]});\n")  # replace
+    sql += f"OPTIMIZE TABLE {VEC_SCHEMA}.t_cos;\n"                           # in-place rebuild
+    return sql
+
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+def _vec_setup(test_helper, page_tracking: bool = False) -> None:
+    test_helper.require_pxb_fix("PXB-3915", VEC_FIXED_IN_PXB_3915)
+    test_helper.mysqld_options = ""
+    test_helper.load_tool = "none"  # data and workload come from the test itself
+    test_helper.initialize_db()
+    _vec_require_index(test_helper)
+    if page_tracking:
+        _vec_rows(test_helper, test_helper.socket_path, "INSTALL COMPONENT 'file://component_mysqlbackup';")
+    _vec_create_schema(test_helper)
+
+
+def test_vector_full_backup_restore(test_helper):
+    """PXB-3915: a full backup of vector tables with HNSW indexes restores with
+    the same rows, vector function results and ANN answers through the index."""
+    _vec_setup(test_helper)
+    full = os.path.join(test_helper.backup_dir, "full")
+    _vec_backup(test_helper, full, "full_backup")
+    source = _vec_snapshot(test_helper, test_helper.socket_path)
+    _vec_prepare_chain(test_helper, full, [])
+    _vec_restore_and_compare(test_helper, source)
+
+
+@pytest.mark.parametrize("page_tracking", [False, True], ids=["no_pt", "pt"])
+def test_vector_index_built_between_backups(request, test_helper, page_tracking):
+    """PXB-3932: vector indexes added, replaced and rebuilt between the full
+    backup and an incremental (and DML in between) restore completely. The
+    vector index builds fill the HNSW aux table without redo; xtrabackup must
+    copy it in full, which PS-12024 makes possible."""
+    _vec_setup(test_helper, page_tracking)
+    _vec_xfail_without_ps12024(request, test_helper)
+    pt = ["--page-tracking"] if page_tracking else []
+    base_opt = test_helper.xb_opt("incremental-basedir")
+    full = os.path.join(test_helper.backup_dir, "full")
+    inc1 = os.path.join(test_helper.backup_dir, "inc1")
+    inc2 = os.path.join(test_helper.backup_dir, "inc2")
+    rng = random.Random(VEC_SEED + 1)
+
+    _vec_backup(test_helper, full, "full_backup", pt)
+    _vec_rows(test_helper, test_helper.socket_path, _vec_change_set_sql(rng))
+    _vec_backup(test_helper, inc1, "inc1_backup", [f"{base_opt}={full}", *pt])
+    for table, (dim, _h, _m) in VEC_TABLES.items():
+        _vec_rows(test_helper, test_helper.socket_path, _vec_insert_sql(table, dim, rng, 50))
+    _vec_backup(test_helper, inc2, "inc2_backup", [f"{base_opt}={inc1}", *pt])
+    source = _vec_snapshot(test_helper, test_helper.socket_path)
+    _vec_prepare_chain(test_helper, full, [inc1, inc2])
+    _vec_restore_and_compare(test_helper, source)
+
+
+class _VecWorkload(threading.Thread):
+    """Vector DML plus vector index DDL (add / drop / replace / rebuild) in a loop,
+    through the mysql client in --force batches, until stopped."""
+
+    def __init__(self, test_helper, seed: int):
+        super().__init__(daemon=True)
+        self.th, self.rng, self.stop_event, self.batches = test_helper, random.Random(seed), threading.Event(), 0
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            sql = ""
+            for table, (dim, _h, _m) in VEC_TABLES.items():
+                sql += _vec_insert_sql(table, dim, self.rng, 20)
+                sql += f"UPDATE {VEC_SCHEMA}.{table} SET v = STRING_TO_VECTOR('{_vec_literal(self.rng, dim)}') ORDER BY RAND() LIMIT 5;\n"
+                sql += f"DELETE FROM {VEC_SCHEMA}.{table} ORDER BY RAND() LIMIT 3;\n"
+            ddl = self.batches % 6
+            if ddl == 1:
+                sql += _vec_add_index_sql("t_plain")
+            elif ddl == 3:
+                sql += f"ALTER TABLE {VEC_SCHEMA}.t_plain DROP KEY vk;\n"
+            elif ddl == 4:
+                sql += f"OPTIMIZE TABLE {VEC_SCHEMA}.t_cos;\n"
+            elif ddl == 5:
+                sql += f"ALTER TABLE {VEC_SCHEMA}.t_euc DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw ({VEC_TABLES['t_euc'][1]});\n"
+            _vec_mysql(self.th, self.th.socket_path, sql, force=True)
+            self.batches += 1
+
+
+@pytest.mark.parametrize("mode", ["pt", "reduced_lock"])
+def test_vector_backup_under_workload(request, test_helper, mode):
+    """PXB-3932 without pstress or a debug server: vector DML and vector index
+    DDL run while the backups are taken (page-tracking incrementals, or a
+    --lock-ddl=reduced full backup). After the workload stops, a final
+    incremental captures the end state; the prepared chain must restore to
+    exactly that state, with working vector indexes."""
+    _vec_setup(test_helper, page_tracking=(mode == "pt"))
+    _vec_xfail_without_ps12024(request, test_helper)
+    base_opt = test_helper.xb_opt("incremental-basedir")
+    extra = ["--page-tracking"] if mode == "pt" else []
+    full = os.path.join(test_helper.backup_dir, "full")
+    incs: list[str] = []
+
+    workload = _VecWorkload(test_helper, VEC_SEED + 2)
+    workload.start()
+    try:
+        time.sleep(2)
+        _vec_backup(test_helper, full, "full_backup", extra + (["--lock-ddl=reduced"] if mode == "reduced_lock" else []))
+        if mode == "pt":
+            for n in range(1, 4):  # incrementals while the workload runs
+                time.sleep(5)
+                inc = os.path.join(test_helper.backup_dir, f"inc{n}")
+                _vec_backup(test_helper, inc, f"inc{n}_backup", [f"{base_opt}={incs[-1] if incs else full}", *extra])
+                incs.append(inc)
+    finally:
+        workload.stop_event.set()
+        workload.join(timeout=300)
+    assert workload.batches > 0, "the vector workload never ran"
+
+    final = os.path.join(test_helper.backup_dir, f"inc{len(incs) + 1}")
+    _vec_backup(test_helper, final, "final_backup", [f"{base_opt}={incs[-1] if incs else full}", *extra])
+    incs.append(final)
+    source = _vec_snapshot(test_helper, test_helper.socket_path)
+    _vec_prepare_chain(test_helper, full, incs)
+    _vec_restore_and_compare(test_helper, source)
+
+
+# ============================================================================
 # __main__ block with argparse and suite-to-test mapping
 # ============================================================================
 
@@ -1710,6 +2069,7 @@ if __name__ == "__main__":
             "Innodb_params_redo_archive_tests",
             "SSL_tests",
             "Parallel_processing_order_tests",
+            "Vector_index_tests",
         ],
         help="Test suites to run",
     )
@@ -1754,6 +2114,7 @@ if __name__ == "__main__":
         print("   Innodb_params_redo_archive_tests")
         print("   SSL_tests")
         print("   Parallel_processing_order_tests")
+        print("   Vector_index_tests")
         print()
         print("3. Logs are available at:", TEST_BASE_DIR, "(test-specific directories)")
         sys.exit(1)
@@ -1816,6 +2177,11 @@ if __name__ == "__main__":
             "test_copy_back_largest_file_first",
             "test_backup_largest_file_first",
             "test_incremental_prepare_largest_delta_first",
+        ],
+        "Vector_index_tests": [
+            "test_vector_full_backup_restore",
+            "test_vector_index_built_between_backups",
+            "test_vector_backup_under_workload",
         ],
     }
 

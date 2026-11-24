@@ -442,6 +442,7 @@ python innodb_myrocks_backup_tests.py Cloud_backup_tests
 python innodb_myrocks_backup_tests.py Innodb_params_redo_archive_tests
 python innodb_myrocks_backup_tests.py SSL_tests
 python innodb_myrocks_backup_tests.py Parallel_processing_order_tests
+python innodb_myrocks_backup_tests.py Vector_index_tests
 ```
 
 Verbose (no capture):
@@ -474,6 +475,7 @@ python innodb_myrocks_backup_tests.py SSL_tests Cloud_backup_tests
 | `Innodb_params_redo_archive_tests` | `test_inc_backup_innodb_params`, `test_inc_backup_archive_log` |
 | `SSL_tests` | `test_ssl_backup` |
 | `Parallel_processing_order_tests` | `test_decompress_largest_file_first`, `test_copy_back_largest_file_first`, `test_backup_largest_file_first`, `test_incremental_prepare_largest_delta_first` |
+| `Vector_index_tests` | `test_vector_full_backup_restore`, `test_vector_index_built_between_backups[no_pt]`, `test_vector_index_built_between_backups[pt]`, `test_vector_backup_under_workload[pt]`, `test_vector_backup_under_workload[reduced_lock]` |
 
 Example:
 
@@ -517,6 +519,7 @@ pytest innodb_myrocks_backup_tests.py --collect-only -q
 | `Innodb_params_redo_archive_tests` | Backup with custom InnoDB parameters and redo log archiving |
 | `SSL_tests` | Backup with SSL certificates, `--ssl-mode`, `--ssl-cipher`, and FIPS mode |
 | `Parallel_processing_order_tests` | PXB-3502 regression: parallel `--decompress`/`--copy-back`/`--backup`/`--prepare` must dispatch largest files first. Skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
+| `Vector_index_tests` | PXB-3915/PXB-3932: VECTOR columns and HNSW vector indexes through full, incremental (with/without `--page-tracking`) and `--lock-ddl=reduced` backups, including vector index builds between and during backups. Self-contained: no load tool (pstress/sysbench not needed) and no debug server. After restore the server must answer exactly like the source: rows and vector values, `VECTOR_DIM`/`DISTANCE` results, ANN queries through the vector index (`EXPLAIN` type `vector_ann`, same ids, full top-k, recall >= 0.9), `AUTO_INCREMENT`, `SHOW CREATE TABLE`, HNSW aux tablespaces, `CHECK TABLE`. Skipped unless PXB >= 9.7.2-3 and the server supports HNSW vector indexes (PS 9.7+). The PXB-3932 tests run as xfail (non-strict) on servers without PS-12024 (PS < 9.7.4-4) |
 
 ---
 
@@ -561,6 +564,9 @@ pytest innodb_myrocks_backup_tests.py --collect-only -q
 | `test_copy_back_largest_file_first` | Non-param | PXB-3502: `--copy-back --parallel=N` must dispatch the largest data file first; always checks InnoDB `.ibd` files, and additionally checks MyRocks' shared `.rocksdb` checkpoint files when `ROCKSDB=enabled`; skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
 | `test_backup_largest_file_first` | Non-param | PXB-3502: `--backup --parallel=1` must copy InnoDB `.ibd` files, and RocksDB `.sst` files when `ROCKSDB=enabled`, in non-increasing size order; skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
 | `test_incremental_prepare_largest_delta_first` | Non-param | PXB-3502: `--prepare --parallel=1` of an incremental must apply `.delta` files in non-increasing size order; skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
+| `test_vector_full_backup_restore` | Non-param | PXB-3915: 3 vector tables (2 with HNSW indexes, euclidean and cosine) restore from a full backup with the same rows, vector function results and ANN answers through the index |
+| `test_vector_index_built_between_backups` | Param | `[no_pt]`, `[pt]` — PXB-3932: vector DML, a first `ADD VECTOR KEY`, a `DROP`+`ADD` index replacement and `OPTIMIZE TABLE` between the full backup and incremental 1, more DML before incremental 2; the prepared chain must restore completely. xfail without PS-12024 |
+| `test_vector_backup_under_workload` | Param | `[pt]`, `[reduced_lock]` — PXB-3932: a Python workload (vector DML plus vector index add/drop/replace/rebuild through the `mysql` client) runs while page-tracking incrementals, or a `--lock-ddl=reduced` full backup, are taken; a final incremental after the workload stops must restore to exactly the end state. On PS 9.7.2 (no PS-12024) `[pt]` reproduces the PXB-3932 prepare crash (`log0recv.cc:2226`); xfail without PS-12024 |
 
 ---
 

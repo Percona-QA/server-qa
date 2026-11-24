@@ -335,9 +335,18 @@ class MySQLServer:
         capture: bool = False,
         check: bool = True,
         user: str = "root",
+        vertical: bool = False,
     ) -> str | None:
-        """Run a single query via the ``mysql`` CLI client."""
+        """Run a single query via the ``mysql`` CLI client.
+
+        ``vertical`` prints one ``column: value`` line per column (``mysql -E``).
+        Use it instead of ending the query with ``\\G``: since MySQL 9.4 the
+        client rejects ``\\G`` in ``-e`` ("Unknown command '\\G'") unless
+        ``--commands`` is given, while ``-E`` works on every version.
+        """
         cmd = [os.path.join(self.basedir, "bin/mysql"), f"-u{user}", f"-S{self.socket_path}"]
+        if vertical:
+            cmd.append("-E")
         if database:
             cmd.append(database)
         cmd.extend(["-e", query])
@@ -1211,15 +1220,15 @@ class BackupTestHelper:
         time.sleep(2)
 
         if use_slave_keyword:
-            status_query = "SHOW SLAVE STATUS\\G"
+            status_query = "SHOW SLAVE STATUS"
             io_key = "Slave_IO_Running"
             sql_key = "Slave_SQL_Running"
         else:
-            status_query = "SHOW REPLICA STATUS\\G"
+            status_query = "SHOW REPLICA STATUS"
             io_key = "Replica_IO_Running"
             sql_key = "Replica_SQL_Running"
 
-        status_output = replica.mysql(status_query, capture=True) or ""
+        status_output = replica.mysql(status_query, capture=True, vertical=True) or ""
         io_ok = any(
             line.strip().startswith(f"{io_key}:") and line.strip().endswith("Yes")
             for line in status_output.splitlines()

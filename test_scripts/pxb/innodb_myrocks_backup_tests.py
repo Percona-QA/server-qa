@@ -1934,6 +1934,10 @@ def _vec_change_set_sql(rng: random.Random) -> str:
 
 def _vec_setup(test_helper, page_tracking: bool = False) -> None:
     test_helper.require_pxb_fix("PXB-3915", VEC_FIXED_IN_PXB_3915)
+    if test_helper.get_mysql_type() == "MS":
+        # Expected: upstream MySQL Community builds have no HNSW vector index /
+        # vector distance functions; the probe below catches other servers.
+        pytest.skip("Vector index/functions are not supported in MySQL Community (MS) builds")
     test_helper.mysqld_options = ""
     test_helper.load_tool = "none"  # data and workload come from the test itself
     test_helper.initialize_db()

@@ -27,7 +27,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import pytest
 
@@ -43,6 +43,7 @@ from test_helper import (  # noqa: E402
     BackupTestHelper,
     TEST_BASE_DIR,
     MySQLServer,
+    banner_for_test,
 )
 
 # ---------------------------------------------------------------------------
@@ -103,16 +104,17 @@ def _encrypt_options_57(keyring_path: str) -> str:
 def test_helper(request):
     """Per-test :class:`BackupTestHelper` with automatic cleanup."""
     test_name = request.node.name if hasattr(request, "node") else None
-    # The load in these tests is always "sysbench run" (_sysbench_load), which
-    # needs the sysbench tables that initialize_db() only creates with
-    # sysbench, so don't use the suite-wide LOAD_TOOL default (pstress).
-    helper = BackupTestHelper(test_name=test_name, load_tool="sysbench")
-    helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
-    helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
-    helper.check_dependencies()
-    yield helper
-    if os.environ.get("DISABLE_CLEANUP") != "1":
-        helper.cleanup()
+    with banner_for_test(test_name):
+        # The load in these tests is always "sysbench run" (_sysbench_load), which
+        # needs the sysbench tables that initialize_db() only creates with
+        # sysbench, so don't use the suite-wide LOAD_TOOL default (pstress).
+        helper = BackupTestHelper(test_name=test_name, load_tool="sysbench")
+        helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
+        helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
+        helper.check_dependencies()
+        yield helper
+        if os.environ.get("DISABLE_CLEANUP") != "1":
+            helper.cleanup()
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -156,8 +158,39 @@ def _sysbench_load(
             subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, check=False)
 
 
-def _pt_table_checksum(helper: BackupTestHelper, source: MySQLServer) -> None:
-    """Run ``pt-table-checksum`` against ``source`` (primary) for the ``test`` DB."""
+# pt-table-checksum exit status bits (see its EXIT STATUS documentation).
+# TABLE_DIFF (16) means checksum differences were found; the others mean the
+# comparison itself could not be completed properly.
+PT_EXIT_TABLE_DIFF = 16
+PT_EXIT_PROBLEM_BITS = {
+    1: "a fatal error occurred",
+    2: "--pid file exists and the PID is running",
+    4: "caught SIGHUP, SIGINT, SIGPIPE or SIGTERM",
+    8: "no replicas or cluster nodes were found",
+    32: "chunks were skipped",
+    128: "replication stopped on a replica",
+}
+# 64 (tables were skipped) is not treated as a problem, the same as in
+# test_helper._pt_table_checksum_counts().
+
+
+def _pt_table_checksum(
+    helper: BackupTestHelper, source: MySQLServer, replicas: List[MySQLServer], stage: str
+) -> None:
+    """Run ``pt-table-checksum`` on ``source`` (primary) for the ``test`` DB and report the result.
+
+    ``--recursion-method hosts`` checksums each table on the primary, lets the
+    checksum queries replicate, and compares the results on every replica.
+    Before each chunk it waits for the replicas to catch up, so it can take a
+    few minutes while a replica is still applying the earlier load.
+
+    Like the bash script, differences and pt problems are reported as ERR but
+    do not fail the test.
+    """
+    names = ", ".join(r.name for r in replicas)
+    log_file = os.path.join(helper.logdir, f"pt_checksum_{source.name}_{stage}.log")
+    print(f"=>Running pt-table-checksum on {source.name} (compares it with {names}; "
+          "waits for the replicas to catch up, can take a few minutes)")
     cmd = [
         "pt-table-checksum",
         f"S={source.socket_path},u=root",
@@ -168,9 +201,36 @@ def _pt_table_checksum(helper: BackupTestHelper, source: MySQLServer) -> None:
         "--no-check-binlog-format",
         "--no-version-check",
     ]
-    log_file = os.path.join(helper.logdir, f"pt_checksum_{source.name}.log")
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     with open(log_file, "w", encoding="utf-8") as f:
-        subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, check=False)
+        f.write(result.stdout)
+        f.write(result.stderr)
+
+    # Result lines: TS ERRORS DIFFS ROWS DIFF_ROWS CHUNKS SKIPPED TIME TABLE
+    tables = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 9 and parts[0] != "TS" and parts[1].isdigit() and parts[2].isdigit():
+            tables.append((parts[8], int(parts[1]), int(parts[2]), parts[6]))
+
+    problems = [msg for bit, msg in PT_EXIT_PROBLEM_BITS.items() if result.returncode & bit]
+    if not tables:
+        problems.append("it reported no tables")
+    for table, errors, diffs, skipped in tables:
+        if diffs:
+            print(f"ERR: pt-table-checksum found differences in {table} (DIFFS={diffs})")
+        if errors:
+            print(f"ERR: pt-table-checksum reported {errors} error(s) for {table}")
+    for problem in problems:
+        print(f"ERR: pt-table-checksum: {problem} (exit code {result.returncode})")
+
+    diff_tables = [t for t, _, diffs, _ in tables if diffs]
+    if diff_tables or problems or any(errors for _, errors, _, _ in tables):
+        print(f"ERR: pt-table-checksum did not confirm that {source.name} and {names} match. "
+              f"Please check the log at: {log_file}")
+    else:
+        print(f"..pt-table-checksum: {len(tables)} tables checked, no differences: Pass\n"
+              f"  Logs available at: {log_file}")
 
 
 def _keyring_path(helper: BackupTestHelper) -> str:
@@ -273,7 +333,7 @@ def _replicate_primary(
     helper.configure_replication(replica1, primary, slave_info=False)
 
     replica1.check_tables(database="test")
-    _pt_table_checksum(helper, primary)
+    _pt_table_checksum(helper, primary, [replica1], stage="stage1")
 
     # -- Stage 2: replica2 from replica1 ----------------------------------
     print("\n==> Stage 2: Create replica2 from backup of replica1")
@@ -351,7 +411,7 @@ def _replicate_primary(
     helper.configure_replication(replica2, primary, slave_info=True)
 
     replica2.check_tables(database="test")
-    _pt_table_checksum(helper, primary)
+    _pt_table_checksum(helper, primary, [replica1, replica2], stage="stage2")
 
     # Restore the (primary) backup_params so subsequent helper.cleanup() runs
     # see the originally-requested values.

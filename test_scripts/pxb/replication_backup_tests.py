@@ -43,6 +43,8 @@ from test_helper import (  # noqa: E402
     BackupTestHelper,
     TEST_BASE_DIR,
     MySQLServer,
+    SYSBENCH_NUM_TABLES,
+    SYSBENCH_TABLE_SIZE,
     banner_for_test,
 )
 
@@ -108,7 +110,10 @@ def test_helper(request):
         # The load in these tests is always "sysbench run" (_sysbench_load), which
         # needs the sysbench tables that initialize_db() only creates with
         # sysbench, so don't use the suite-wide LOAD_TOOL default (pstress).
-        helper = BackupTestHelper(test_name=test_name, load_tool="sysbench")
+        helper = BackupTestHelper(
+            test_name=test_name, load_tool="sysbench",
+            num_tables=SYSBENCH_NUM_TABLES, table_size=SYSBENCH_TABLE_SIZE,
+        )
         helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
         helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
         helper.check_dependencies()

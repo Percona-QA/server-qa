@@ -10,7 +10,7 @@ import subprocess
 import shutil
 import pytest
 
-from test_helper import BackupTestHelper, TEST_BASE_DIR, KMIP_CONFIGS, CORE_FILE_OPT
+from test_helper import BackupTestHelper, TEST_BASE_DIR, KMIP_CONFIGS, CORE_FILE_OPT, banner_for_test
 
 
 # Pytest fixtures and test functions
@@ -19,12 +19,13 @@ def test_helper(request):
     """Create a test helper instance."""
     # Get the test name from the request
     test_name = request.node.name if hasattr(request, 'node') else None
-    helper = BackupTestHelper(test_name=test_name)
-    helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
-    helper.check_pt_checksum()
-    yield helper
-    if os.environ.get("DISABLE_CLEANUP") != "1":
-        helper.cleanup()
+    with banner_for_test(test_name):
+        helper = BackupTestHelper(test_name=test_name)
+        helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
+        helper.check_pt_checksum()
+        yield helper
+        if os.environ.get("DISABLE_CLEANUP") != "1":
+            helper.cleanup()
 
 
 @pytest.fixture(scope="function", autouse=True)

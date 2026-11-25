@@ -13,6 +13,7 @@ import signal
 import sys
 import glob
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict
 import psutil
@@ -26,6 +27,29 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(line_buffering=True)
     except (AttributeError, ValueError):
         pass
+
+# Line printed before and after each test, so its output is easy to find
+# (the bash scripts printed the same 83-character line between tests).
+TEST_SEPARATOR = "#" * 83
+
+
+@contextmanager
+def banner_for_test(test_name: Optional[str]):
+    """Print a ``# Test: <name>`` header now and ``# End of test: <name>`` when the block ends.
+
+    Used around each suite's ``test_helper`` fixture body (setup, the test
+    itself and cleanup). The footer is printed even when the test fails.
+    Not named ``test_*`` so pytest does not collect it from suites that
+    import it.
+    """
+    print(f"\n{TEST_SEPARATOR}")
+    print(f"# Test: {test_name}")
+    print(TEST_SEPARATOR)
+    try:
+        yield
+    finally:
+        print(f"\n# End of test: {test_name}")
+        print(TEST_SEPARATOR)
 
 # Import KMIP helper
 try:

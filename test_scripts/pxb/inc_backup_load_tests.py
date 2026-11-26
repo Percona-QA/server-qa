@@ -10,7 +10,10 @@ import subprocess
 import shutil
 import pytest
 
-from test_helper import BackupTestHelper, TEST_BASE_DIR, KMIP_CONFIGS, CORE_FILE_OPT
+from test_helper import (
+    BackupTestHelper, TEST_BASE_DIR, KMIP_CONFIGS, CORE_FILE_OPT, SYSBENCH_NUM_TABLES,
+    SYSBENCH_TABLE_SIZE, banner_for_test,
+)
 
 
 # Pytest fixtures and test functions
@@ -19,12 +22,17 @@ def test_helper(request):
     """Create a test helper instance."""
     # Get the test name from the request
     test_name = request.node.name if hasattr(request, 'node') else None
-    helper = BackupTestHelper(test_name=test_name)
-    helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
-    helper.check_pt_checksum()
-    yield helper
-    if os.environ.get("DISABLE_CLEANUP") != "1":
-        helper.cleanup()
+    with banner_for_test(test_name):
+        helper = BackupTestHelper(test_name=test_name)
+        # With sysbench, use the same table count/size as the other sysbench
+        # suites; keep the pstress values (NUM_TABLES/TABLE_SIZE) otherwise.
+        if helper.load_tool == "sysbench":
+            helper.num_tables, helper.table_size = SYSBENCH_NUM_TABLES, SYSBENCH_TABLE_SIZE
+        helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
+        helper.check_pt_checksum()
+        yield helper
+        if os.environ.get("DISABLE_CLEANUP") != "1":
+            helper.cleanup()
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -63,8 +71,9 @@ def test_memory_estimation_backup(test_helper):
     if test_helper.server_version_normalized < 80000:
         pytest.skip("Memory estimation is not supported in PXB 2.4 (5.7), skipping tests")
 
-    original_tool = test_helper.load_tool
+    original = (test_helper.load_tool, test_helper.num_tables, test_helper.table_size)
     test_helper.load_tool = "sysbench"
+    test_helper.num_tables, test_helper.table_size = SYSBENCH_NUM_TABLES, SYSBENCH_TABLE_SIZE
     try:
         test_helper.mysqld_options = "--log-bin=binlog --log-slave-updates --gtid-mode=ON --enforce-gtid-consistency --binlog-format=row --master_verify_checksum=ON --binlog_checksum=CRC32 --max-connections=5000"
         test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
@@ -76,7 +85,7 @@ def test_memory_estimation_backup(test_helper):
         test_helper.take_backup()
         test_helper.check_tables()
     finally:
-        test_helper.load_tool = original_tool
+        test_helper.load_tool, test_helper.num_tables, test_helper.table_size = original
 
 
 @pytest.mark.parametrize("page_tracking", [False, True], ids=["no_pt", "pt"])

@@ -43,7 +43,9 @@ os.environ.setdefault(
 )
 
 # pylint: disable=wrong-import-position
-from test_helper import BackupTestHelper, TEST_BASE_DIR  # noqa: E402
+from test_helper import (  # noqa: E402
+    BackupTestHelper, SYSBENCH_NUM_TABLES, SYSBENCH_TABLE_SIZE, TEST_BASE_DIR, banner_for_test,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -67,15 +69,18 @@ ROCKSDB = os.environ.get("ROCKSDB", "enabled")
 def test_helper(request):
     """Per-test :class:`BackupTestHelper` with automatic cleanup."""
     test_name = request.node.name if hasattr(request, "node") else None
-    helper = BackupTestHelper(test_name=test_name)
-    # All upgrade tests use sysbench-style data load (mirrors the bash script).
-    helper.load_tool = "sysbench"
-    helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
-    helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
-    helper.check_dependencies()
-    yield helper
-    if os.environ.get("DISABLE_CLEANUP") != "1":
-        helper.cleanup()
+    with banner_for_test(test_name):
+        helper = BackupTestHelper(
+            test_name=test_name, num_tables=SYSBENCH_NUM_TABLES, table_size=SYSBENCH_TABLE_SIZE,
+        )
+        # All upgrade tests use sysbench-style data load (mirrors the bash script).
+        helper.load_tool = "sysbench"
+        helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
+        helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
+        helper.check_dependencies()
+        yield helper
+        if os.environ.get("DISABLE_CLEANUP") != "1":
+            helper.cleanup()
 
 
 @pytest.fixture(scope="function", autouse=True)

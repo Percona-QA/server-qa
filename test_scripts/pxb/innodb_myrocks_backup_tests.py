@@ -27,8 +27,11 @@ from test_helper import (
     S3_SCOPED_ACCESS_KEY,
     S3_SCOPED_PREFIX,
     S3_SCOPED_SECRET_KEY,
+    SYSBENCH_NUM_TABLES,
+    SYSBENCH_TABLE_SIZE,
     TEST_BASE_DIR,
     BackupTestHelper,
+    banner_for_test,
 )
 
 # PXB-3502 and PXB-3609 shipped in 8.4.0-7 on the 8.4 line and 9.7.2-2 on the
@@ -36,39 +39,32 @@ from test_helper import (
 FIXED_IN_8_4_0_7 = {"8.4": "8.4.0-7", "9.7": "9.7.2-2"}
 
 
-TEST_SEPARATOR = "#" * 83
-
-
 @pytest.fixture(scope="function")
 def test_helper(request):
     """Create a test helper instance for each test."""
     test_name = request.node.name if hasattr(request, "node") else None
-    # The DDL tests in this script run against the sysbench tables
-    # (test.sbtest1..N), which initialize_db() only creates with sysbench, so
-    # default to sysbench here instead of the suite-wide pstress default.
-    helper = BackupTestHelper(test_name=test_name, load_tool=os.environ.get("LOAD_TOOL", "sysbench"))
-    helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
-    helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
-    # Like the bash script, verify every restore with per-table CHECK TABLE,
-    # COUNT(*) and CHECKSUM TABLE rather than pt-table-checksum.
-    helper.detailed_verify = True
-    # MyRocks is a Percona Server-only engine: on upstream MySQL (MS) skip
-    # RocksDB data creation/load and all RocksDB-specific checks, regardless
-    # of the ROCKSDB env setting.
-    if helper.server_type == "MS" and helper.rocksdb == "enabled":
-        print("RocksDB is unsupported in MS, disabling RocksDB for this test")
-        helper.rocksdb = "disabled"
-    print(f"\n{TEST_SEPARATOR}")
-    print(f"# Test: {test_name}")
-    print(TEST_SEPARATOR)
-    try:
+    with banner_for_test(test_name):
+        # The DDL tests in this script run against the sysbench tables
+        # (test.sbtest1..N), which initialize_db() only creates with sysbench, so
+        # default to sysbench here instead of the suite-wide pstress default.
+        helper = BackupTestHelper(
+            test_name=test_name, load_tool=os.environ.get("LOAD_TOOL", "sysbench"),
+            num_tables=SYSBENCH_NUM_TABLES, table_size=SYSBENCH_TABLE_SIZE,
+        )
+        helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
+        helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
+        # Like the bash script, verify every restore with per-table CHECK TABLE,
+        # COUNT(*) and CHECKSUM TABLE rather than pt-table-checksum.
+        helper.detailed_verify = True
+        # MyRocks is a Percona Server-only engine: on upstream MySQL (MS) skip
+        # RocksDB data creation/load and all RocksDB-specific checks, regardless
+        # of the ROCKSDB env setting.
+        if helper.server_type == "MS" and helper.rocksdb == "enabled":
+            print("RocksDB is unsupported in MS, disabling RocksDB for this test")
+            helper.rocksdb = "disabled"
         yield helper
         if os.environ.get("DISABLE_CLEANUP") != "1":
             helper.cleanup()
-    finally:
-        # Mark the end of each test, like the bash script did between tests.
-        print(f"\n# End of test: {test_name}")
-        print(TEST_SEPARATOR)
 
 
 @pytest.fixture(scope="function", autouse=True)

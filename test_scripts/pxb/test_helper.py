@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 import psutil
@@ -28,6 +29,29 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(line_buffering=True)
     except (AttributeError, ValueError):
         pass
+
+# Line printed before and after each test, so its output is easy to find
+# (the bash scripts printed the same 83-character line between tests).
+TEST_SEPARATOR = "#" * 83
+
+
+@contextmanager
+def banner_for_test(test_name: str | None):
+    """Print a ``# Test: <name>`` header now and ``# End of test: <name>`` when the block ends.
+
+    Used around each suite's ``test_helper`` fixture body (setup, the test
+    itself and cleanup). The footer is printed even when the test fails.
+    Not named ``test_*`` so pytest does not collect it from suites that
+    import it.
+    """
+    print(f"\n{TEST_SEPARATOR}")
+    print(f"# Test: {test_name}")
+    print(TEST_SEPARATOR)
+    try:
+        yield
+    finally:
+        print(f"\n# End of test: {test_name}")
+        print(TEST_SEPARATOR)
 
 # Import KMIP helper
 try:
@@ -79,6 +103,11 @@ LOAD_TOOL = os.environ.get("LOAD_TOOL", "pstress")  # Set value as pstress/sysbe
 LOAD_TOOL_DIR = os.environ.get("LOAD_TOOL_DIR", os.path.join(HOME, "pstress_9.1/src"))  # pstress dir
 NUM_TABLES = 25  # This will make 50 tables on the database tt_1, tt_1_p, .. tt_25, tt_25_p
 TABLE_SIZE = 100
+# Table count and rows per table for the suites that load sysbench sbtest
+# tables (innodb_myrocks, replication, upgrade), as in their bash scripts.
+# NUM_TABLES/TABLE_SIZE above are the inc_backup_load (pstress) values.
+SYSBENCH_NUM_TABLES = 10
+SYSBENCH_TABLE_SIZE = 1000
 SECONDS = 60
 THREADS = 5
 

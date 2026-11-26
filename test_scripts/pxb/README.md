@@ -24,6 +24,9 @@
     - [Run all tests](#run-all-tests-1)
   - [Test suites — innodb\_myrocks\_backup\_tests.py](#test-suites--innodb_myrocks_backup_testspy)
   - [Test reference — innodb\_myrocks\_backup\_tests.py](#test-reference--innodb_myrocks_backup_testspy)
+- [pxb\_option\_tests.py — xtrabackup option tests](#pxb_option_testspy--xtrabackup-option-tests)
+  - [How to run tests](#how-to-run-tests-options)
+  - [Test reference — pxb\_option\_tests.py](#test-reference--pxb_option_testspy)
 - [replication\_backup\_tests.py — Replication + backup tests](#replication_backup_testspy--replication--backup-tests)
   - [Additional prerequisites](#additional-prerequisites)
   - [How to run tests](#how-to-run-tests-2)
@@ -320,6 +323,23 @@ export INSTALL_TYPE=tarball     # or "package" (default: tarball)
 
 **For cloud backup tests** (`test_cloud_inc_backup`), set the `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`, and `S3_ENDPOINT` environment variables. The test passes them to `xbcloud` as `--s3-*` options together with fixed defaults (`--storage=s3 --s3-bucket-lookup=auto --s3-api-version=4 --parallel=10 --verbose`). If any of these env vars is unset, the test fails immediately with a message listing the missing variables.
 
+**For `test_cloud_backup_md5_delete_prefix_scope`** (PXB-3609), additionally provision an S3 user that may list `S3_BUCKET` but write/delete only under `<S3_SCOPED_PREFIX>/`, and export it. The test is skipped when these are unset:
+
+```bash
+export S3_SCOPED_ACCESS_KEY=<scoped-user-key>
+export S3_SCOPED_SECRET_KEY=<scoped-user-secret>
+export S3_SCOPED_PREFIX=scoped          # backup name; the user must have no rights on scoped.md5
+```
+
+SeaweedFS: add an identity to the `s3.json` passed with `-s3.config` (and restart). The bucket-level `Read` is needed because xbcloud's startup probe is a `HEAD` on the bucket, which SeaweedFS authorizes as `Read`:
+
+```json
+{"name": "scoped", "credentials": [{"accessKey": "<scoped-user-key>", "secretKey": "<scoped-user-secret>"}],
+ "actions": ["List:<bucket>", "Read:<bucket>", "Write:<bucket>/scoped/*"]}
+```
+
+MinIO / AWS: a policy allowing `s3:ListBucket` on the bucket and `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject` on `arn:aws:s3:::<bucket>/scoped/*`.
+
 **For encryption tests**, the following are needed depending on the keyring type:
 
 - **Vault** (`keyring_vault_plugin`, `keyring_vault_component`): requires a running Vault server; the test calls `vault_test_setup.sh` automatically.
@@ -422,6 +442,7 @@ python innodb_myrocks_backup_tests.py Cloud_backup_tests
 python innodb_myrocks_backup_tests.py Innodb_params_redo_archive_tests
 python innodb_myrocks_backup_tests.py SSL_tests
 python innodb_myrocks_backup_tests.py Parallel_processing_order_tests
+python innodb_myrocks_backup_tests.py Vector_index_tests
 ```
 
 Verbose (no capture):
@@ -450,10 +471,11 @@ python innodb_myrocks_backup_tests.py SSL_tests Cloud_backup_tests
 | `Encryption_PXB9_0_MS9_0_tests` | `test_encryption_8_0[keyring_file_component]` |
 | `Encryption_PXB2_4_PS5_7_tests` | `test_encryption_2_4[keyring_file_plugin]`, `test_encryption_2_4[keyring_vault_plugin]` |
 | `Encryption_PXB2_4_MS5_7_tests` | `test_encryption_2_4[keyring_file_plugin]` |
-| `Cloud_backup_tests` | `test_cloud_inc_backup`, `test_cloud_backup_md5_delete` |
+| `Cloud_backup_tests` | `test_cloud_inc_backup`, `test_cloud_backup_md5_delete`, `test_cloud_backup_md5_delete_prefix_scope` |
 | `Innodb_params_redo_archive_tests` | `test_inc_backup_innodb_params`, `test_inc_backup_archive_log` |
 | `SSL_tests` | `test_ssl_backup` |
-| `Parallel_processing_order_tests` | `test_decompress_largest_file_first`, `test_copy_back_largest_file_first` |
+| `Parallel_processing_order_tests` | `test_decompress_largest_file_first`, `test_copy_back_largest_file_first`, `test_backup_largest_file_first`, `test_incremental_prepare_largest_delta_first` |
+| `Vector_index_tests` | `test_vector_full_backup_restore`, `test_vector_index_built_between_backups[no_pt]`, `test_vector_index_built_between_backups[pt]`, `test_vector_backup_under_workload[pt]`, `test_vector_backup_under_workload[reduced_lock]` |
 
 Example:
 
@@ -493,10 +515,11 @@ pytest innodb_myrocks_backup_tests.py --collect-only -q
 | `Encryption_PXB9_0_MS9_0_tests` | PXB 9.0 + MS 9.0 encryption with keyring_file component |
 | `Encryption_PXB2_4_PS5_7_tests` | PXB 2.4 + PS 5.7 encryption with keyring_file and keyring_vault plugins |
 | `Encryption_PXB2_4_MS5_7_tests` | PXB 2.4 + MS 5.7 encryption with keyring_file plugin |
-| `Cloud_backup_tests` | Cloud incremental backup using xbcloud (requires `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`, `S3_ENDPOINT`). `test_cloud_backup_md5_delete` is skipped on PXB < 8.4.0-7 |
+| `Cloud_backup_tests` | Cloud incremental backup using xbcloud (requires `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`, `S3_ENDPOINT`). `test_cloud_backup_md5_delete` is skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
 | `Innodb_params_redo_archive_tests` | Backup with custom InnoDB parameters and redo log archiving |
 | `SSL_tests` | Backup with SSL certificates, `--ssl-mode`, `--ssl-cipher`, and FIPS mode |
-| `Parallel_processing_order_tests` | PXB-3502 regression: parallel `--decompress`/`--copy-back` must dispatch the largest file first, not last. Skipped on PXB < 8.4.0-7 |
+| `Parallel_processing_order_tests` | PXB-3502 regression: parallel `--decompress`/`--copy-back`/`--backup`/`--prepare` must dispatch largest files first. Skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
+| `Vector_index_tests` | PXB-3915/PXB-3932: VECTOR columns and HNSW vector indexes through full, incremental (with/without `--page-tracking`) and `--lock-ddl=reduced` backups, including vector index builds between and during backups. Self-contained: no load tool (pstress/sysbench not needed) and no debug server. After restore the server must answer exactly like the source: rows and vector values, `VECTOR_DIM`/`DISTANCE` results, ANN queries through the vector index (`EXPLAIN` type `vector_ann`, same ids, full top-k, recall >= 0.9), `AUTO_INCREMENT`, `SHOW CREATE TABLE`, HNSW aux tablespaces, `CHECK TABLE`. Skipped unless PXB >= 9.7.2-3 and the server supports HNSW vector indexes (PS 9.7+); always skipped on upstream MySQL Community (MS) builds, which have no vector index/functions (expected). The PXB-3932 tests run as xfail (non-strict) on servers without PS-12024 (PS < 9.7.4-4) |
 
 ---
 
@@ -532,12 +555,50 @@ pytest innodb_myrocks_backup_tests.py --collect-only -q
 | `test_encryption_8_0` | Param | `[keyring_file_plugin]`, `[keyring_vault_plugin]`, `[keyring_vault_component]`, `[keyring_file_component]`, `[keyring_kmip_component]`, `[keyring_kms_component]` — each runs multiple sub-tests (basic, all-options, transition-key, generate-transition-key, lz4/zstd streaming, DDL) |
 | `test_encryption_2_4` | Param | `[keyring_file_plugin]`, `[keyring_vault_plugin]` — PXB 2.4 / PS 5.7 encryption tests |
 | `test_cloud_inc_backup` | Non-param | Cloud incremental backup via xbcloud; requires `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_REGION`, `S3_ENDPOINT` |
-| `test_cloud_backup_md5_delete` | Non-param | `xbcloud delete` must also remove the `.md5` sidecar from `put --md5`; skipped on PXB < 8.4.0-7 |
+| `test_cloud_backup_md5_delete` | Non-param | `xbcloud delete` must also remove the `.md5` sidecar from `put --md5`; skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
+| `test_cloud_backup_md5_delete_prefix_scope` | Non-param | PXB-3609: `xbcloud delete` by a user scoped to the backup's prefix succeeds quietly and leaves `<name>.md5` (which it cannot delete); needs `S3_SCOPED_*`, skipped otherwise; skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
 | `test_inc_backup_innodb_params` | Non-param | Backup with custom InnoDB parameters |
 | `test_inc_backup_archive_log` | Non-param | Backup with redo log archiving; skipped on 5.7 |
 | `test_ssl_backup` | Non-param | Backup with SSL certificates, ssl-mode, ssl-cipher, and FIPS mode |
-| `test_decompress_largest_file_first` | Non-param | PXB-3502: `--decompress --parallel=N` must dispatch the largest compressed file before the bulk of decoy small tables; skipped on PXB < 8.4.0-7 |
-| `test_copy_back_largest_file_first` | Non-param | PXB-3502: `--copy-back --parallel=N` must dispatch the largest data file first; always checks InnoDB `.ibd` files, and additionally checks MyRocks' shared `.rocksdb` checkpoint files when `ROCKSDB=enabled`; skipped on PXB < 8.4.0-7 |
+| `test_decompress_largest_file_first` | Non-param | PXB-3502: `--decompress --parallel=N` must dispatch the 4 largest compressed files (mixed in among 30 small tables in one schema) before any small one; skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
+| `test_copy_back_largest_file_first` | Non-param | PXB-3502: `--copy-back --parallel=N` must dispatch the largest data file first; always checks InnoDB `.ibd` files, and additionally checks MyRocks' shared `.rocksdb` checkpoint files when `ROCKSDB=enabled`; skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
+| `test_backup_largest_file_first` | Non-param | PXB-3502: `--backup --parallel=1` must copy InnoDB `.ibd` files, and RocksDB `.sst` files when `ROCKSDB=enabled`, in non-increasing size order; skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
+| `test_incremental_prepare_largest_delta_first` | Non-param | PXB-3502: `--prepare --parallel=1` of an incremental must apply `.delta` files in non-increasing size order; skipped unless PXB >= 8.4.0-7 (8.4 line) / >= 9.7.2-2 (9.7 line) |
+| `test_vector_full_backup_restore` | Non-param | PXB-3915: 3 vector tables (2 with HNSW indexes, euclidean and cosine) restore from a full backup with the same rows, vector function results and ANN answers through the index |
+| `test_vector_index_built_between_backups` | Param | `[no_pt]`, `[pt]` — PXB-3932: vector DML, a first `ADD VECTOR KEY`, a `DROP`+`ADD` index replacement and `OPTIMIZE TABLE` between the full backup and incremental 1, more DML before incremental 2; the prepared chain must restore completely. xfail without PS-12024 |
+| `test_vector_backup_under_workload` | Param | `[pt]`, `[reduced_lock]` — PXB-3932: a Python workload (vector DML plus vector index add/drop/replace/rebuild through the `mysql` client) runs while page-tracking incrementals, or a `--lock-ddl=reduced` full backup, are taken; a final incremental after the workload stops must restore to exactly the end state. On PS 9.7.2 (no PS-12024) `[pt]` reproduces the PXB-3932 prepare crash (`log0recv.cc:2226`); xfail without PS-12024 |
+
+---
+
+## pxb_option_tests.py — xtrabackup option tests
+
+Tests for renamed and deprecated xtrabackup options, for `--history` written to another server and for `--prepare --use-free-memory-pct` buffer pool sizing, ported from the PXB dev suite (`storage/innobase/xtrabackup/test`). Each test is skipped unless the PXB build has the fix: PXB >= 8.4.0-8 on the 8.4 line; on the 9.7 line >= 9.7.2-2, except `test_use_free_memory_pct_sizing` (PXB-3889), which needs >= 9.7.2-3. The common prerequisites above apply; no load tool, cloud or keyring setup is needed.
+
+<a id="how-to-run-tests-options"></a>
+### How to run tests
+
+```bash
+cd $QASCRIPTS/test_scripts/pxb
+pytest pxb_option_tests.py -v                                  # all tests
+pytest pxb_option_tests.py -k test_history_on_other_server -v  # one test
+python pxb_option_tests.py Option_alias_tests                  # suite via __main__
+python pxb_option_tests.py History_tests
+python pxb_option_tests.py Free_memory_pct_tests
+```
+
+The `__main__` path uses `sys.exit(pytest.main(...))` so the process exit code matches the test result (needed when CI runs `python pxb_option_tests.py <suite>`). The other PXB suites still call `pytest.main()` without propagating the code.
+
+`test_incremental_option_aliases`, `test_history_on_other_server` and `test_use_free_memory_pct_sizing` (debug builds) start a second server on `MYSQL_PORT + 51` / `MYSQL_PORT + 50` (`MYSQL_PORT` defaults to 21000).
+
+### Test reference — pxb_option_tests.py
+
+| Test | Ticket | Description |
+|------|--------|-------------|
+| `test_apply_redo_only_alias` | PXB-3758 | `--apply-redo-only` stops after redo apply with no warning; `--apply-log-only` still works and warns once; both together are rejected without touching the backup; `--help` marks the old name deprecated |
+| `test_incremental_option_aliases` | PXB-3840 | A full + 2 incremental chain using `--backup-incremental-base` / `--prepare-incremental-from-dir` and the old `--incremental-basedir` / `--incremental-dir` restores every row; only old names warn, once each; an old name with its new one is rejected on `--backup` and `--prepare` |
+| `test_deprecated_options_warn` | PXB-3788 | `--log`, `--innodb`, `--create-ib-logfile`, `--rebuild_threads` (and `--no-version-check` where built) are accepted and warn once each, saying why; `--rsync` (when `rsync` is installed) warns it is going away, not that it has no effect; a run without them stays quiet |
+| `test_history_on_other_server` | PXB-2559 | `--history-host/port/user/password` writes the record to a second server, not the one backed up; an incremental reads its base LSN from there; bad history credentials stop the backup before it starts; `--check-privileges` reports a missing INSERT on the history server; `--history-ssl-mode` applies to the history connection |
+| `test_use_free_memory_pct_sizing` | PXB-3889 | `--prepare --use-free-memory-pct` on a backup taken with `--estimate-memory=ON` reads the real free and total memory of the host as non-zero and sizes the buffer pool above 0, within the estimate and 10% of free memory (before the fix, builds linked to libproc2 — distro packages, source builds — read 0, set -128M and crashed). Debug builds also simulate bad reads with `--debug=d,xb_simulate_free_memory`: free or total memory of 0, below one chunk, or not below total memory fall back to `--use-memory` with a warning; 300M at 100% rounds down to 256M; enough memory gives the estimate; the fallback prepare restores every row. Release builds run only the real read |
 
 ---
 

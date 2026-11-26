@@ -4,18 +4,20 @@ Shared helper for PXB incremental backup load tests.
 BackupTestHelper can be imported and used from inc_backup_load_tests.py and other scripts.
 """
 
-import os
-import subprocess
-import time
-import shutil
-import re
-import signal
-import sys
+from __future__ import annotations
+
 import glob
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Optional, List, Tuple, Dict
+
 import psutil
 import pytest
 
@@ -34,7 +36,7 @@ TEST_SEPARATOR = "#" * 83
 
 
 @contextmanager
-def banner_for_test(test_name: Optional[str]):
+def banner_for_test(test_name: str | None):
     """Print a ``# Test: <name>`` header now and ``# End of test: <name>`` when the block ends.
 
     Used around each suite's ``test_helper`` fixture body (setup, the test
@@ -64,6 +66,8 @@ HOME = os.path.expanduser("~")
 MYSQL_START_TIMEOUT = int(os.environ.get("MYSQL_START_TIMEOUT", "180"))
 # Graceful shutdown wait for mysqladmin shutdown (seconds); default 5 minutes.
 MYSQL_SHUTDOWN_TIMEOUT = int(os.environ.get("MYSQL_SHUTDOWN_TIMEOUT", "300"))
+# TCP port of the primary server; override via MYSQL_PORT to run suites side by side.
+MYSQL_PORT = int(os.environ.get("MYSQL_PORT", "21000"))
 # Max seconds take_backup() waits for the background load and DDL threads to
 # finish before recording the pre-restore baseline.
 WRITERS_QUIESCE_TIMEOUT = int(os.environ.get("WRITERS_QUIESCE_TIMEOUT", "600"))
@@ -119,6 +123,11 @@ S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
 S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
 S3_REGION = os.environ.get("S3_REGION", "")
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "")
+# Optional restricted S3 user for test_cloud_backup_md5_delete_prefix_scope:
+# may list the bucket and write/delete only under "<S3_SCOPED_PREFIX>/".
+S3_SCOPED_ACCESS_KEY = os.environ.get("S3_SCOPED_ACCESS_KEY", "")
+S3_SCOPED_SECRET_KEY = os.environ.get("S3_SCOPED_SECRET_KEY", "")
+S3_SCOPED_PREFIX = os.environ.get("S3_SCOPED_PREFIX", "")
 # SHA-256 of an empty string -- the fixed x-amz-content-sha256 value for a
 # request with no body. curl's --aws-sigv4 computes and sends this header
 # itself on some versions but not others (observed missing entirely against
@@ -159,13 +168,13 @@ class MySQLServer:
         basedir: str,
         error_log: str,
         logdir: str,
-        server_id: Optional[int] = None,
+        server_id: int | None = None,
         mysqld_options: str = "",
         use_rr: bool = False,
         start_timeout: int = MYSQL_START_TIMEOUT,
-        report_host: Optional[str] = None,
-        tmpdir: Optional[str] = None,
-        extra_start_args: Optional[List[str]] = None,
+        report_host: str | None = None,
+        tmpdir: str | None = None,
+        extra_start_args: list[str] | None = None,
     ):
         self.name = name
         self.datadir = datadir
@@ -181,8 +190,8 @@ class MySQLServer:
         self.start_timeout = start_timeout
         self.report_host = report_host
         self.tmpdir = tmpdir
-        self.extra_start_args: List[str] = list(extra_start_args or [])
-        self.pid: Optional[int] = None
+        self.extra_start_args: list[str] = list(extra_start_args or [])
+        self.pid: int | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -217,11 +226,11 @@ class MySQLServer:
             )
         print(f"..Data directory '{self.datadir}' created")
 
-    def start(self, extra_args: Optional[List[str]] = None) -> None:
+    def start(self, extra_args: list[str] | None = None) -> None:
         """Launch this mysqld instance and wait until it answers ``mysqladmin ping``."""
         print(f"=>Starting MySQL server '{self.name}' on port {self.port}")
         mysqld_path = os.path.join(self.basedir, "bin/mysqld")
-        cmd: List[str] = ["rr", mysqld_path] if self.use_rr else [mysqld_path]
+        cmd: list[str] = ["rr", mysqld_path] if self.use_rr else [mysqld_path]
         cmd += ["--no-defaults"]
         if ENABLE_CORE_DUMP:
             cmd.append("--core-file")
@@ -237,6 +246,10 @@ class MySQLServer:
             f"--socket={self.socket_path}",
             f"--plugin-dir={self.basedir}/lib/plugin",
             f"--log-error={self.error_log}",
+            # No test uses X Protocol; its default 33060 port and
+            # /tmp/mysqlx.sock would collide with any other mysqld on the
+            # host. "loose-" keeps 5.7 (no mysqlx plugin) starting.
+            "--loose-mysqlx=OFF",
         ]
         if self.server_id is not None:
             cmd.append(f"--server-id={self.server_id}")
@@ -352,7 +365,7 @@ class MySQLServer:
         check: bool = True,
         user: str = "root",
         vertical: bool = False,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Run a single query via the ``mysql`` CLI client.
 
         ``vertical`` prints one ``column: value`` line per column (``mysql -E``).
@@ -442,9 +455,9 @@ class BackupTestHelper:
         self,
         xtrabackup_dir: str = XTRABACKUP_DIR,
         mysqldir: str = MYSQLDIR,
-        datadir: Optional[str] = None,
-        backup_dir: Optional[str] = None,
-        logdir: Optional[str] = None,
+        datadir: str | None = None,
+        backup_dir: str | None = None,
+        logdir: str | None = None,
         load_tool: str = LOAD_TOOL,
         load_tool_dir: str = LOAD_TOOL_DIR,
         num_tables: int = NUM_TABLES,
@@ -452,7 +465,7 @@ class BackupTestHelper:
         seconds: int = SECONDS,
         threads: int = THREADS,
         lock_ddl: str = LOCK_DDL,
-        test_name: Optional[str] = None,
+        test_name: str | None = None,
     ):
         """Initialize test helper with configuration."""
         self.xtrabackup_dir = xtrabackup_dir
@@ -507,7 +520,7 @@ class BackupTestHelper:
             name="primary",
             datadir=primary_datadir,
             socket_path=primary_socket,
-            port=21000,
+            port=MYSQL_PORT,
             basedir=self.mysqldir,
             error_log=os.path.join(self.logdir, "error.log"),
             logdir=self.logdir,
@@ -523,14 +536,14 @@ class BackupTestHelper:
                 "--log-error-verbosity=3",
             ],
         )
-        self.replicas: List[MySQLServer] = []
+        self.replicas: list[MySQLServer] = []
 
         # Runtime variables
-        self.server_type: Optional[str] = None
-        self.server_version: Optional[str] = None
-        self.server_version_normalized: Optional[int] = None
-        self.xtrabackup_version: Optional[str] = None
-        self.xtrabackup_version_normalized: Optional[int] = None
+        self.server_type: str | None = None
+        self.server_version: str | None = None
+        self.server_version_normalized: int | None = None
+        self.xtrabackup_version: str | None = None
+        self.xtrabackup_version_normalized: int | None = None
         # Always verify restores with per-table COUNT(*)/CHECKSUM TABLE
         # (verify_data_integrity) instead of pt-table-checksum.
         self.detailed_verify: bool = False
@@ -538,12 +551,12 @@ class BackupTestHelper:
         # next iteration once the backups no longer need them.
         self._ddl_stop = threading.Event()
         # xtrabackup_dir -> whether that binary has the PXB-3758/PXB-3840 option names
-        self._xb_renamed_options_cache: Dict[str, bool] = {}
-        self.pstress_binary: Optional[str] = None
+        self._xb_renamed_options_cache: dict[str, bool] = {}
+        self.pstress_binary: str | None = None
         self.backup_params: str = ""
         self.prepare_params: str = ""
         self.restore_params: str = ""
-        self.kmip_helper: Optional[KMIPHelper] = None
+        self.kmip_helper: KMIPHelper | None = None
 
         # KMS configuration
         self.kms_region = os.environ.get("KMS_REGION", "us-east-1")
@@ -567,11 +580,11 @@ class BackupTestHelper:
         return self.primary.datadir
 
     @property
-    def mysql_pid(self) -> Optional[int]:
+    def mysql_pid(self) -> int | None:
         return self.primary.pid
 
     @mysql_pid.setter
-    def mysql_pid(self, value: Optional[int]) -> None:
+    def mysql_pid(self, value: int | None) -> None:
         self.primary.pid = value
 
     @property
@@ -582,7 +595,7 @@ class BackupTestHelper:
     def mysqld_options(self, value: str) -> None:
         self.primary.mysqld_options = value
 
-    def _xtrabackup_cmd_prefix(self) -> List[str]:
+    def _xtrabackup_cmd_prefix(self) -> list[str]:
         """Return command prefix for xtrabackup; prepend 'rr' when USE_RR=1."""
         xtrabackup_path = os.path.join(self.xtrabackup_dir, "xtrabackup")
         if USE_RR:
@@ -634,7 +647,28 @@ class BackupTestHelper:
         release = int(match.group(4)) if match.group(4) else 0
         return major * 1_000_000 + minor * 10_000 + patch * 100 + release
 
-    def get_mysql_version(self) -> Tuple[str, int]:
+    def require_pxb_fix(self, ticket: str, fixed_in: dict[str, str]) -> None:
+        """Skip the calling test unless this xtrabackup build ships ``ticket``'s fix.
+
+        ``fixed_in`` maps each release line that got the fix to its first fixed
+        version, e.g. ``{"8.4": "8.4.0-8", "9.7": "9.7.2-2"}``. A build on a
+        listed line must be at least that version; a build on a line newer
+        than every listed one is assumed to carry the fix; any other line
+        (older, or an innovation release in between) is skipped.
+        """
+        if self.xtrabackup_version_normalized is None:
+            self.xtrabackup_version, self.xtrabackup_version_normalized = self.get_xtrabackup_version()
+        line = tuple(int(p) for p in self.xtrabackup_version.split(".")[:2])
+        lines = {tuple(int(p) for p in k.split(".")): v for k, v in fixed_in.items()}
+        if line in lines:
+            if self.xtrabackup_version_normalized >= self.normalize_xtrabackup_version(lines[line]):
+                return
+        elif line > max(lines):
+            return
+        fixed = ", ".join(f">= {v}" for v in fixed_in.values())
+        pytest.skip(f"{ticket} requires PXB {fixed} (found {self.xtrabackup_version})")
+
+    def get_mysql_version(self) -> tuple[str, int]:
         """Get MySQL version and normalized version. Also sets server_type from version output."""
         try:
             result = subprocess.run(
@@ -645,16 +679,20 @@ class BackupTestHelper:
             )
             if self.server_type is None:
                 self.server_type = "MS" if "MySQL Community Server" in result.stdout else "PS"
-            version_match = re.search(r"Ver\s+([0-9]+\.[0-9]+[\.0-9]*)", result.stdout)
+            # Keep the Percona release suffix (e.g. 9.7.4-4) in the returned
+            # string; normalize_version still uses the base semver only.
+            version_match = re.search(
+                r"Ver\s+(\d+\.\d+\.\d+(?:-\d+)?)", result.stdout
+            )
             if version_match:
                 ver = version_match.group(1)
-                normalized = self.normalize_version(ver)
+                normalized = self.normalize_version(ver.split("-", 1)[0])
                 return ver, normalized
         except Exception as e:
             print(f"Error getting MySQL version: {e}")
         return "0.0.0", 0
 
-    def get_xtrabackup_version(self) -> Tuple[str, int]:
+    def get_xtrabackup_version(self) -> tuple[str, int]:
         """Get xtrabackup version and normalized version.
 
         Parses ``xtrabackup --version`` output, e.g.
@@ -687,7 +725,7 @@ class BackupTestHelper:
             print(f"Error getting xtrabackup version: {exc}")
         return "0.0.0", 0
 
-    def _prepare_args_for_pxb_version(self, prepare_params: str) -> List[str]:
+    def _prepare_args_for_pxb_version(self, prepare_params: str) -> list[str]:
         """Split ``prepare_params`` and append PXB-version-specific prepare flags (e.g. ``--check-tables`` on PXB >= 8.4.0-6)."""
         args = prepare_params.split() if prepare_params else []
         if self.xtrabackup_version_normalized is None:
@@ -702,6 +740,71 @@ class BackupTestHelper:
             args.append("--check-tables")
         return args
 
+    def redo_size_opt(self, size) -> str:
+        """XtraBackup option that declares the redo log size for prepare/backup.
+
+        ``--innodb-log-file-size`` was removed in PXB 9.x (unknown variable);
+        9.x only accepts ``--innodb-redo-log-capacity``. Gated on the
+        xtrabackup binary, not the server, so mixed PS/PXB lines stay correct.
+        """
+        if self.xtrabackup_version_normalized is None:
+            self.xtrabackup_version, self.xtrabackup_version_normalized = (
+                self.get_xtrabackup_version()
+            )
+        name = (
+            "--innodb-redo-log-capacity"
+            if self.xtrabackup_version_normalized >= 9000000
+            else "--innodb-log-file-size"
+        )
+        return f"{name}={size}"
+
+    def backup_cmd_args(self, target_dir: str) -> list[str]:
+        """Common argv for ``xtrabackup --backup`` into ``target_dir`` (no ``--no-defaults``)."""
+        # xtrabackup creates the target directory itself, but not its parents.
+        parent = os.path.dirname(target_dir)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        return [
+            f"--user={self.backup_user}",
+            "--password=",
+            "--backup",
+            f"--target-dir={target_dir}",
+            f"-S{self.socket_path}",
+            f"--datadir={self.datadir}",
+            *CORE_FILE_OPT.split(),
+        ]
+
+    def run_xtrabackup(
+        self,
+        args: list[str],
+        log_name: str,
+        *,
+        check: bool = False,
+        label: str | None = None,
+    ) -> tuple[int, str, str]:
+        """Run xtrabackup with ``args``; return ``(returncode, combined output, log_file)``.
+
+        ``log_name`` is a short stem written under ``self.logdir`` as
+        ``{log_name}_log``. When ``check=True``, fail the test on non-zero exit.
+        ``label`` is an optional progress string (e.g. ``Taking compressed full
+        backup``); when omitted, ``log_name`` is used.
+        """
+        action = label or log_name
+        print(f"=>Running xtrabackup: {action}")
+        log_file = os.path.join(self.logdir, f"{log_name}_log")
+        cmd = self._xtrabackup_cmd_prefix() + ["--no-defaults", *args]
+        result = self.run_command(cmd, check=False, log_file=log_file)
+        out = (result.stdout or "") + (result.stderr or "")
+        if result.returncode == 0:
+            print(f"..xtrabackup '{action}' was successful.\n  Logs available at: {log_file}")
+        else:
+            print(
+                f"..xtrabackup '{action}' exited {result.returncode}.\n"
+                f"  Logs available at: {log_file}"
+            )
+        if check and result.returncode != 0:
+            pytest.fail(f"ERR: xtrabackup '{action}' failed. Log: {log_file}")
+        return result.returncode, out, log_file
     def _xb_has_renamed_options(self) -> bool:
         """Whether the xtrabackup in ``xtrabackup_dir`` has the PXB-3758/PXB-3840 option names.
 
@@ -781,10 +884,10 @@ class BackupTestHelper:
 
     def run_command(
         self,
-        cmd: List[str],
+        cmd: list[str],
         check: bool = True,
         capture_output: bool = True,
-        log_file: Optional[str] = None,
+        log_file: str | None = None,
         background: bool = False,
     ) -> subprocess.Popen:
         """Run a shell command.
@@ -884,7 +987,7 @@ class BackupTestHelper:
         database: str = "",
         check: bool = True,
         capture: bool = False,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Run a MySQL query on the primary via the ``mysql`` CLI client."""
         return self.primary.mysql(
             query,
@@ -898,7 +1001,7 @@ class BackupTestHelper:
     # Replica factory + replication primitives
     # ------------------------------------------------------------------
 
-    def _replica_paths(self, name: str) -> Tuple[str, str, str]:
+    def _replica_paths(self, name: str) -> tuple[str, str, str]:
         """Return (datadir, socket_path, error_log) for a replica named ``name``.
 
         The replica's paths are derived from the primary's ``datadir`` /
@@ -921,8 +1024,8 @@ class BackupTestHelper:
         server_id: int,
         port: int,
         mysqld_options: str = "",
-        keyring_src: Optional[str] = None,
-        tmpdir: Optional[str] = None,
+        keyring_src: str | None = None,
+        tmpdir: str | None = None,
     ) -> MySQLServer:
         """Create and register a new :class:`MySQLServer` replica.
 
@@ -998,8 +1101,8 @@ class BackupTestHelper:
     def take_backup_from(
         self,
         source: MySQLServer,
-        extra_args: Optional[List[str]] = None,
-        log_date: Optional[str] = None,
+        extra_args: list[str] | None = None,
+        log_date: str | None = None,
     ) -> None:
         """Take a full backup from ``source`` (any :class:`MySQLServer`) into ``<backup_dir>/full``.
 
@@ -1300,7 +1403,7 @@ class BackupTestHelper:
                         capture_output=True, check=False,
                     )
 
-    def run_load(self, tool_options: str, database: str = "test", engine: Optional[str] = None, time_sec: Optional[int] = None):
+    def run_load(self, tool_options: str, database: str = "test", engine: str | None = None, time_sec: int | None = None):
         """Run a load using pstress/sysbench.
 
         Args:
@@ -1372,7 +1475,7 @@ class BackupTestHelper:
         return os.path.join(os.path.dirname(backup_log), f"{step}_{os.path.basename(backup_log)}")
 
     def _cloud_upload(
-        self, xb_cmd: List[str], cloud_params: str, name: str, label: str, backup_log: str, upload_log: str
+        self, xb_cmd: list[str], cloud_params: str, name: str, label: str, backup_log: str, upload_log: str
     ) -> None:
         """Stream an xtrabackup backup into ``xbcloud put`` as ``name``.
 
@@ -1450,10 +1553,10 @@ class BackupTestHelper:
         backup_type: str = "",
         cloud_params: str = "",
         single_incremental: bool = False,
-        databases: Optional[List[str]] = None,
-        cloud_name: Optional[str] = None,
+        databases: list[str] | None = None,
+        cloud_name: str | None = None,
         upload_only: bool = False,
-        log_file: Optional[str] = None,
+        log_file: str | None = None,
     ):
         """Take incremental backup with full/inc/prepare/restore cycle.
 
@@ -2035,7 +2138,7 @@ class BackupTestHelper:
         self._decrypt_decompress(target_dir, backup_params)
 
     def collect_table_data(
-        self, databases: list[str], server: Optional["MySQLServer"] = None
+        self, databases: list[str], server: MySQLServer | None = None
     ) -> dict[str, dict[str, tuple[str, str]]]:
         """Collect per-table COUNT(*) and CHECKSUM for verification.
 
@@ -2051,7 +2154,7 @@ class BackupTestHelper:
         if server is None:
             server = self.primary
         mysql_bin = os.path.join(server.basedir, "bin/mysql")
-        data: Dict[str, Dict[str, Tuple[str, str]]] = {}
+        data: dict[str, dict[str, tuple[str, str]]] = {}
         for db in databases:
             data[db] = {}
             result = subprocess.run(
@@ -2081,8 +2184,8 @@ class BackupTestHelper:
 
     def verify_data_integrity(
         self,
-        databases: List[str],
-        orig_data: Optional[Dict] = None,
+        databases: list[str],
+        orig_data: dict | None = None,
         compare_data: bool = True,
         check_id_gaps: bool = False,
     ):
@@ -2118,8 +2221,8 @@ class BackupTestHelper:
             )
 
         # --- Table status (CHECK TABLE) ---
-        check_failures: List[str] = []
-        sbtest_tables: List[Tuple[str, str]] = []
+        check_failures: list[str] = []
+        sbtest_tables: list[tuple[str, str]] = []
         print(f"Check the table status in databases: {db_list}")
         for db in databases:
             result = query(f"SHOW TABLES FROM {db};")
@@ -2166,7 +2269,7 @@ class BackupTestHelper:
         if check_id_gaps:
             self._check_id_gaps(sbtest_tables, query)
 
-    def _compare_with_orig_data(self, databases: List[str], orig_data: Dict, query) -> None:
+    def _compare_with_orig_data(self, databases: list[str], orig_data: dict, query) -> None:
         """Compare record count and checksum of every table in ``orig_data`` (bash order and messages)."""
         db_list = " ".join(databases)
 
@@ -2205,7 +2308,7 @@ class BackupTestHelper:
             print(f"Match checksum of all tables in databases {db_list} with original data: Pass")
 
     @staticmethod
-    def _check_id_gaps(tables: List[Tuple[str, str]], query) -> None:
+    def _check_id_gaps(tables: list[tuple[str, str]], query) -> None:
         """Check that ``id`` in each (db, sbtestN) table runs 1..COUNT(*) without gaps.
 
         Port of the bash gap check. Reports the first gap per table as ERR
@@ -2269,7 +2372,7 @@ class BackupTestHelper:
                     except (ProcessLookupError, OSError, ValueError):
                         pass
 
-    def start_vault_server(self) -> Dict[str, str]:
+    def start_vault_server(self) -> dict[str, str]:
         """Start Vault server using vault_test_setup.sh and return vault config dict."""
         self.stop_vault_server()
         vault_setup = os.path.join(self.qascripts, "vault_test_setup.sh")
@@ -2287,7 +2390,7 @@ class BackupTestHelper:
         if result.returncode != 0:
             pytest.fail(f"Vault setup failed. Log: {log_file}")
 
-        vault_config: Dict[str, str] = {}
+        vault_config: dict[str, str] = {}
         cnf_file = os.path.join(vault_dir, "keyring_vault_ps.cnf")
         if os.path.isfile(cnf_file):
             with open(cnf_file, "r") as f:
@@ -2367,7 +2470,9 @@ class BackupTestHelper:
             if os.path.isfile(path):
                 os.remove(path)
 
-    def build_cloud_params(self, verbose: bool = True) -> str:
+    def build_cloud_params(
+        self, verbose: bool = True, access_key: str | None = None, secret_key: str | None = None
+    ) -> str:
         """Assemble the xbcloud option string from S3 env vars.
 
         Reads S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_REGION and S3_ENDPOINT
@@ -2381,6 +2486,9 @@ class BackupTestHelper:
         xbcloud's underlying MySQL load_defaults() only honors --defaults-file
         when it is argv[1]; placing it after the subcommand silently falls back
         to the Swift storage backend.
+
+        access_key / secret_key override S3_ACCESS_KEY / S3_SECRET_KEY, to act
+        as a different (e.g. restricted) user on the same bucket.
 
         If any required env var is missing the test fails with a message
         naming the missing variables, so it is obvious that the test was
@@ -2405,8 +2513,8 @@ class BackupTestHelper:
             f"--s3-endpoint={self.s3_endpoint}",
             f"--s3-region={self.s3_region}",
             f"--s3-bucket={self.s3_bucket}",
-            f"--s3-access-key={self.s3_access_key}",
-            f"--s3-secret-key={self.s3_secret_key}",
+            f"--s3-access-key={access_key or self.s3_access_key}",
+            f"--s3-secret-key={secret_key or self.s3_secret_key}",
             "--s3-bucket-lookup=auto",
             "--s3-api-version=4",
             "--parallel=4",
@@ -3447,7 +3555,7 @@ class BackupTestHelper:
         self._run_crash_flow(load_options, log_date)
 
     def run_crash_tests_pstress_encrypted(
-        self, page_tracking: bool, vault_type: Optional[str] = None
+        self, page_tracking: bool, vault_type: str | None = None
     ) -> None:
         """
         Run crash tests with pstress and encryption (keyring_file or keyring_kmip).
@@ -3473,7 +3581,7 @@ class BackupTestHelper:
         )
         if self.server_type == "MS":
             load_options_base += " --no-column-compression --no-temp-tables"
-        keyring_config_file: Optional[str] = None
+        keyring_config_file: str | None = None
 
         try:
             if vault_type is None:
@@ -3642,8 +3750,8 @@ class BackupTestHelper:
 
     def check_tables(
         self,
-        socket_path: Optional[str] = None,
-        basedir: Optional[str] = None,
+        socket_path: str | None = None,
+        basedir: str | None = None,
         database: str = "test",
     ):
         """Check table integrity; by default targets the primary.
@@ -3677,6 +3785,7 @@ class BackupTestHelper:
         print("\n################################## CleanUp #######################################")
 
         # Destroy replicas first (stop mysqld + remove each datadir).
+        replica_datadirs = [replica.datadir for replica in self.replicas]
         for replica in list(self.replicas):
             try:
                 replica.destroy()
@@ -3692,12 +3801,14 @@ class BackupTestHelper:
 
         print("Killing any previously running mysqld process")
 
-        # Kill mysqld processes
+        # Kill leftover mysqld processes of this helper only (matched by
+        # datadir): other suites' servers on the same host must survive.
+        own_datadirs = {f"--datadir={d}" for d in [self.primary.datadir, *replica_datadirs]}
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
             try:
                 if "mysqld" in proc.info["name"].lower():
-                    cmdline = proc.info.get("cmdline", [])
-                    if cmdline and "error.log" in " ".join(cmdline):
+                    cmdline = proc.info.get("cmdline") or []
+                    if own_datadirs.intersection(cmdline):
                         proc.kill()
                         proc.wait()
             except (psutil.NoSuchProcess, psutil.AccessDenied):

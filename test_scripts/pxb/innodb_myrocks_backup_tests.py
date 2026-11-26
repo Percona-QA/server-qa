@@ -5,20 +5,38 @@ Rewrite of innodb_myrocks_backup_tests.sh.
 Assumption: PS and PXB are already installed as tarballs.
 """
 
+from __future__ import annotations
+
+import hashlib
+import json
 import os
+import random
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
-from typing import Optional
 
 import pytest
 from test_helper import (
-    CORE_FILE_OPT, KMIP_CONFIGS, SYSBENCH_NUM_TABLES, SYSBENCH_TABLE_SIZE, TEST_BASE_DIR,
-    BackupTestHelper, banner_for_test,
+    CORE_FILE_OPT,
+    KMIP_CONFIGS,
+    MYSQL_PORT,
+    S3_SCOPED_ACCESS_KEY,
+    S3_SCOPED_PREFIX,
+    S3_SCOPED_SECRET_KEY,
+    SYSBENCH_NUM_TABLES,
+    SYSBENCH_TABLE_SIZE,
+    TEST_BASE_DIR,
+    BackupTestHelper,
+    banner_for_test,
 )
+
+# PXB-3502 and PXB-3609 shipped in 8.4.0-7 on the 8.4 line and 9.7.2-2 on the
+# 9.7 line; 9.7.0/9.7.1 and the 9.x innovation releases do not have them.
+FIXED_IN_8_4_0_7 = {"8.4": "8.4.0-7", "9.7": "9.7.2-2"}
 
 
 @pytest.fixture(scope="function")
@@ -257,7 +275,7 @@ def test_add_data_across_engine(test_helper):
     if innodb_val != myrocks_val:
         print(f"ERR: Row count mismatch. innodb_t: {innodb_val}, myrocks_t: {myrocks_val}")
     else:
-        print(f"Row count of both tables innodb_t and myrocks_t is same after restore: Pass")
+        print("Row count of both tables innodb_t and myrocks_t is same after restore: Pass")
 
     innodb_cksum = test_helper.run_mysql_query(
         "CHECKSUM TABLE test.innodb_t;", capture=True
@@ -270,7 +288,7 @@ def test_add_data_across_engine(test_helper):
     if innodb_ckval != myrocks_ckval:
         print(f"ERR: Checksum mismatch. innodb_t: {innodb_ckval}, myrocks_t: {myrocks_ckval}")
     else:
-        print(f"Checksum of both tables innodb_t and myrocks_t is same after restore: Pass")
+        print("Checksum of both tables innodb_t and myrocks_t is same after restore: Pass")
 
 
 def test_update_truncate_table(test_helper):
@@ -889,11 +907,7 @@ def test_cloud_backup_md5_delete(test_helper):
     get``/restore of the backup (manual repro also confirmed this holds on
     the older, buggy build).
     """
-    if test_helper.xtrabackup_version_normalized < test_helper.normalize_xtrabackup_version("8.4.0-7"):
-        pytest.skip(
-            f"xbcloud delete of --md5 sidecar requires PXB >= 8.4.0-7 "
-            f"(found {test_helper.xtrabackup_version})"
-        )
+    test_helper.require_pxb_fix("PXB-3609", FIXED_IN_8_4_0_7)
     cloud_params = test_helper.build_cloud_params()
     md5_cloud_params = f"{cloud_params} --md5"
 
@@ -985,7 +999,7 @@ def test_cloud_backup_md5_delete(test_helper):
     test_helper.prepare_full_backup(test_helper.prepare_params, log_date)
 
     replica = test_helper.create_replica(
-        name="md5_restore_check", server_id=110, port=18630,
+        name="md5_restore_check", server_id=110, port=MYSQL_PORT + 30,
         mysqld_options=test_helper.mysqld_options,
     )
     test_helper.restore_backup_to(replica.datadir, test_helper.restore_params, log_date)
@@ -1003,22 +1017,84 @@ def test_cloud_backup_md5_delete(test_helper):
     print("Restore succeeded and data matched with the .md5 objects removed from cloud storage")
 
 
+def test_cloud_backup_md5_delete_prefix_scope(test_helper):
+    """PXB-3609: 'xbcloud delete' by a user whose rights end at the backup's
+    prefix must still succeed, quietly, and leave '<name>.md5' alone.
+
+    The fix makes 'xbcloud delete <name>' also remove '<name>.md5', which
+    sits outside '<name>/'. A user scoped to '<name>/' cannot delete it; the
+    delete must not fail or complain about that. Ported from the PXB dev
+    test suites/xbcloud/md5_delete_prefix_scope.sh. This guards the fix; it
+    passes on builds without it too, which never touched '<name>.md5'.
+
+    Needs a pre-provisioned user (S3_SCOPED_ACCESS_KEY / S3_SCOPED_SECRET_KEY)
+    that may list S3_BUCKET and write/delete only under '<S3_SCOPED_PREFIX>/';
+    see the README for SeaweedFS and MinIO examples. Skipped if unset.
+    """
+    test_helper.require_pxb_fix("PXB-3609", FIXED_IN_8_4_0_7)
+    if not (S3_SCOPED_ACCESS_KEY and S3_SCOPED_SECRET_KEY and S3_SCOPED_PREFIX):
+        pytest.skip("requires S3_SCOPED_ACCESS_KEY, S3_SCOPED_SECRET_KEY and S3_SCOPED_PREFIX (a prefix-scoped S3 user)")
+    xbcloud = os.path.join(test_helper.xtrabackup_dir, "xbcloud")
+    cloud_params = test_helper.build_cloud_params()
+    # Not verbose: the curl trace would show the expected 403 on '<name>.md5'.
+    scoped_params = test_helper.build_cloud_params(
+        verbose=False, access_key=S3_SCOPED_ACCESS_KEY, secret_key=S3_SCOPED_SECRET_KEY
+    )
+    name = S3_SCOPED_PREFIX
+    log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    put_log = os.path.join(test_helper.logdir, f"cloud_md5_scoped_put_{log_date}_log")
+    delete_log = os.path.join(test_helper.logdir, f"cloud_md5_scoped_delete_{log_date}_log")
+
+    test_helper.mysqld_options = ""
+    test_helper.backup_params = f"{CORE_FILE_OPT}"
+    test_helper.initialize_db()
+    test_helper.primary.mysql("CREATE TABLE test.t (a INT PRIMARY KEY, b VARCHAR(64))")
+    test_helper.primary.mysql("INSERT INTO test.t VALUES (1,'one'),(2,'two'),(3,'three')")
+
+    def remove_leftovers(log: str) -> None:
+        # The name is fixed by the user's rights, so runs reuse it. Remove
+        # '<name>.md5' directly too: builds without the fix leave it behind.
+        subprocess.run(f"{xbcloud} delete {cloud_params} {name} 2>>{log}", shell=True, check=False)
+        if f"{name}.md5" in test_helper.s3_list_objects(prefix=name):
+            test_helper.s3_delete_object(f"{name}.md5")
+
+    remove_leftovers(put_log)
+    test_helper.take_backup(
+        backup_type="cloud", cloud_params=f"{cloud_params} --md5", cloud_name=name,
+        upload_only=True, log_file=put_log,
+    )
+    assert f"{name}.md5" in test_helper.s3_list_objects(prefix=name), (
+        f"test setup: expected '{name}.md5' after 'xbcloud put --md5'; log: {put_log}"
+    )
+
+    print(f"Test: delete '{name}' as the prefix-scoped user")
+    result = subprocess.run(
+        f"{xbcloud} delete {scoped_params} {name}", shell=True, check=False, capture_output=True, text=True
+    )
+    with open(delete_log, "w", encoding="utf-8") as f:
+        f.write(result.stdout + result.stderr)
+    try:
+        assert result.returncode == 0, (
+            f"PXB-3609: delete failed for a prefix-scoped user -- being unable to remove "
+            f"'{name}.md5' must not fail the delete; log: {delete_log}"
+        )
+        noise = re.findall(r"(?i)warning|failed to delete|access denied|forbidden|403", result.stdout + result.stderr)
+        assert not noise, (
+            f"PXB-3609: delete complained about '{name}.md5', which this user has no rights on "
+            f"({sorted(set(noise))}); log: {delete_log}"
+        )
+        remaining = test_helper.s3_list_objects(prefix=f"{name}/")
+        assert not remaining, f"backup objects left behind by the scoped delete: {remaining}"
+        assert f"{name}.md5" in test_helper.s3_list_objects(prefix=name), (
+            f"unexpected: '{name}.md5' was removed by a user with no rights on it"
+        )
+    finally:
+        remove_leftovers(delete_log)
+
+
 # ============================================================================
 # InnoDB params and redo archive tests
 # ============================================================================
-
-def _innodb_log_file_size_opt(test_helper, size: int) -> str:
-    """Return the xtrabackup ``--innodb-log-file-size`` option for *size*.
-
-    ``innodb_log_file_size`` was removed in MySQL 9.3 (replaced by
-    ``innodb_redo_log_capacity``), and PXB built on 9.3+ rejects it with
-    "unknown variable". The redo log size is taken from the server/backup
-    anyway, so the option is simply omitted there.
-    """
-    if test_helper.server_version_normalized >= 90300:
-        return ""
-    return f"--innodb-log-file-size={size}"
-
 
 def test_inc_backup_innodb_params(test_helper):
     """Backup and Restore with different InnoDB parameter values."""
@@ -1028,9 +1104,10 @@ def test_inc_backup_innodb_params(test_helper):
     test_helper.backup_params = f"{CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     test_helper.restore_params = ""
 
-    lfs_200m = _innodb_log_file_size_opt(test_helper, 209715200)
-    lfs_2g = _innodb_log_file_size_opt(test_helper, 2147483648)
-    lfs_8m = _innodb_log_file_size_opt(test_helper, 8388608)
+    # Gate on the xtrabackup binary (9.x wants --innodb-redo-log-capacity).
+    lfs_200m = test_helper.redo_size_opt(209715200)
+    lfs_2g = test_helper.redo_size_opt(2147483648)
+    lfs_8m = test_helper.redo_size_opt(8388608)
     configs = [
         {"mysqld": "--innodb-redo-log-capacity=209715200", "backup_extra": lfs_200m,
          "prepare_extra": f"{lfs_200m} {CORE_FILE_OPT}".strip()},
@@ -1077,7 +1154,7 @@ def test_inc_backup_archive_log(test_helper):
         f"--binlog-transaction-compression-level-zstd=22 --innodb-extend-and-initialize=OFF "
         f"--innodb-log-writer-threads=OFF --innodb-redo-log-archive-dirs=archive:{archive_dir}"
     )
-    test_helper.prepare_params = f"{_innodb_log_file_size_opt(test_helper, 536870912)} {CORE_FILE_OPT}".strip()
+    test_helper.prepare_params = f"{test_helper.redo_size_opt(536870912)} {CORE_FILE_OPT}".strip()
     test_helper.initialize_db(rocksdb=test_helper.rocksdb == "enabled")
     _run_load(test_helper)
     test_helper.take_backup(single_incremental=True, databases=_verify_databases(test_helper))
@@ -1119,7 +1196,7 @@ def test_ssl_backup(test_helper):
         [os.path.join(test_helper.mysqldir, "bin/mysql"), "-uroot", f"-S{test_helper.socket_path}", "-Bse", "SELECT @@port;"],
         capture_output=True, text=True, check=False,
     )
-    mysql_port = port_result.stdout.strip() if port_result.returncode == 0 else "21000"
+    mysql_port = port_result.stdout.strip() if port_result.returncode == 0 else str(MYSQL_PORT)
     test_helper.backup_params = f"{ssl_opts} --ssl-mode=REQUIRED --host=127.0.0.1 -P {mysql_port} {CORE_FILE_OPT} --lock-ddl={test_helper.lock_ddl}"
     _run_load(test_helper)
     test_helper.take_backup(single_incremental=True, databases=databases)
@@ -1183,6 +1260,19 @@ def test_ssl_backup(test_helper):
 # Confirmed against real PXB builds before writing this test: reproduces on
 # PXB 8.4.0-6 and earlier (for both InnoDB and RocksDB), and passes on PXB
 # 8.4.0-7 and later, which ships the PXB-3502 fix.
+#
+# test_decompress_largest_file_first cannot rely on "created last" alone:
+# a raw directory walk on ext4 returns entries in hash order, not creation
+# or name order, so with just two schema directories in scope an unfixed
+# build hands out LARGE_DB first about half the time and passes by luck.
+# It also cannot require rank == 1: workers pop under the queue mutex but
+# log their "decompressing" line after releasing it, so the first
+# PARALLEL_DEGREE lines may interleave even on a fixed build. Instead it
+# builds PARALLEL_DEGREE large tables, moves them into SMALL_DB next to the
+# decoys (a walk returns one directory's files together, so a separate
+# schema would still be all-or-nothing), and checks that the first
+# PARALLEL_DEGREE in-scope dispatches are exactly those, in any order --
+# a random walk passes that with probability 1 / C(34, 4) (~1 in 46,000).
 
 # Number of small "decoy" tables created before the one large table. Kept
 # well above PARALLEL_DEGREE so a FIFO scheduler has plenty of small work to
@@ -1207,10 +1297,11 @@ SYSBENCH_SCRIPT = "/usr/share/sysbench/oltp_insert.lua"
 # '.rocksdb/' LSM directory instead.
 PARALLEL_ORDER_INNODB_SCOPE = re.compile(r"(?:" + re.escape(SMALL_DB) + r"|" + re.escape(LARGE_DB) + r")/")
 PARALLEL_ORDER_ROCKSDB_SCOPE = re.compile(r"\.rocksdb/")
+COMPRESSED_SUFFIXES = (".zst", ".lz4", ".qp")
 
 
 def _sysbench_prepare(
-    test_helper, database: str, tables: int, table_size: int, log_name: str, storage_engine: Optional[str] = None
+    test_helper, database: str, tables: int, table_size: int, log_name: str, storage_engine: str | None = None
 ) -> None:
     """Create and populate sbtest1..sbtestN via sysbench 'prepare'."""
     log_path = os.path.join(test_helper.logdir, log_name)
@@ -1230,14 +1321,18 @@ def _sysbench_prepare(
 
 
 def _build_adversarial_dataset(
-    test_helper, rocksdb: bool = False, small_db: str = SMALL_DB, large_db: str = LARGE_DB
+    test_helper,
+    rocksdb: bool = False,
+    small_db: str = SMALL_DB,
+    large_db: str = LARGE_DB,
+    large_tables: int = 1,
 ) -> None:
-    """Build the small-tables/one-large-table dataset.
+    """Build the small-tables/large-tables dataset.
 
     small_db gets NUM_SMALL_TABLES tiny tables (sbtest1..sbtestN); large_db,
-    created afterwards, gets a single much bigger sbtest1. large_db sorts
-    alphabetically after small_db and is discovered after it by a plain
-    directory scan -- the worst case for a scheduler that ignores size.
+    created afterwards, gets large_tables much bigger tables (sbtest1..M).
+    large_db sorts alphabetically after small_db -- the worst case for a
+    scheduler that walks names in order and ignores size.
     """
     storage_engine = "ROCKSDB" if rocksdb else None
     test_helper.primary.mysql(f"CREATE DATABASE IF NOT EXISTS {small_db}")
@@ -1247,34 +1342,75 @@ def _build_adversarial_dataset(
         f"adv_sysbench_{small_db}_prepare.log", storage_engine=storage_engine,
     )
     _sysbench_prepare(
-        test_helper, large_db, 1, LARGE_TABLE_ROWS,
+        test_helper, large_db, large_tables, LARGE_TABLE_ROWS,
         f"adv_sysbench_{large_db}_prepare.log", storage_engine=storage_engine,
     )
 
 
-def _dispatch_rank_of_largest(target_dir: str, log_path: str, dispatch_pattern: str, scope_pattern: "re.Pattern") -> tuple:
-    """Find the single largest real file under target_dir whose relative
-    path matches scope_pattern, then return its 1-based dispatch rank among
-    log lines that match both dispatch_pattern and scope_pattern (i.e. how
-    many other in-scope files were dispatched to a worker thread before it).
+def _build_mixed_dataset(test_helper) -> None:
+    """Build NUM_SMALL_TABLES small and PARALLEL_DEGREE large InnoDB tables, all in SMALL_DB.
 
-    Returns (rank, total_in_scope, largest_relpath, largest_size). rank is
-    None if the largest file's line never appears in the log.
+    A directory walk returns each directory's files together, so large
+    tables left in their own schema are all dispatched first whenever that
+    directory happens to be walked first. Moving them in among the decoys
+    leaves a size-blind scheduler only a 1 / C(34, 4) chance of looking right.
     """
-    largest_relpath = None
-    largest_size = -1
+    _build_adversarial_dataset(test_helper, large_tables=PARALLEL_DEGREE)
+    for n in range(1, PARALLEL_DEGREE + 1):
+        test_helper.primary.mysql(f"RENAME TABLE {LARGE_DB}.sbtest{n} TO {SMALL_DB}.large{n}")
+    test_helper.primary.mysql(f"DROP DATABASE {LARGE_DB}")
+
+
+def _processing_order(log_path: str, line_pattern: str, size_dir: str, suffix: str = "") -> list:
+    """Return [(relpath, size)] for every log line matching line_pattern, in log order.
+
+    line_pattern's first group is the file's path relative to size_dir
+    (minus `suffix`, which is appended to find it on disk).
+    """
+    order = []
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            match = re.search(line_pattern, line)
+            if match:
+                path = os.path.join(size_dir, match.group(1) + suffix)
+                order.append((match.group(1), os.path.getsize(path) if os.path.exists(path) else -1))
+    return order
+
+
+def _assert_largest_first(order: list, minimum: int, what: str, log_path: str) -> None:
+    """Fail unless `order` (from _processing_order) has >= minimum entries in non-increasing size."""
+    assert len(order) >= minimum, f"only {len(order)} {what} found in the log, need at least {minimum}; log: {log_path}"
+    for (prev, prev_size), (cur, cur_size) in zip(order, order[1:]):
+        assert cur_size <= prev_size, (
+            f"{what} not processed largest-first (PXB-3502): '{cur}' ({cur_size} bytes) came after "
+            f"'{prev}' ({prev_size} bytes); log: {log_path}"
+        )
+
+
+def _first_dispatched_vs_largest(
+    target_dir: str, log_path: str, dispatch_pattern: str, scope_pattern: re.Pattern, count: int
+) -> tuple:
+    """Compare the first `count` in-scope files dispatched to a worker thread
+    (per log lines matching both dispatch_pattern and scope_pattern) with the
+    `count` largest in-scope files under target_dir.
+
+    Returns (largest, dispatched, total_in_scope): `largest` is the set of the
+    `count` largest relpaths; `dispatched` is the list of relpaths named by
+    the first `count` in-scope dispatch lines, in log order.
+    """
+    sizes = {}
     for root, _dirs, files in os.walk(target_dir):
         for name in files:
             relpath = os.path.relpath(os.path.join(root, name), target_dir)
-            if not scope_pattern.search(relpath):
+            # Compressed originals (kept without --remove-original) are named
+            # by the decompressed path plus a suffix; size the real files only.
+            if not scope_pattern.search(relpath) or relpath.endswith(COMPRESSED_SUFFIXES):
                 continue
             try:
-                size = os.path.getsize(os.path.join(root, name))
+                sizes[relpath] = os.path.getsize(os.path.join(root, name))
             except OSError:
                 continue
-            if size > largest_size:
-                largest_size = size
-                largest_relpath = relpath
+    largest = set(sorted(sizes, key=sizes.get, reverse=True)[:count])
 
     with open(log_path, "r", encoding="utf-8", errors="replace") as f:
         lines = [
@@ -1282,28 +1418,24 @@ def _dispatch_rank_of_largest(target_dir: str, log_path: str, dispatch_pattern: 
             if re.search(dispatch_pattern, line) and scope_pattern.search(line)
         ]
 
-    rank = None
-    for idx, line in enumerate(lines, start=1):
-        if largest_relpath and largest_relpath in line:
-            rank = idx
-            break
-    return rank, len(lines), largest_relpath, largest_size
+    dispatched = []
+    for line in lines[:count]:
+        # Longest match first, so a path is never mistaken for its prefix.
+        match = next((p for p in sorted(sizes, key=len, reverse=True) if p in line), line.strip())
+        dispatched.append(match)
+    return largest, dispatched, len(lines)
 
 
 def test_decompress_largest_file_first(test_helper):
     """PXB-3502: 'xtrabackup --decompress --parallel=N' must dispatch the
-    largest compressed file to a worker thread before the bulk of the small
-    decoy tables, not after them.
+    PARALLEL_DEGREE largest compressed files to worker threads before any of
+    the small decoy tables.
     """
-    if test_helper.xtrabackup_version_normalized < test_helper.normalize_xtrabackup_version("8.4.0-7"):
-        pytest.skip(
-            f"PXB-3502 size-ordered decompress requires PXB >= 8.4.0-7 "
-            f"(found {test_helper.xtrabackup_version})"
-        )
+    test_helper.require_pxb_fix("PXB-3502", FIXED_IN_8_4_0_7)
     test_helper.mysqld_options = ""
-    test_helper.backup_params = f"--compress --compress-threads={PARALLEL_DEGREE} {CORE_FILE_OPT}"
+    test_helper.backup_params = f"--compress --compress-threads={PARALLEL_DEGREE}"
     test_helper.initialize_db()
-    _build_adversarial_dataset(test_helper)
+    _build_mixed_dataset(test_helper)
 
     if os.path.exists(test_helper.backup_dir):
         shutil.rmtree(test_helper.backup_dir)
@@ -1311,38 +1443,30 @@ def test_decompress_largest_file_first(test_helper):
     full_target = os.path.join(test_helper.backup_dir, "full")
 
     log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    backup_log = os.path.join(test_helper.logdir, f"adv_backup_{log_date}_log")
-    xb_cmd = test_helper._xtrabackup_cmd_prefix() + [
-        "--no-defaults", f"--user={test_helper.backup_user}", "--password=",
-        "--backup", f"--target-dir={full_target}",
-        f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}",
-    ] + test_helper.backup_params.split()
-    print("=>Taking compressed full backup")
-    result = test_helper.run_command(xb_cmd, check=False, log_file=backup_log)
-    if result.returncode != 0:
-        pytest.fail(f"ERR: Compressed backup failed. Log: {backup_log}")
-    print(f"..Compressed full backup was successfully created at: {full_target}.\n  Logs available at: {backup_log}")
-
-    decompress_log = os.path.join(test_helper.logdir, f"adv_decompress_{log_date}_log")
-    cmd = test_helper._xtrabackup_cmd_prefix() + [
-        "--no-defaults", "--decompress", f"--target-dir={full_target}", f"--parallel={PARALLEL_DEGREE}",
-    ]
-    print(f"=>Decompressing backup with --parallel={PARALLEL_DEGREE}")
-    result = test_helper.run_command(cmd, check=False, log_file=decompress_log)
-    if result.returncode != 0:
-        pytest.fail(f"ERR: Decompress failed. Log: {decompress_log}")
-    print(f"..Decompress of backup was successful.\n  Logs available at: {decompress_log}")
-
-    rank, total, largest, size = _dispatch_rank_of_largest(
-        full_target, decompress_log, r"decompressing ", PARALLEL_ORDER_INNODB_SCOPE
+    # backup_cmd_args already includes CORE_FILE_OPT; backup_params holds compress only.
+    test_helper.run_xtrabackup(
+        test_helper.backup_cmd_args(full_target) + test_helper.backup_params.split(),
+        f"adv_backup_{log_date}",
+        check=True,
     )
-    assert rank is not None, f"largest in-scope file '{largest}' never appeared in the decompress dispatch log: {decompress_log}"
-    assert rank == 1, (
-        f"{rank - 1}/{total} smaller files were decompressed before the largest one "
-        f"('{largest}', {size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
-        f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {decompress_log}"
+    _rc, _out, decompress_log = test_helper.run_xtrabackup(
+        ["--decompress", f"--target-dir={full_target}", f"--parallel={PARALLEL_DEGREE}"],
+        f"adv_decompress_{log_date}",
+        check=True,
     )
-    print(f"Largest file '{largest}' ({size} bytes) was decompressed first, rank {rank}/{total}: Pass")
+
+    largest, dispatched, total = _first_dispatched_vs_largest(
+        full_target, decompress_log, r"decompressing ", PARALLEL_ORDER_INNODB_SCOPE, PARALLEL_DEGREE
+    )
+    assert len(largest) == PARALLEL_DEGREE, (
+        f"expected {PARALLEL_DEGREE} large in-scope files under {full_target}, found {sorted(largest)}"
+    )
+    assert set(dispatched) == largest, (
+        f"first {PARALLEL_DEGREE} of {total} in-scope files decompressed were {dispatched}; expected "
+        f"the {PARALLEL_DEGREE} largest {sorted(largest)} (--parallel={PARALLEL_DEGREE}) to be "
+        f"dispatched ahead of everything smaller (PXB-3502); log: {decompress_log}"
+    )
+    print(f"First {PARALLEL_DEGREE} of {total} in-scope files decompressed were the largest: Pass")
 
 
 def test_copy_back_largest_file_first(test_helper):
@@ -1358,19 +1482,17 @@ def test_copy_back_largest_file_first(test_helper):
     if rocksdb_enabled else ["test"]``) rather than a separate parametrized
     variant.
     """
-    if test_helper.xtrabackup_version_normalized < test_helper.normalize_xtrabackup_version("8.4.0-7"):
-        pytest.skip(
-            f"PXB-3502 size-ordered copy-back requires PXB >= 8.4.0-7 "
-            f"(found {test_helper.xtrabackup_version})"
-        )
+    test_helper.require_pxb_fix("PXB-3502", FIXED_IN_8_4_0_7)
     rocksdb_enabled = test_helper.rocksdb == "enabled"
 
     test_helper.mysqld_options = ""
-    test_helper.backup_params = f"{CORE_FILE_OPT}"
+    test_helper.backup_params = ""
     test_helper.prepare_params = f"{CORE_FILE_OPT}"
     test_helper.restore_params = ""
     test_helper.initialize_db(rocksdb=rocksdb_enabled)
-    _build_adversarial_dataset(test_helper)
+    # PARALLEL_DEGREE large tables among the decoys: the first-N check below needs
+    # exactly N files that are larger than the rest (the small ones tie on size).
+    _build_mixed_dataset(test_helper)
     if rocksdb_enabled:
         _build_adversarial_dataset(test_helper, rocksdb=True, small_db=SMALL_DB_ROCKSDB, large_db=LARGE_DB_ROCKSDB)
 
@@ -1380,17 +1502,11 @@ def test_copy_back_largest_file_first(test_helper):
     full_target = os.path.join(test_helper.backup_dir, "full")
 
     log_date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    backup_log = os.path.join(test_helper.logdir, f"adv_backup_{log_date}_log")
-    xb_cmd = test_helper._xtrabackup_cmd_prefix() + [
-        "--no-defaults", f"--user={test_helper.backup_user}", "--password=",
-        "--backup", f"--target-dir={full_target}",
-        f"-S{test_helper.socket_path}", f"--datadir={test_helper.datadir}",
-    ] + test_helper.backup_params.split()
-    print("=>Taking full backup")
-    result = test_helper.run_command(xb_cmd, check=False, log_file=backup_log)
-    if result.returncode != 0:
-        pytest.fail(f"ERR: Backup failed. Log: {backup_log}")
-    print(f"..Full backup was successfully created at: {full_target}.\n  Logs available at: {backup_log}")
+    test_helper.run_xtrabackup(
+        test_helper.backup_cmd_args(full_target),
+        f"adv_backup_{log_date}",
+        check=True,
+    )
 
     test_helper.prepare_full_backup(test_helper.prepare_params, log_date)
 
@@ -1399,38 +1515,43 @@ def test_copy_back_largest_file_first(test_helper):
         shutil.rmtree(restore_dir)
     os.makedirs(restore_dir)
 
-    copyback_log = os.path.join(test_helper.logdir, f"adv_copyback_{log_date}_log")
-    cmd = test_helper._xtrabackup_cmd_prefix() + [
-        "--no-defaults", "--copy-back", f"--target-dir={full_target}",
-        f"--datadir={restore_dir}", f"--parallel={PARALLEL_DEGREE}",
-    ] + test_helper.restore_params.split()
-    print(f"=>Copy-back of full backup with --parallel={PARALLEL_DEGREE} to {restore_dir}")
-    result = test_helper.run_command(cmd, check=False, log_file=copyback_log)
-    if result.returncode != 0:
-        pytest.fail(f"ERR: Copy-back failed. Log: {copyback_log}")
-    print(f"..Copy-back of full backup was successful.\n  Logs available at: {copyback_log}")
-
-    rank, total, largest, size = _dispatch_rank_of_largest(full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_INNODB_SCOPE)
-    assert rank is not None, f"largest in-scope file '{largest}' never appeared in the copy-back dispatch log: {copyback_log}"
-    assert rank == 1, (
-        f"{rank - 1}/{total} smaller InnoDB files were copied back before the largest one "
-        f"('{largest}', {size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
-        f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {copyback_log}"
+    _rc, _out, copyback_log = test_helper.run_xtrabackup(
+        [
+            "--copy-back", f"--target-dir={full_target}",
+            f"--datadir={restore_dir}", f"--parallel={PARALLEL_DEGREE}",
+            *test_helper.restore_params.split(),
+        ],
+        f"adv_copyback_{log_date}",
+        check=True,
     )
-    print(f"Largest InnoDB file '{largest}' ({size} bytes) was copied back first, rank {rank}/{total}: Pass")
+
+    # Same first-N set check as decompress: with --parallel=N the N largest
+    # files are dispatched concurrently, so requiring rank==1 alone flakes.
+    largest, dispatched, total = _first_dispatched_vs_largest(
+        full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_INNODB_SCOPE, PARALLEL_DEGREE
+    )
+    assert len(largest) == PARALLEL_DEGREE, (
+        f"expected {PARALLEL_DEGREE} large in-scope files under {full_target}, found {sorted(largest)}"
+    )
+    assert set(dispatched) == largest, (
+        f"first {PARALLEL_DEGREE} of {total} in-scope files copied back were {dispatched}; expected "
+        f"the {PARALLEL_DEGREE} largest {sorted(largest)} (--parallel={PARALLEL_DEGREE}) to be "
+        f"dispatched ahead of everything smaller (PXB-3502); log: {copyback_log}"
+    )
+    print(f"First {PARALLEL_DEGREE} of {total} in-scope InnoDB files copied back were the largest: Pass")
 
     if rocksdb_enabled:
-        rdb_rank, rdb_total, rdb_largest, rdb_size = _dispatch_rank_of_largest(
-            full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_ROCKSDB_SCOPE
+        rdb_largest, rdb_dispatched, rdb_total = _first_dispatched_vs_largest(
+            full_target, copyback_log, r"\] Copying ", PARALLEL_ORDER_ROCKSDB_SCOPE, 1
         )
-        assert rdb_rank is not None, f"largest in-scope file '{rdb_largest}' never appeared in the copy-back dispatch log: {copyback_log}"
-        assert rdb_rank == 1, (
-            f"{rdb_rank - 1}/{rdb_total} smaller RocksDB files were copied back before the largest one "
-            f"('{rdb_largest}', {rdb_size} bytes) (--parallel={PARALLEL_DEGREE}). Expected the largest file "
-            f"to be dispatched first, ahead of everything smaller (PXB-3502); log: {copyback_log}"
+        assert len(rdb_largest) == 1, (
+            f"expected a largest in-scope RocksDB file under {full_target}, found {sorted(rdb_largest)}"
         )
-        print(f"Largest RocksDB file '{rdb_largest}' ({rdb_size} bytes) was copied back first, "
-              f"rank {rdb_rank}/{rdb_total}: Pass")
+        assert set(rdb_dispatched) == rdb_largest, (
+            f"first of {rdb_total} in-scope RocksDB files copied back was {rdb_dispatched}; expected "
+            f"{sorted(rdb_largest)} first (PXB-3502); log: {copyback_log}"
+        )
+        print(f"Largest RocksDB file {sorted(rdb_largest)} was copied back first of {rdb_total}: Pass")
 
     # Functional guard: reordering the queue must not skip, duplicate, or
     # corrupt any file.
@@ -1439,20 +1560,584 @@ def test_copy_back_largest_file_first(test_helper):
         backed_up = os.path.join(full_target, SMALL_DB, f"sbtest{i}.ibd")
         assert os.path.isfile(restored), f"sbtest{i}.ibd missing from restored datadir: {restored}"
         assert os.path.getsize(restored) == os.path.getsize(backed_up), f"sbtest{i}.ibd size mismatch after copy-back"
-    restored_large = os.path.join(restore_dir, LARGE_DB, "sbtest1.ibd")
-    backed_up_large = os.path.join(full_target, LARGE_DB, "sbtest1.ibd")
-    assert os.path.isfile(restored_large), f"{LARGE_DB}/sbtest1.ibd missing from restored datadir: {restored_large}"
-    assert os.path.getsize(restored_large) == os.path.getsize(backed_up_large), (
-        f"{LARGE_DB}/sbtest1.ibd size mismatch after copy-back"
-    )
+    for n in range(1, PARALLEL_DEGREE + 1):
+        restored_large = os.path.join(restore_dir, SMALL_DB, f"large{n}.ibd")
+        backed_up_large = os.path.join(full_target, SMALL_DB, f"large{n}.ibd")
+        assert os.path.isfile(restored_large), f"large{n}.ibd missing from restored datadir: {restored_large}"
+        assert os.path.getsize(restored_large) == os.path.getsize(backed_up_large), (
+            f"large{n}.ibd size mismatch after copy-back"
+        )
     if rocksdb_enabled:
         restored_rocksdb = os.path.join(restore_dir, ".rocksdb")
         assert os.path.isdir(restored_rocksdb) and os.listdir(restored_rocksdb), (
             f".rocksdb missing or empty in restored datadir: {restored_rocksdb}"
         )
-    print(f"All {NUM_SMALL_TABLES + 1} InnoDB data files"
+    print(f"All {NUM_SMALL_TABLES + PARALLEL_DEGREE} InnoDB data files"
           f"{' and the .rocksdb directory' if rocksdb_enabled else ''} "
           "are present in the restored datadir with matching sizes: Pass")
+
+
+def test_backup_largest_file_first(test_helper):
+    """PXB-3502: 'xtrabackup --backup --parallel=1' must copy data files in
+    non-increasing size order -- InnoDB .ibd files, and, when ROCKSDB=enabled,
+    the RocksDB checkpoint's .sst files.
+
+    Ported from the PXB dev tests t/pxb_largest_first_innodb.sh and
+    suites/rocksdb/largest_first.sh, on this suite's mixed dataset. With
+    --parallel=1 there is a single worker, so the copy order is the queue
+    order and the whole sequence can be checked, not just the first file.
+    """
+    test_helper.require_pxb_fix("PXB-3502", FIXED_IN_8_4_0_7)
+    rocksdb_enabled = test_helper.rocksdb == "enabled"
+    test_helper.mysqld_options = ""
+    test_helper.initialize_db(rocksdb=rocksdb_enabled)
+    _build_mixed_dataset(test_helper)
+    if rocksdb_enabled:
+        # Flush the small tables to their own SST before creating the large
+        # ones: the older, lower-numbered SST is then the smaller one, so
+        # name order and size order disagree.
+        test_helper.primary.mysql(f"CREATE DATABASE IF NOT EXISTS {SMALL_DB_ROCKSDB}")
+        _sysbench_prepare(test_helper, SMALL_DB_ROCKSDB, NUM_SMALL_TABLES, SMALL_TABLE_ROWS,
+                          "rdb_small_prepare.log", storage_engine="ROCKSDB")
+        test_helper.primary.mysql("SET GLOBAL rocksdb_force_flush_memtable_now = ON")
+        test_helper.primary.mysql(f"CREATE DATABASE IF NOT EXISTS {LARGE_DB_ROCKSDB}")
+        _sysbench_prepare(test_helper, LARGE_DB_ROCKSDB, 1, LARGE_TABLE_ROWS,
+                          "rdb_large_prepare.log", storage_engine="ROCKSDB")
+        test_helper.primary.mysql("SET GLOBAL rocksdb_force_flush_memtable_now = ON")
+
+    full_target = os.path.join(test_helper.backup_dir, "full")
+    os.makedirs(test_helper.backup_dir, exist_ok=True)
+    _rc, _out, backup_log = test_helper.run_xtrabackup(
+        test_helper.backup_cmd_args(full_target) + ["--parallel=1"],
+        "largest_first_backup",
+        check=True,
+    )
+
+    order = _processing_order(
+        backup_log, rf"\] (?:space_id: \d+, )?Copying \./({re.escape(SMALL_DB)}/\S+\.ibd) to ", full_target
+    )
+    _assert_largest_first(order, NUM_SMALL_TABLES + PARALLEL_DEGREE, "InnoDB files", backup_log)
+
+    if rocksdb_enabled:
+        sst_order = _processing_order(
+            backup_log, r"\] Copying \.xtrabackup_rocksdb_checkpoint_\d+/(\d+\.sst) to ",
+            os.path.join(full_target, ".rocksdb"),
+        )
+        _assert_largest_first(sst_order, 2, "RocksDB .sst files", backup_log)
+
+
+def test_incremental_prepare_largest_delta_first(test_helper):
+    """PXB-3502: applying an incremental with 'xtrabackup --prepare
+    --parallel=1' must apply .delta files in non-increasing size order.
+
+    Ported from the PXB dev test t/pxb_largest_first_delta.sh, on this
+    suite's mixed dataset: every row is updated, so each table's .delta is
+    proportional to its size.
+    """
+    test_helper.require_pxb_fix("PXB-3502", FIXED_IN_8_4_0_7)
+    test_helper.mysqld_options = ""
+    test_helper.initialize_db()
+    _build_mixed_dataset(test_helper)
+
+    full_target = os.path.join(test_helper.backup_dir, "full")
+    inc_target = os.path.join(test_helper.backup_dir, "inc")
+    os.makedirs(test_helper.backup_dir, exist_ok=True)
+    test_helper.run_xtrabackup(
+        test_helper.backup_cmd_args(full_target), "full_backup", check=True
+    )
+
+    tables = [f"sbtest{i}" for i in range(1, NUM_SMALL_TABLES + 1)] + [f"large{n}" for n in range(1, PARALLEL_DEGREE + 1)]
+    for table in tables:
+        test_helper.primary.mysql(f"UPDATE {SMALL_DB}.{table} SET c = REPEAT('u', 120)")
+
+    test_helper.run_xtrabackup(
+        test_helper.backup_cmd_args(inc_target) + [f"{test_helper.xb_opt('incremental-basedir')}={full_target}"],
+        "inc_backup",
+        check=True,
+    )
+    test_helper.run_xtrabackup(
+        ["--prepare", test_helper.xb_opt("apply-log-only"), f"--target-dir={full_target}"],
+        "prepare_full",
+        check=True,
+    )
+    _rc, _out, apply_log = test_helper.run_xtrabackup(
+        [
+            "--prepare", test_helper.xb_opt("apply-log-only"), f"--target-dir={full_target}",
+            f"{test_helper.xb_opt('incremental-dir')}={inc_target}", "--parallel=1",
+        ],
+        "prepare_inc",
+        check=True,
+    )
+
+    order = _processing_order(
+        apply_log, rf"Applying \S+/({re.escape(SMALL_DB)}/\S+\.ibd)\.delta to ", inc_target, suffix=".delta"
+    )
+    _assert_largest_first(order, len(tables), ".delta files", apply_log)
+
+
+# ============================================================================
+# Vector column / HNSW vector index tests (PXB-3915, PXB-3932)
+# ============================================================================
+#
+# Self-contained: no load tool and no debug server. Each test builds a
+# ``vec`` schema with VECTOR columns and HNSW vector indexes from
+# Python-generated data, takes backups, prepares, restores into a second
+# server and checks that the restored server answers exactly like the
+# source: every row and vector value, the vector functions (VECTOR_DIM,
+# DISTANCE euclidean / cosine / dot), ANN queries through the vector index
+# (EXPLAIN type vector_ann, same ids, a full top-k, high recall against the
+# exact answer - an empty or stale HNSW aux table fails this),
+# AUTO_INCREMENT, SHOW CREATE TABLE, the HNSW aux tablespaces and CHECK TABLE.
+#
+# PXB-3932 is fixed on the server side by PS-12024 (PS >= 9.7.4-4): on older
+# servers the tests that build vector indexes between or during backups run
+# as xfail (non-strict), so the known gap stays visible in the report.
+
+# PXB-3915 (vector tables in backup/prepare) shipped in 9.7.2-3.
+VEC_FIXED_IN_PXB_3915 = {"9.7": "9.7.2-3"}
+# PS-12024 (MLOG_INDEX_LOAD for the HNSW aux table; the fix for PXB-3932).
+VEC_PS_12024_FIXED_IN = (9, 7, 4, 4)
+
+VEC_RESTORE_PORT = MYSQL_PORT + 61
+VEC_SCHEMA = "vec"
+VEC_SEED = 3932
+VEC_ROWS = 1500
+VEC_TOP_K = 10
+VEC_EF_SEARCH = 200
+VEC_MIN_RECALL = 0.9
+
+# name -> (dimension, HNSW options or None for no index, distance metric used by ANN queries)
+VEC_TABLES = {
+    "t_euc": (8, "M = 8, metric = euclidean", "euclidean"),
+    "t_cos": (16, "M = 12, metric = cosine", "cosine"),
+    "t_plain": (4, None, "euclidean"),  # gets a vector index only after the full backup
+}
+
+
+# ============================================================================
+# SQL helpers
+# ============================================================================
+
+def _vec_mysql(test_helper, socket: str, sql: str, force: bool = False) -> subprocess.CompletedProcess:
+    """Run ``sql`` through the mysql client on ``socket`` (batch mode, no column names)."""
+    cmd = [os.path.join(test_helper.mysqldir, "bin/mysql"), "-uroot", f"-S{socket}", "-N", "-B"]
+    if force:
+        cmd.append("--force")
+    return subprocess.run(cmd, input=sql, capture_output=True, text=True, check=False)
+
+
+def _vec_rows(test_helper, socket: str, sql: str) -> list[list[str]]:
+    """Run a query; fail the test on error; return the rows as lists of strings."""
+    result = _vec_mysql(test_helper, socket, sql)
+    if result.returncode != 0:
+        pytest.fail(f"query failed: {sql[:200]}\n{result.stderr.strip()}")
+    return [line.split("\t") for line in result.stdout.splitlines() if line]
+
+
+def _vec_literal(rng: random.Random, dim: int) -> str:
+    """A random non-zero vector literal (non-zero so cosine distance is always defined)."""
+    values = [round(rng.uniform(-1, 1), 3) or 0.001 for _ in range(dim)]
+    return "[" + ",".join(str(x) for x in values) + "]"
+
+
+def _vec_insert_sql(table: str, dim: int, rng: random.Random, count: int) -> str:
+    values = ",".join(f"(STRING_TO_VECTOR('{_vec_literal(rng, dim)}'))" for _ in range(count))
+    return f"INSERT INTO {VEC_SCHEMA}.{table} (v) VALUES {values};\n"
+
+
+def _vec_add_index_sql(table: str) -> str:
+    return f"ALTER TABLE {VEC_SCHEMA}.{table} ADD VECTOR KEY vk (v) TYPE hnsw ({VEC_TABLES['t_euc'][1]});\n"
+
+
+def _vec_create_schema(test_helper) -> None:
+    """Create the vec schema and load VEC_ROWS rows per table (deterministic data)."""
+    rng = random.Random(VEC_SEED)
+    sql = f"CREATE DATABASE IF NOT EXISTS {VEC_SCHEMA};\n"
+    for table, (dim, hnsw, _metric) in VEC_TABLES.items():
+        key = f", VECTOR KEY vk (v) TYPE hnsw ({hnsw})" if hnsw else ""
+        sql += (
+            f"CREATE TABLE {VEC_SCHEMA}.{table} (id BIGINT UNSIGNED PRIMARY KEY AUTO_INCREMENT,"
+            f" v VECTOR({dim}) NOT NULL{key}) ENGINE=InnoDB;\n"
+        )
+        for _ in range(VEC_ROWS // 100):
+            sql += _vec_insert_sql(table, dim, rng, 100)
+    _vec_rows(test_helper, test_helper.socket_path, sql)
+
+
+def _vec_require_index(test_helper) -> None:
+    """Skip unless the running server supports HNSW vector indexes."""
+    probe = (
+        "CREATE DATABASE IF NOT EXISTS vec_probe;"
+        "CREATE TABLE vec_probe.t (id BIGINT UNSIGNED PRIMARY KEY, v VECTOR(2) NOT NULL);"
+        "ALTER TABLE vec_probe.t ADD VECTOR KEY vk (v) TYPE hnsw (M = 4);"
+    )
+    result = _vec_mysql(test_helper, test_helper.socket_path, probe)
+    _vec_mysql(test_helper, test_helper.socket_path, "DROP DATABASE IF EXISTS vec_probe;")
+    if result.returncode != 0:
+        pytest.skip(f"server has no HNSW vector index support: {result.stderr.strip()[:200]}")
+
+
+def _vec_server_version_parts(test_helper) -> tuple[int, ...]:
+    """``(major, minor, patch[, release])`` from ``server_version`` (e.g. ``9.7.4-4``)."""
+    m = re.match(
+        r"^(\d+)\.(\d+)\.(\d+)(?:-(\d+))?",
+        test_helper.server_version or "",
+    )
+    if not m:
+        return (0,)
+    parts = [int(m.group(1)), int(m.group(2)), int(m.group(3))]
+    if m.group(4) is not None:
+        parts.append(int(m.group(4)))
+    return tuple(parts)
+
+
+def _vec_server_has_ps12024(test_helper) -> bool:
+    """Whether the server line has PS-12024 (MLOG_INDEX_LOAD for the HNSW aux table)."""
+    if test_helper.server_type != "PS":
+        return False
+    parts = _vec_server_version_parts(test_helper)
+    fixed = VEC_PS_12024_FIXED_IN
+    # Pad so (9,7,4) compares below (9,7,4,4); longer tuples compare as-is.
+    n = max(len(parts), len(fixed))
+    parts_n = parts + (0,) * (n - len(parts))
+    fixed_n = fixed + (0,) * (n - len(fixed))
+    if parts_n[:2] == fixed_n[:2]:
+        return parts_n >= fixed_n
+    return parts_n[:2] > fixed_n[:2]
+
+
+def _vec_xfail_without_ps12024(request, test_helper) -> None:
+    """Mark the test xfail (non-strict) when the server cannot pass it, but still run it."""
+    if not _vec_server_has_ps12024(test_helper):
+        request.applymarker(pytest.mark.xfail(
+            strict=False,
+            reason=f"PXB-3932 needs PS-12024 (PS >= 9.7.4-4); server is {test_helper.server_version}",
+        ))
+
+
+# ============================================================================
+# Snapshot: what a restored server must answer exactly like the source
+# ============================================================================
+
+def _vec_query_vectors(dim: int) -> list[str]:
+    rng = random.Random(VEC_SEED + dim)
+    return [_vec_literal(rng, dim) for _ in range(3)]
+
+
+def _vec_snapshot(test_helper, socket: str) -> dict:
+    snap: dict = {}
+    tables = [r[0] for r in _vec_rows(test_helper, socket,
+              f"SELECT table_name FROM information_schema.tables WHERE table_schema='{VEC_SCHEMA}' ORDER BY 1")]
+    snap["tables"] = tables
+    snap["aux_tablespaces"] = int(_vec_rows(test_helper, socket,
+        f"SELECT COUNT(*) FROM information_schema.innodb_tablespaces WHERE name LIKE '{VEC_SCHEMA}/percona_vec_hnsw%'")[0][0])
+    for table in tables:
+        dim = VEC_TABLES.get(table, (4, None, "euclidean"))[0]
+        metric = VEC_TABLES.get(table, (4, None, "euclidean"))[2]
+        t = f"{VEC_SCHEMA}.{table}"
+        create = _vec_rows(test_helper, socket, f"SHOW CREATE TABLE {t}")[0][1]
+        snap[f"{table}.create"] = re.sub(r" AUTO_INCREMENT=\d+", "", create)
+        snap[f"{table}.autoinc"] = _vec_rows(test_helper, socket,
+            "SET SESSION information_schema_stats_expiry = 0;"
+            f"SELECT AUTO_INCREMENT FROM information_schema.tables WHERE table_schema='{VEC_SCHEMA}' AND table_name='{table}'")[0][0]
+        rows = _vec_rows(test_helper, socket, f"SELECT id, VECTOR_TO_STRING(v) FROM {t} FORCE INDEX (PRIMARY) ORDER BY id")
+        snap[f"{table}.count"] = len(rows)
+        snap[f"{table}.rows_md5"] = hashlib.md5("\n".join("\t".join(r) for r in rows).encode()).hexdigest()
+        check = _vec_rows(test_helper, socket, f"CHECK TABLE {t}")
+        snap[f"{table}.check"] = check[-1][-1]
+        has_index = "VECTOR KEY" in create
+        # Fresh statistics on both servers: with stale ones the optimizer table-scans
+        # instead of using the vector index for ORDER BY DISTANCE ... LIMIT.
+        _vec_rows(test_helper, socket, f"ANALYZE TABLE {t}")
+        for i, q in enumerate(_vec_query_vectors(dim)):
+            qv = f"STRING_TO_VECTOR('{q}')"
+            funcs = _vec_rows(test_helper, socket,
+                f"SELECT id, VECTOR_DIM(v), ROUND(DISTANCE(v, {qv}, 'euclidean'), 4),"
+                f" ROUND(DISTANCE(v, {qv}, 'cosine'), 4), ROUND(DISTANCE(v, {qv}, 'dot'), 4)"
+                f" FROM {t} FORCE INDEX (PRIMARY) ORDER BY id")
+            snap[f"{table}.functions_q{i}_md5"] = hashlib.md5(
+                "\n".join("\t".join(r) for r in funcs).encode()).hexdigest()
+            exact = [r[0] for r in _vec_rows(test_helper, socket,
+                f"SELECT id FROM {t} FORCE INDEX (PRIMARY) ORDER BY DISTANCE(v, {qv}, '{metric}'), id LIMIT {VEC_TOP_K}")]
+            snap[f"{table}.exact_q{i}"] = exact
+            if has_index:
+                ann_sql = f"SELECT id FROM {t} ORDER BY DISTANCE(v, {qv}, '{metric}') LIMIT {VEC_TOP_K}"
+                explain = _vec_rows(test_helper, socket, f"EXPLAIN FORMAT=TRADITIONAL {ann_sql}")
+                snap[f"{table}.ann_access_q{i}"] = explain[0][4]  # EXPLAIN 'type' column
+                ann = [r[0] for r in _vec_rows(test_helper, socket,
+                    f"SET SESSION innodb_hnsw_ef_search = {VEC_EF_SEARCH}; {ann_sql}")]
+                snap[f"{table}.ann_q{i}"] = ann
+                snap[f"{table}.ann_recall_q{i}"] = round(len(set(ann) & set(exact)) / max(len(exact), 1), 2)
+    return snap
+
+
+def _vec_assert_same(source: dict, restored: dict, logdir: str) -> None:
+    """Every snapshot entry must match, and every ANN query must really use the vector index."""
+    with open(os.path.join(logdir, "vector_snapshots.json"), "w", encoding="utf-8") as f:
+        json.dump({"source": source, "restored": restored}, f, indent=1)
+    diffs = [f"{k}: source={source.get(k)!r} restored={restored.get(k)!r}"
+             for k in sorted(set(source) | set(restored)) if source.get(k) != restored.get(k)]
+    assert not diffs, "restored server differs from the source:\n  " + "\n  ".join(diffs[:20])
+    for key, value in restored.items():
+        if ".ann_access_" in key:
+            assert value == "vector_ann", f"{key}: ANN query does not use the vector index (EXPLAIN type={value})"
+        if ".ann_q" in key:
+            assert len(value) == VEC_TOP_K, f"{key}: ANN query returned {len(value)} of {VEC_TOP_K} rows (empty/stale index?)"
+        if ".ann_recall_" in key:
+            assert value >= VEC_MIN_RECALL, f"{key}: ANN recall {value} below {VEC_MIN_RECALL}"
+        if key.endswith(".check"):
+            assert value == "OK", f"{key}: CHECK TABLE reported {value}"
+
+
+# ============================================================================
+# Backup / prepare / restore
+# ============================================================================
+
+def _vec_backup(test_helper, target: str, name: str, extra: list | None = None) -> None:
+    test_helper.run_xtrabackup(test_helper.backup_cmd_args(target) + (extra or []), name, check=True)
+
+
+def _vec_prepare_chain(test_helper, full: str, incs: list[str]) -> None:
+    """Prepare full + incrementals in order; the last step without --apply-log-only."""
+    redo_only = test_helper.xb_opt("apply-log-only")
+    inc_dir = test_helper.xb_opt("incremental-dir")
+    steps = [None, *incs]
+    for n, inc in enumerate(steps):
+        args = ["--prepare", f"--target-dir={full}", *CORE_FILE_OPT.split()]
+        if n < len(steps) - 1:
+            args.append(redo_only)
+        if inc:
+            args.append(f"{inc_dir}={inc}")
+        test_helper.run_xtrabackup(args, f"prepare_{n}", check=True)
+
+
+def _vec_restore_and_compare(test_helper, source: dict) -> None:
+    replica = test_helper.create_replica(name="vr", server_id=3, port=VEC_RESTORE_PORT)  # short: socket paths max 107 chars
+    test_helper.restore_backup_to(replica.datadir, "", datetime.now().strftime("%Y%m%d_%H%M%S"))
+    replica.start()
+    _vec_assert_same(source, _vec_snapshot(test_helper, replica.socket_path), test_helper.logdir)
+
+
+def _vec_change_set_sql(rng: random.Random) -> str:
+    """Deterministic changes covering the vector index build paths of PS-12024."""
+    sql = ""
+    for table, (dim, _h, _m) in VEC_TABLES.items():
+        sql += _vec_insert_sql(table, dim, rng, 100)
+        sql += f"UPDATE {VEC_SCHEMA}.{table} SET v = STRING_TO_VECTOR('{_vec_literal(rng, dim)}') WHERE id % 37 = 1;\n"
+        sql += f"DELETE FROM {VEC_SCHEMA}.{table} WHERE id % 53 = 2;\n"
+    sql += _vec_add_index_sql("t_plain")                                    # first ADD VECTOR KEY
+    sql += (f"ALTER TABLE {VEC_SCHEMA}.t_euc DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw ({VEC_TABLES['t_euc'][1]});\n")  # replace
+    sql += f"OPTIMIZE TABLE {VEC_SCHEMA}.t_cos;\n"                           # in-place rebuild
+    return sql
+
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+def _vec_setup(test_helper, page_tracking: bool = False) -> None:
+    test_helper.require_pxb_fix("PXB-3915", VEC_FIXED_IN_PXB_3915)
+    if test_helper.get_mysql_type() == "MS":
+        # Expected: upstream MySQL Community builds have no HNSW vector index /
+        # vector distance functions; the probe below catches other servers.
+        pytest.skip("Vector index/functions are not supported in MySQL Community (MS) builds")
+    test_helper.mysqld_options = ""
+    test_helper.load_tool = "none"  # data and workload come from the test itself
+    test_helper.initialize_db()
+    _vec_require_index(test_helper)
+    if page_tracking:
+        _vec_rows(test_helper, test_helper.socket_path, "INSTALL COMPONENT 'file://component_mysqlbackup';")
+    _vec_create_schema(test_helper)
+
+
+def test_vector_full_backup_restore(test_helper):
+    """PXB-3915: a full backup of vector tables with HNSW indexes restores with
+    the same rows, vector function results and ANN answers through the index."""
+    _vec_setup(test_helper)
+    full = os.path.join(test_helper.backup_dir, "full")
+    _vec_backup(test_helper, full, "full_backup")
+    source = _vec_snapshot(test_helper, test_helper.socket_path)
+    _vec_prepare_chain(test_helper, full, [])
+    _vec_restore_and_compare(test_helper, source)
+
+
+@pytest.mark.parametrize("page_tracking", [False, True], ids=["no_pt", "pt"])
+def test_vector_index_built_between_backups(request, test_helper, page_tracking):
+    """PXB-3932: vector indexes added, replaced and rebuilt between the full
+    backup and an incremental (and DML in between) restore completely. The
+    vector index builds fill the HNSW aux table without redo; xtrabackup must
+    copy it in full, which PS-12024 makes possible."""
+    _vec_setup(test_helper, page_tracking)
+    _vec_xfail_without_ps12024(request, test_helper)
+    pt = ["--page-tracking"] if page_tracking else []
+    base_opt = test_helper.xb_opt("incremental-basedir")
+    full = os.path.join(test_helper.backup_dir, "full")
+    inc1 = os.path.join(test_helper.backup_dir, "inc1")
+    inc2 = os.path.join(test_helper.backup_dir, "inc2")
+    rng = random.Random(VEC_SEED + 1)
+
+    _vec_backup(test_helper, full, "full_backup", pt)
+    _vec_rows(test_helper, test_helper.socket_path, _vec_change_set_sql(rng))
+    _vec_backup(test_helper, inc1, "inc1_backup", [f"{base_opt}={full}", *pt])
+    for table, (dim, _h, _m) in VEC_TABLES.items():
+        _vec_rows(test_helper, test_helper.socket_path, _vec_insert_sql(table, dim, rng, 50))
+    _vec_backup(test_helper, inc2, "inc2_backup", [f"{base_opt}={inc1}", *pt])
+    source = _vec_snapshot(test_helper, test_helper.socket_path)
+    _vec_prepare_chain(test_helper, full, [inc1, inc2])
+    _vec_restore_and_compare(test_helper, source)
+
+
+# Expected mysql --force noise from racing ADD/DROP KEY; anything else is fatal.
+_VEC_EXPECTED_SQL_ERR = re.compile(
+    r"Can't DROP|Duplicate key name|check that (column/key )?exists",
+    re.IGNORECASE,
+)
+
+
+def _vec_unexpected_sql_errors(stderr: str) -> list[str]:
+    """ERROR lines from a --force batch that are not expected ADD/DROP races."""
+    unexpected = []
+    for line in (stderr or "").splitlines():
+        if "ERROR" not in line:
+            continue
+        if _VEC_EXPECTED_SQL_ERR.search(line):
+            continue
+        unexpected.append(line)
+    return unexpected
+
+
+class _VecWorkload(threading.Thread):
+    """Vector DML plus vector index DDL (add / drop / replace / rebuild) in a loop,
+    through the mysql client in --force batches, until stopped."""
+
+    def __init__(self, test_helper, seed: int):
+        super().__init__(daemon=True)
+        self.th = test_helper
+        self.rng = random.Random(seed)
+        self.stop_event = threading.Event()
+        self.batches = 0
+        self.ok_batches = 0
+        self.index_builds = 0
+        self.errors: list[str] = []
+        self._mysql_proc: subprocess.Popen | None = None
+        self._proc_lock = threading.Lock()
+
+    def kill_mysql(self) -> None:
+        """Terminate the active mysql client, if any, so join can finish."""
+        with self._proc_lock:
+            proc = self._mysql_proc
+        if proc is None or proc.poll() is not None:
+            return
+        proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def _run_batch(self, sql: str) -> subprocess.CompletedProcess:
+        cmd = [
+            os.path.join(self.th.mysqldir, "bin/mysql"),
+            "-uroot",
+            f"-S{self.th.socket_path}",
+            "-N",
+            "-B",
+            "--force",
+        ]
+        with self._proc_lock:
+            self._mysql_proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            proc = self._mysql_proc
+        try:
+            stdout, stderr = proc.communicate(input=sql)
+            return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        finally:
+            with self._proc_lock:
+                if self._mysql_proc is proc:
+                    self._mysql_proc = None
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            sql = ""
+            for table, (dim, _h, _m) in VEC_TABLES.items():
+                sql += _vec_insert_sql(table, dim, self.rng, 20)
+                sql += f"UPDATE {VEC_SCHEMA}.{table} SET v = STRING_TO_VECTOR('{_vec_literal(self.rng, dim)}') ORDER BY RAND() LIMIT 5;\n"
+                sql += f"DELETE FROM {VEC_SCHEMA}.{table} ORDER BY RAND() LIMIT 3;\n"
+            ddl = self.batches % 6
+            index_ddl = False
+            if ddl == 1:
+                sql += _vec_add_index_sql("t_plain")
+                index_ddl = True
+            elif ddl == 3:
+                sql += f"ALTER TABLE {VEC_SCHEMA}.t_plain DROP KEY vk;\n"
+            elif ddl == 4:
+                sql += f"OPTIMIZE TABLE {VEC_SCHEMA}.t_cos;\n"
+            elif ddl == 5:
+                sql += f"ALTER TABLE {VEC_SCHEMA}.t_euc DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw ({VEC_TABLES['t_euc'][1]});\n"
+                index_ddl = True
+            result = self._run_batch(sql)
+            stderr = result.stderr or ""
+            unexpected = _vec_unexpected_sql_errors(stderr)
+            if unexpected:
+                self.errors.extend(unexpected)
+            else:
+                self.ok_batches += 1
+                # Index-build DDL only counts when the ALTER had no ERROR (a
+                # failed DROP in the same multi-clause ALTER aborts the ADD).
+                if index_ddl and "ERROR" not in stderr:
+                    self.index_builds += 1
+            self.batches += 1
+
+
+@pytest.mark.parametrize("mode", ["pt", "reduced_lock"])
+def test_vector_backup_under_workload(request, test_helper, mode):
+    """PXB-3932 without pstress or a debug server: vector DML and vector index
+    DDL run while the backups are taken (page-tracking incrementals, or a
+    --lock-ddl=reduced full backup). After the workload stops, a final
+    incremental captures the end state; the prepared chain must restore to
+    exactly that state, with working vector indexes."""
+    _vec_setup(test_helper, page_tracking=(mode == "pt"))
+    _vec_xfail_without_ps12024(request, test_helper)
+    base_opt = test_helper.xb_opt("incremental-basedir")
+    extra = ["--page-tracking"] if mode == "pt" else []
+    full = os.path.join(test_helper.backup_dir, "full")
+    incs: list[str] = []
+
+    workload = _VecWorkload(test_helper, VEC_SEED + 2)
+    workload.start()
+    try:
+        time.sleep(2)
+        _vec_backup(test_helper, full, "full_backup", extra + (["--lock-ddl=reduced"] if mode == "reduced_lock" else []))
+        if mode == "pt":
+            for n in range(1, 4):  # incrementals while the workload runs
+                time.sleep(5)
+                inc = os.path.join(test_helper.backup_dir, f"inc{n}")
+                _vec_backup(test_helper, inc, f"inc{n}_backup", [f"{base_opt}={incs[-1] if incs else full}", *extra])
+                incs.append(inc)
+    finally:
+        workload.stop_event.set()
+        workload.join(timeout=300)
+        if workload.is_alive():
+            workload.kill_mysql()
+            workload.join(timeout=30)
+        if workload.is_alive():
+            pytest.fail("vector workload did not stop after mysql kill")
+    assert not workload.errors, (
+        f"unexpected SQL errors in vector workload: {workload.errors[:5]}"
+    )
+    assert workload.ok_batches > 0, "the vector workload never completed a successful batch"
+    assert workload.index_builds > 0, "the vector workload never built a vector index"
+
+    final = os.path.join(test_helper.backup_dir, f"inc{len(incs) + 1}")
+    _vec_backup(test_helper, final, "final_backup", [f"{base_opt}={incs[-1] if incs else full}", *extra])
+    incs.append(final)
+    source = _vec_snapshot(test_helper, test_helper.socket_path)
+    _vec_prepare_chain(test_helper, full, incs)
+    _vec_restore_and_compare(test_helper, source)
 
 
 # ============================================================================
@@ -1481,6 +2166,7 @@ if __name__ == "__main__":
             "Innodb_params_redo_archive_tests",
             "SSL_tests",
             "Parallel_processing_order_tests",
+            "Vector_index_tests",
         ],
         help="Test suites to run",
     )
@@ -1505,6 +2191,8 @@ if __name__ == "__main__":
         print("   export S3_SECRET_KEY=<your-secret-access-key>")
         print("   export S3_REGION=us-west-2")
         print("   export S3_ENDPOINT=https://s3.us-west-2.amazonaws.com")
+        print("   # Optional prefix-scoped user (test_cloud_backup_md5_delete_prefix_scope):")
+        print("   export S3_SCOPED_ACCESS_KEY=<key> S3_SCOPED_SECRET_KEY=<secret> S3_SCOPED_PREFIX=<prefix>")
         print("   export INSTALL_TYPE=tarball  # or package")
         print("2. Run the script as: pytest innodb_myrocks_backup_tests.py -k <test_name> -s -v")
         print("   Or: python innodb_myrocks_backup_tests.py <Test Suites>")
@@ -1523,7 +2211,8 @@ if __name__ == "__main__":
         print("   Innodb_params_redo_archive_tests")
         print("   SSL_tests")
         print("   Parallel_processing_order_tests")
-        print("")
+        print("   Vector_index_tests")
+        print()
         print("3. Logs are available at:", TEST_BASE_DIR, "(test-specific directories)")
         sys.exit(1)
 
@@ -1574,7 +2263,7 @@ if __name__ == "__main__":
         "Encryption_PXB2_4_MS5_7_tests": [
             "test_encryption_2_4[keyring_file_plugin]",
         ],
-        "Cloud_backup_tests": ["test_cloud_inc_backup", "test_cloud_backup_md5_delete"],
+        "Cloud_backup_tests": ["test_cloud_inc_backup", "test_cloud_backup_md5_delete", "test_cloud_backup_md5_delete_prefix_scope"],
         "Innodb_params_redo_archive_tests": [
             "test_inc_backup_innodb_params",
             "test_inc_backup_archive_log",
@@ -1583,6 +2272,13 @@ if __name__ == "__main__":
         "Parallel_processing_order_tests": [
             "test_decompress_largest_file_first",
             "test_copy_back_largest_file_first",
+            "test_backup_largest_file_first",
+            "test_incremental_prepare_largest_delta_first",
+        ],
+        "Vector_index_tests": [
+            "test_vector_full_backup_restore",
+            "test_vector_index_built_between_backups",
+            "test_vector_backup_under_workload",
         ],
     }
 

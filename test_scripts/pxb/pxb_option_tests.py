@@ -21,7 +21,7 @@ import shutil
 import sys
 
 import pytest
-from test_helper import CORE_FILE_OPT, MYSQL_PORT, BackupTestHelper
+from test_helper import CORE_FILE_OPT, MYSQL_PORT, BackupTestHelper, banner_for_test
 
 # Release lines that shipped these fixes, and the first fixed version on each.
 FIXED_IN_8_4_0_8 = {"8.4": "8.4.0-8", "9.7": "9.7.2-2"}
@@ -35,13 +35,14 @@ RESTORE_PORT = MYSQL_PORT + 51
 def test_helper(request):
     """Create a test helper instance for each test."""
     test_name = request.node.name if hasattr(request, "node") else None
-    # Option tests create their own schema; do not require pstress/sysbench.
-    helper = BackupTestHelper(test_name=test_name, load_tool="none")
-    helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
-    helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
-    yield helper
-    if os.environ.get("DISABLE_CLEANUP") != "1":
-        helper.cleanup()
+    with banner_for_test(test_name):
+        # Option tests create their own schema; do not require pstress/sysbench.
+        helper = BackupTestHelper(test_name=test_name, load_tool="none")
+        helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
+        helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
+        yield helper
+        if os.environ.get("DISABLE_CLEANUP") != "1":
+            helper.cleanup()
 
 
 @pytest.fixture(scope="function", autouse=True)

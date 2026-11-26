@@ -780,18 +780,30 @@ class BackupTestHelper:
         log_name: str,
         *,
         check: bool = False,
+        label: str | None = None,
     ) -> tuple[int, str, str]:
         """Run xtrabackup with ``args``; return ``(returncode, combined output, log_file)``.
 
         ``log_name`` is a short stem written under ``self.logdir`` as
         ``{log_name}_log``. When ``check=True``, fail the test on non-zero exit.
+        ``label`` is an optional progress string (e.g. ``Taking compressed full
+        backup``); when omitted, ``log_name`` is used.
         """
+        action = label or log_name
+        print(f"=>Running xtrabackup: {action}")
         log_file = os.path.join(self.logdir, f"{log_name}_log")
         cmd = self._xtrabackup_cmd_prefix() + ["--no-defaults", *args]
         result = self.run_command(cmd, check=False, log_file=log_file)
         out = (result.stdout or "") + (result.stderr or "")
+        if result.returncode == 0:
+            print(f"..xtrabackup '{action}' was successful.\n  Logs available at: {log_file}")
+        else:
+            print(
+                f"..xtrabackup '{action}' exited {result.returncode}.\n"
+                f"  Logs available at: {log_file}"
+            )
         if check and result.returncode != 0:
-            pytest.fail(f"ERR: xtrabackup '{log_name}' failed. Log: {log_file}")
+            pytest.fail(f"ERR: xtrabackup '{action}' failed. Log: {log_file}")
         return result.returncode, out, log_file
     def _xb_has_renamed_options(self) -> bool:
         """Whether the xtrabackup in ``xtrabackup_dir`` has the PXB-3758/PXB-3840 option names.

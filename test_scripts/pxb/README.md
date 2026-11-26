@@ -586,6 +586,8 @@ python pxb_option_tests.py History_tests
 python pxb_option_tests.py Free_memory_pct_tests
 ```
 
+The `__main__` path uses `sys.exit(pytest.main(...))` so the process exit code matches the test result (needed when CI runs `python pxb_option_tests.py <suite>`). The other PXB suites still call `pytest.main()` without propagating the code.
+
 `test_incremental_option_aliases`, `test_history_on_other_server` and `test_use_free_memory_pct_sizing` (debug builds) start a second server on `MYSQL_PORT + 51` / `MYSQL_PORT + 50` (`MYSQL_PORT` defaults to 21000).
 
 ### Test reference — pxb_option_tests.py

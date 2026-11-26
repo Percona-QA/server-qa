@@ -679,10 +679,14 @@ class BackupTestHelper:
             )
             if self.server_type is None:
                 self.server_type = "MS" if "MySQL Community Server" in result.stdout else "PS"
-            version_match = re.search(r"Ver\s+([0-9]+\.[0-9]+[\.0-9]*)", result.stdout)
+            # Keep the Percona release suffix (e.g. 9.7.4-4) in the returned
+            # string; normalize_version still uses the base semver only.
+            version_match = re.search(
+                r"Ver\s+(\d+\.\d+\.\d+(?:-\d+)?)", result.stdout
+            )
             if version_match:
                 ver = version_match.group(1)
-                normalized = self.normalize_version(ver)
+                normalized = self.normalize_version(ver.split("-", 1)[0])
                 return ver, normalized
         except Exception as e:
             print(f"Error getting MySQL version: {e}")

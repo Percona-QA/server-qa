@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sys
 
 import pytest
 from test_helper import CORE_FILE_OPT, MYSQL_PORT, BackupTestHelper
@@ -34,7 +35,8 @@ RESTORE_PORT = MYSQL_PORT + 51
 def test_helper(request):
     """Create a test helper instance for each test."""
     test_name = request.node.name if hasattr(request, "node") else None
-    helper = BackupTestHelper(test_name=test_name)
+    # Option tests create their own schema; do not require pstress/sysbench.
+    helper = BackupTestHelper(test_name=test_name, load_tool="none")
     helper.server_version, helper.server_version_normalized = helper.get_mysql_version()
     helper.xtrabackup_version, helper.xtrabackup_version_normalized = helper.get_xtrabackup_version()
     yield helper
@@ -584,4 +586,8 @@ if __name__ == "__main__":
     if selected:
         pytest_args.extend(["-k", " or ".join(selected)])
 
-    pytest.main(pytest_args)
+    # Propagate pytest's exit code so `python pxb_option_tests.py <suite>`
+    # fails in CI when tests fail (pytest.main() only returns the code).
+    # Other PXB suites still call pytest.main() without sys.exit — same fix
+    # applies there when those __main__ entry points are cleaned up.
+    sys.exit(pytest.main(pytest_args))

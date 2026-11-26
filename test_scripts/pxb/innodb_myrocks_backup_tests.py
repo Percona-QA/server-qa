@@ -1708,7 +1708,7 @@ def test_incremental_prepare_largest_delta_first(test_helper):
 # PXB-3915 (vector tables in backup/prepare) shipped in 9.7.2-3.
 VEC_FIXED_IN_PXB_3915 = {"9.7": "9.7.2-3"}
 # PS-12024 (MLOG_INDEX_LOAD for the HNSW aux table; the fix for PXB-3932).
-VEC_PS_12024_FIXED_IN = (9, 7, 4)
+VEC_PS_12024_FIXED_IN = (9, 7, 4, 4)
 
 VEC_RESTORE_PORT = MYSQL_PORT + 61
 VEC_SCHEMA = "vec"
@@ -1789,14 +1789,33 @@ def _vec_require_index(test_helper) -> None:
         pytest.skip(f"server has no HNSW vector index support: {result.stderr.strip()[:200]}")
 
 
+def _vec_server_version_parts(test_helper) -> tuple[int, ...]:
+    """``(major, minor, patch[, release])`` from ``server_version`` (e.g. ``9.7.4-4``)."""
+    m = re.match(
+        r"^(\d+)\.(\d+)\.(\d+)(?:-(\d+))?",
+        test_helper.server_version or "",
+    )
+    if not m:
+        return (0,)
+    parts = [int(m.group(1)), int(m.group(2)), int(m.group(3))]
+    if m.group(4) is not None:
+        parts.append(int(m.group(4)))
+    return tuple(parts)
+
+
 def _vec_server_has_ps12024(test_helper) -> bool:
     """Whether the server line has PS-12024 (MLOG_INDEX_LOAD for the HNSW aux table)."""
     if test_helper.server_type != "PS":
         return False
-    parts = tuple(int(p) for p in re.findall(r"\d+", test_helper.server_version)[:3])
-    if parts[:2] == VEC_PS_12024_FIXED_IN[:2]:
-        return parts >= VEC_PS_12024_FIXED_IN
-    return parts[:2] > VEC_PS_12024_FIXED_IN[:2]
+    parts = _vec_server_version_parts(test_helper)
+    fixed = VEC_PS_12024_FIXED_IN
+    # Pad so (9,7,4) compares below (9,7,4,4); longer tuples compare as-is.
+    n = max(len(parts), len(fixed))
+    parts_n = parts + (0,) * (n - len(parts))
+    fixed_n = fixed + (0,) * (n - len(fixed))
+    if parts_n[:2] == fixed_n[:2]:
+        return parts_n >= fixed_n
+    return parts_n[:2] > fixed_n[:2]
 
 
 def _vec_xfail_without_ps12024(request, test_helper) -> None:
@@ -1980,13 +1999,78 @@ def test_vector_index_built_between_backups(request, test_helper, page_tracking)
     _vec_restore_and_compare(test_helper, source)
 
 
+# Expected mysql --force noise from racing ADD/DROP KEY; anything else is fatal.
+_VEC_EXPECTED_SQL_ERR = re.compile(
+    r"Can't DROP|Duplicate key name|check that (column/key )?exists",
+    re.IGNORECASE,
+)
+
+
+def _vec_unexpected_sql_errors(stderr: str) -> list[str]:
+    """ERROR lines from a --force batch that are not expected ADD/DROP races."""
+    unexpected = []
+    for line in (stderr or "").splitlines():
+        if "ERROR" not in line:
+            continue
+        if _VEC_EXPECTED_SQL_ERR.search(line):
+            continue
+        unexpected.append(line)
+    return unexpected
+
+
 class _VecWorkload(threading.Thread):
     """Vector DML plus vector index DDL (add / drop / replace / rebuild) in a loop,
     through the mysql client in --force batches, until stopped."""
 
     def __init__(self, test_helper, seed: int):
         super().__init__(daemon=True)
-        self.th, self.rng, self.stop_event, self.batches = test_helper, random.Random(seed), threading.Event(), 0
+        self.th = test_helper
+        self.rng = random.Random(seed)
+        self.stop_event = threading.Event()
+        self.batches = 0
+        self.ok_batches = 0
+        self.index_builds = 0
+        self.errors: list[str] = []
+        self._mysql_proc: subprocess.Popen | None = None
+        self._proc_lock = threading.Lock()
+
+    def kill_mysql(self) -> None:
+        """Terminate the active mysql client, if any, so join can finish."""
+        with self._proc_lock:
+            proc = self._mysql_proc
+        if proc is None or proc.poll() is not None:
+            return
+        proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+    def _run_batch(self, sql: str) -> subprocess.CompletedProcess:
+        cmd = [
+            os.path.join(self.th.mysqldir, "bin/mysql"),
+            "-uroot",
+            f"-S{self.th.socket_path}",
+            "-N",
+            "-B",
+            "--force",
+        ]
+        with self._proc_lock:
+            self._mysql_proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            proc = self._mysql_proc
+        try:
+            stdout, stderr = proc.communicate(input=sql)
+            return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+        finally:
+            with self._proc_lock:
+                if self._mysql_proc is proc:
+                    self._mysql_proc = None
 
     def run(self) -> None:
         while not self.stop_event.is_set():
@@ -1996,15 +2080,28 @@ class _VecWorkload(threading.Thread):
                 sql += f"UPDATE {VEC_SCHEMA}.{table} SET v = STRING_TO_VECTOR('{_vec_literal(self.rng, dim)}') ORDER BY RAND() LIMIT 5;\n"
                 sql += f"DELETE FROM {VEC_SCHEMA}.{table} ORDER BY RAND() LIMIT 3;\n"
             ddl = self.batches % 6
+            index_ddl = False
             if ddl == 1:
                 sql += _vec_add_index_sql("t_plain")
+                index_ddl = True
             elif ddl == 3:
                 sql += f"ALTER TABLE {VEC_SCHEMA}.t_plain DROP KEY vk;\n"
             elif ddl == 4:
                 sql += f"OPTIMIZE TABLE {VEC_SCHEMA}.t_cos;\n"
             elif ddl == 5:
                 sql += f"ALTER TABLE {VEC_SCHEMA}.t_euc DROP KEY vk, ADD VECTOR KEY vk (v) TYPE hnsw ({VEC_TABLES['t_euc'][1]});\n"
-            _vec_mysql(self.th, self.th.socket_path, sql, force=True)
+                index_ddl = True
+            result = self._run_batch(sql)
+            stderr = result.stderr or ""
+            unexpected = _vec_unexpected_sql_errors(stderr)
+            if unexpected:
+                self.errors.extend(unexpected)
+            else:
+                self.ok_batches += 1
+                # Index-build DDL only counts when the ALTER had no ERROR (a
+                # failed DROP in the same multi-clause ALTER aborts the ADD).
+                if index_ddl and "ERROR" not in stderr:
+                    self.index_builds += 1
             self.batches += 1
 
 
@@ -2036,7 +2133,16 @@ def test_vector_backup_under_workload(request, test_helper, mode):
     finally:
         workload.stop_event.set()
         workload.join(timeout=300)
-    assert workload.batches > 0, "the vector workload never ran"
+        if workload.is_alive():
+            workload.kill_mysql()
+            workload.join(timeout=30)
+        if workload.is_alive():
+            pytest.fail("vector workload did not stop after mysql kill")
+    assert not workload.errors, (
+        f"unexpected SQL errors in vector workload: {workload.errors[:5]}"
+    )
+    assert workload.ok_batches > 0, "the vector workload never completed a successful batch"
+    assert workload.index_builds > 0, "the vector workload never built a vector index"
 
     final = os.path.join(test_helper.backup_dir, f"inc{len(incs) + 1}")
     _vec_backup(test_helper, final, "final_backup", [f"{base_opt}={incs[-1] if incs else full}", *extra])
